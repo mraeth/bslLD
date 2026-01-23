@@ -2,7 +2,7 @@
 
 Low-dimensional Backward Semi-Lagrangian solver for testing numerical methods.
 
-This package serves as a testing ground for numerical methods intended for [BSL6D](https://github.com/your-repo/BSL6D), providing a simplified 1D/2D configuration space with 2D velocity space implementation.
+This package serves as a testing ground for numerical methods intended for [BSL6D](https://gitlab.mpcdf.mpg.de/bsl6d/bsl6d), providing a simplified 1D/2D configuration space with 2D velocity space implementation.
 
 ## Features
 
