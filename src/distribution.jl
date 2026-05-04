@@ -1,8 +1,6 @@
 
 abstract type Distribution end
 
-
-
 struct DistributionGrid{DT,NX,NV,NXNV,ID}  <: Distribution
     data :: AbstractArray{DT,NXNV}
 end
@@ -42,11 +40,11 @@ end
 function compute_density(f :: DistributionGrid, grid::CartGrid)
     dim = Tuple(i for i=length(grid.xaxes)+1:length(grid.xaxes)+length(grid.vaxes))
     dv = prod(grid.delta[1+length(grid.xaxes):end])
-    return reshape(sum(f.data, dims =dim)*dv, Tuple([length(axes) for axes in grid.xaxes]))
+    return ScalarField(reshape(sum(f.data, dims =dim)*dv, Tuple([length(axes) for axes in grid.xaxes])))
 end
 
 function compute_density(f :: DistributionGrid, grid::PolarGrid)
     dim = Tuple(i for i=length(grid.xaxes)+1:length(grid.xaxes)+length(grid.vaxes))
     dv = prod(grid.delta[1+length(grid.xaxes):end])
-    return reshape(sum(f.data.* reshape(grid.vaxes[1], 1, :, 1), dims =dim)*dv, Tuple([length(axes) for axes in grid.xaxes]))
+    return ScalarField(reshape(sum(f.data.* reshape(grid.vaxes[1], 1, :, 1), dims =dim)*dv, Tuple([length(axes) for axes in grid.xaxes])))
 end

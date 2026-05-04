@@ -8,23 +8,42 @@ function advect1DFourier!(data::AbstractArray{Float64,1}, shift::Float64, grid::
     data .= real(ifft(fft(data) .* exp.(-sshift .* im)))
 end
 
-
-
-function advectX!(f::DistributionGrid1d1v, grid::Grid)
-    dt = grid.dt
-    ff = fft(f.data,1)
-    sshift =dt / grid.delta[1]*2pi  .* outer_product([fftfreq(size(f.data)[1]),grid.vaxes[1]])
-    f.data .= real(ifft(ff.*exp.(-sshift .* im),1))
+@kernel function ka_advect_x_1d1v_phase!(ff, kx, vaxis, dt, dx)
+    ix, iv = @index(Global, NTuple)
+    if ix <= size(ff, 1) && iv <= size(ff, 2)
+        phase = -(dt / dx) * kx[ix] * vaxis[iv]
+        @inbounds ff[ix, iv] *= cis(phase)
+    end
 end
 
-function advectV!(f::DistributionGrid1d1v, grid::Grid, e::VectorField, advector=advect1DFourier!)
-    dt = grid.dt
-    ff = fft(f.data,2)
-    for ix = 1:size(ff)[1]
-        sshift = dt * e.data[1][ix] / grid.delta[2]*2pi  .* fftfreq(size(f.data)[2])
-         @. ff[ix,:]*=exp.(-sshift .* im)
+@kernel function ka_advect_v_1d1v_phase!(ff, ex, kv, dt, dv)
+    ix, ik = @index(Global, NTuple)
+    if ix <= size(ff, 1) && ik <= size(ff, 2)
+        phase = -(dt / dv) * ex[ix] * kv[ik]
+        @inbounds ff[ix, ik] *= cis(phase)
     end
-    f.data .= real(ifft(ff,2))
+end
+
+function advectX!(f::DistributionGrid1d1v, grid::Grid)
+    ff = fft(f.data, 1)
+    kx = 2pi .* fftfreq(size(f.data, 1))
+    backend = KernelAbstractions.get_backend(ff)
+    kernel! = ka_advect_x_1d1v_phase!(backend)
+    kernel!(ff, kx, grid.vaxes[1], grid.dt, grid.delta[1]; ndrange=size(ff))
+    KernelAbstractions.synchronize(backend)
+    f.data .= real(ifft(ff, 1))
+    return nothing
+end
+
+function advectV!(f::DistributionGrid1d1v, grid::Grid, e::VectorField)
+    ff = fft(f.data, 2)
+    kv = 2pi .* fftfreq(size(f.data, 2))
+    backend = KernelAbstractions.get_backend(ff)
+    kernel! = ka_advect_v_1d1v_phase!(backend)
+    kernel!(ff, e.data[1], kv, grid.dt, grid.delta[2]; ndrange=size(ff))
+    KernelAbstractions.synchronize(backend)
+    f.data .= real(ifft(ff, 2))
+    return nothing
 end
 
 

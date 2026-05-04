@@ -1,6 +1,7 @@
 module bslLD
 
-using FFTW,Plots, Dierckx, Base.Threads, StaticArrays
+using AbstractFFTs, FFTW, KernelAbstractions
+using Plots, Dierckx, Base.Threads, StaticArrays
 
 include("grid.jl")
 include("distribution.jl")

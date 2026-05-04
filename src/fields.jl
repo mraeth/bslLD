@@ -6,12 +6,40 @@ struct ScalarField{DT,N}
     end
 end
 
+import Base: +, *
+
 struct VectorField{DT,N}
     data :: Vector{Array{DT,N}}
 
     function VectorField(data::Vector{Array{DT,N}}) where {DT,N}
         return new{DT,N}(data)
     end
+end
+
+function +(a::ScalarField{DT,N}, b::ScalarField{DT,N}) where {DT,N}
+    axes(a.data) == axes(b.data) || throw(DimensionMismatch("ScalarField axes must match for addition"))
+    return ScalarField(a.data .+ b.data)
+end
+
+function +(a::ScalarField{DT,N}, b::Number) where {DT,N}
+    return ScalarField(a.data .+ b)
+end
+
+function +(a::Number, b::ScalarField{DT,N}) where {DT,N}
+    return ScalarField(a .+ b.data)
+end
+
+function *(a::ScalarField{DT,N}, b::ScalarField{DT,N}) where {DT,N}
+    axes(a.data) == axes(b.data) || throw(DimensionMismatch("ScalarField axes must match for multiplication"))
+    return ScalarField(a.data .* b.data)
+end
+
+function *(a::ScalarField{DT,N}, b::Number) where {DT,N}
+    return ScalarField(a.data .* b)
+end
+
+function *(a::Number, b::ScalarField{DT,N}) where {DT,N}
+    return ScalarField(a .* b.data)
 end
 
 function empty_vectorfield(grid::Grid)
@@ -38,7 +66,7 @@ function poisson(rho::ScalarField{T,N}, grid::Grid) where {T,N}
 end
 
 
-function adiabatic(rho::ScalarField{T,N}) where {T,N}
+function adiabatic(rho::ScalarField{T,N}, grid::Grid) where {T,N}
     return ScalarField(copy(rho.data))
 end
 
