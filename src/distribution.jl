@@ -1,13 +1,13 @@
 
 abstract type Distribution end
 
-struct DistributionGrid{DT,NX,NV,NXNV,ID}  <: Distribution
-    data :: AbstractArray{DT,NXNV}
+struct DistributionGrid{DT,NX,NV,NXNV,ID,AT<:AbstractArray{DT,NXNV}}  <: Distribution
+    data :: AT
 end
 
-const DistributionGrid1d1v{T} = DistributionGrid{T,1,1,2}
-const DistributionGrid1d2v{T} = DistributionGrid{T,1,2,3}
-const DistributionGrid2d2v{T} = DistributionGrid{T,2,2,4}
+const DistributionGrid1d1v{T,ID,AT} = DistributionGrid{T,1,1,2,ID,AT}
+const DistributionGrid1d2v{T,ID,AT} = DistributionGrid{T,1,2,3,ID,AT}
+const DistributionGrid2d2v{T,ID,AT} = DistributionGrid{T,2,2,4,ID,AT}
 
 
 
@@ -22,7 +22,15 @@ if length(dv)==2
     dv[2].=initFuncv1.(grid.vaxes[2])
 end
 da = vcat(dx,dv)
-return DistributionGrid{Float64,length(grid.xaxes),length(grid.vaxes),length(grid.xaxes)+length(grid.vaxes), Cart }(outer_product(da))
+data = bslLD.backend_array(outer_product(da))
+return DistributionGrid{
+    Float64,
+    length(grid.xaxes),
+    length(grid.vaxes),
+    length(grid.xaxes) + length(grid.vaxes),
+    Cart,
+    typeof(data)
+}(data)
 end
 
 
@@ -34,7 +42,15 @@ fct_v(v) = initFuncv(v)
 dx = map(x->fct_sp.(x), grid.xaxes)
 dv = [fct_v.(grid.vaxes[1]), sin.(grid.vaxes[2])]
 da = vcat(dx,dv)
-return DistributionGrid{Float64,length(grid.xaxes),length(grid.vaxes),length(grid.xaxes)+length(grid.vaxes), Polar }(outer_product(da))
+data = bslLD.backend_array(outer_product(da))
+return DistributionGrid{
+    Float64,
+    length(grid.xaxes),
+    length(grid.vaxes),
+    length(grid.xaxes) + length(grid.vaxes),
+    Polar,
+    typeof(data)
+}(data)
 end
 
 function compute_density(f :: DistributionGrid, grid::CartGrid)

@@ -24,42 +24,113 @@ end
     end
 end
 
-function advectX!(f::DistributionGrid1d1v, grid::Grid)
+function advectX!(f::DistributionGrid{Float64,1,1,2}, grid::Grid)
     ff = fft(f.data, 1)
-    kx = 2pi .* fftfreq(size(f.data, 1))
-    backend = KernelAbstractions.get_backend(ff)
-    kernel! = ka_advect_x_1d1v_phase!(backend)
-    kernel!(ff, kx, grid.vaxes[1], grid.dt, grid.delta[1]; ndrange=size(ff))
-    KernelAbstractions.synchronize(backend)
+    kx = similar(ff, Float64, size(f.data, 1))
+    copyto!(kx, collect(2pi .* fftfreq(size(f.data, 1))))
+    vaxis = similar(ff, Float64, length(grid.vaxes[1]))
+    copyto!(vaxis, grid.vaxes[1])
+    exec = bslLD.backend()
+    kernel! = ka_advect_x_1d1v_phase!(exec)
+    kernel!(ff, kx, vaxis, grid.dt, grid.delta[1]; ndrange=size(ff))
+    KernelAbstractions.synchronize(exec)
     f.data .= real(ifft(ff, 1))
     return nothing
 end
 
-function advectV!(f::DistributionGrid1d1v, grid::Grid, e::VectorField)
+function advectV!(f::DistributionGrid{Float64,1,1,2}, grid::Grid, e::VectorField)
     ff = fft(f.data, 2)
-    kv = 2pi .* fftfreq(size(f.data, 2))
-    backend = KernelAbstractions.get_backend(ff)
-    kernel! = ka_advect_v_1d1v_phase!(backend)
-    kernel!(ff, e.data[1], kv, grid.dt, grid.delta[2]; ndrange=size(ff))
-    KernelAbstractions.synchronize(backend)
+    kv = similar(ff, Float64, size(f.data, 2))
+    copyto!(kv, collect(2pi .* fftfreq(size(f.data, 2))))
+    exec = bslLD.backend()
+    kernel! = ka_advect_v_1d1v_phase!(exec)
+    kernel!(ff, e[1].data, kv, grid.dt, grid.delta[2]; ndrange=size(ff))
+    KernelAbstractions.synchronize(exec)
     f.data .= real(ifft(ff, 2))
     return nothing
 end
 
 
-function advectX!(f::DistributionGrid1d2v{DT,Cart}, grid::Grid, advector=advect1DFourier!) where DT
-    dt = grid.dt
-    for iv1 = 1:size(f.data)[2]
-        for iv2 = 1:size(f.data)[3] 
-            phi = grid.b0*grid.time[grid.index[1]]
-            xdisp = R(phi)[1,1]* grid.vaxes[1][iv1] +  R(phi)[1,2]*  grid.vaxes[2][iv2]
-            fshift =  dt * xdisp/ grid.delta[1]
-            advector(view(f.data, :,iv1, iv2), fshift, grid)
-        end
+@kernel function ka_advect_x_1d2v_phase!(ff, kx, vaxis1, vaxis2, phi, dt, dx)
+    ix, iv1, iv2 = @index(Global, NTuple)
+    if ix <= size(ff, 1) && iv1 <= size(ff, 2) && iv2 <= size(ff, 3)
+        # Rotation matrix R(phi)[1,1]*v1 + R(phi)[1,2]*v2
+        xdisp = cos(phi) * vaxis1[iv1] + (-sin(phi)) * vaxis2[iv2]
+        phase = -(dt / dx) * kx[ix] * xdisp
+        @inbounds ff[ix, iv1, iv2] *= cis(phase)
     end
 end
 
+@kernel function ka_advect_v1_1d2v_phase!(ff, ex1_rotated, kv1, dt, dv1)
+    ix, ik, iv2 = @index(Global, NTuple)
+    if ix <= size(ff, 1) && ik <= size(ff, 2) && iv2 <= size(ff, 3)
+        phase = -(dt / dv1) * ex1_rotated[ix] * kv1[ik]
+        @inbounds ff[ix, ik, iv2] *= cis(phase)
+    end
+end
 
+@kernel function ka_advect_v2_1d2v_phase!(ff, ex2_rotated, kv2, dt, dv2)
+    ix, iv1, ik = @index(Global, NTuple)
+    if ix <= size(ff, 1) && iv1 <= size(ff, 2) && ik <= size(ff, 3)
+        phase = -(dt / dv2) * ex2_rotated[ix] * kv2[ik]
+        @inbounds ff[ix, iv1, ik] *= cis(phase)
+    end
+end
+
+function advectX!(f::DistributionGrid1d2v{DT,Cart}, grid::Grid) where DT
+    # FFT along x dimension (dim 1)
+    ff = fft(f.data, 1)
+
+    # Build kx frequencies on the appropriate backend array
+    kx = similar(ff, Float64, size(f.data, 1))
+    copyto!(kx, collect(2pi .* fftfreq(size(f.data, 1))))
+
+    # Build velocity axes on the appropriate backend array
+    vaxis1 = similar(ff, Float64, length(grid.vaxes[1]))
+    copyto!(vaxis1, grid.vaxes[1])
+
+    vaxis2 = similar(ff, Float64, length(grid.vaxes[2]))
+    copyto!(vaxis2, grid.vaxes[2])
+
+    # Current rotation angle
+    phi = grid.b0 * grid.time[grid.index[1]]
+
+    exec = bslLD.backend()
+    kernel! = ka_advect_x_1d2v_phase!(exec)
+    kernel!(ff, kx, vaxis1, vaxis2, phi, grid.dt, grid.delta[1]; ndrange=size(ff))
+    KernelAbstractions.synchronize(exec)
+
+    f.data .= real(ifft(ff, 1))
+    return nothing
+end
+
+
+function advectX!(f::DistributionGrid1d2v{DT,Cart}, grid::Grid) where DT
+    # FFT along x dimension (dim 1)
+    ff = fft(f.data, 1)
+
+    # Build kx frequencies on the appropriate backend array
+    kx = similar(ff, Float64, size(f.data, 1))
+    copyto!(kx, collect(2pi .* fftfreq(size(f.data, 1))))
+
+    # Build velocity axes on the appropriate backend array
+    vaxis1 = similar(ff, Float64, length(grid.vaxes[1]))
+    copyto!(vaxis1, grid.vaxes[1])
+
+    vaxis2 = similar(ff, Float64, length(grid.vaxes[2]))
+    copyto!(vaxis2, grid.vaxes[2])
+
+    # Current rotation angle
+    phi = grid.b0 * grid.time[grid.index[1]]
+
+    exec = bslLD.backend()
+    kernel! = ka_advect_x_1d2v_phase!(exec)
+    kernel!(ff, kx, vaxis1, vaxis2, phi, grid.dt, grid.delta[1]; ndrange=size(ff))
+    KernelAbstractions.synchronize(exec)
+
+    f.data .= real(ifft(ff, 1))
+    return nothing
+end
 
 function advectX!(f::DistributionGrid1d2v{DT,Polar}, grid::PolarGrid, advector=advect1DFourier!) where DT
     dt = grid.dt
@@ -72,27 +143,7 @@ function advectX!(f::DistributionGrid1d2v{DT,Polar}, grid::PolarGrid, advector=a
     end
 end
 
-function advectV!(f::DistributionGrid1d2v, grid::CartGrid, e::VectorField, advector=advect1DFourier!)
-    dt = grid.dt
 
-    phi = -grid.b0 * grid.time[grid.index[1]]
-    Rphi = R(phi)
-
-    for ix = 1:size(f.data)[1]
-        ex1 = e.data[1][ix] * Rphi[1,1] + e.data[2][ix] * Rphi[1,2]
-        ex2 = e.data[1][ix] * Rphi[2,1] + e.data[2][ix] * Rphi[2,2]
-
-        fshift = -dt * ex1 / grid.delta[2]
-        for iv2 = 1:size(f.data)[3]
-            advector(view(f.data, ix, :, iv2), fshift, grid)
-        end 
-        fshift = -dt * ex2 / grid.delta[3]
-
-        for iv1 = 1:size(f.data)[2]
-            advector(view(f.data, ix, iv1, :), fshift, grid)
-        end
-    end
-end
 
 
 @inline function displace_polar_velocity!(
@@ -127,8 +178,8 @@ function advectV!(f::DistributionGrid1d2v{DT,Polar}, grid::PolarGrid, e::VectorF
     dt = grid.dt
 
     @threads for ix in 1:nx
-        delta_vx = dt * e.data[1][ix]
-        delta_vy = dt * e.data[2][ix]
+        delta_vx = dt * e[1].data[ix]
+        delta_vy = dt * e[2].data[ix]
         
         # Transformation for advection in the rotating frame
         delta_mux = delta_vx * cos(grid.b0 * grid.time[grid.index[1]]) + delta_vy * sin(grid.b0 * grid.time[grid.index[1]])
