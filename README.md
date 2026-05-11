@@ -11,6 +11,8 @@ This package serves as a testing ground for numerical methods intended for [BSL6
 - **Advection methods**: Fourier-based and spline interpolation
 - **Field solvers**: FFT-based Poisson solver for electrostatic problems
 - **Parallelization**: Threaded velocity space advection
+- **Hardware abstraction**: Unified CPU/GPU execution with KernelAbstractions.jl
+- **GPU acceleration**: Support for CUDA-enabled GPUs with automatic fallback to CPU
 
 ## Installation
 
@@ -37,6 +39,14 @@ grid = bslLD.Grid([0.0, -6.0], [10.0, 6.0], [0.02, 0.1], 0.05, 2000, 1)
 initFuncv(v) = v^2 * exp(-v^2 / 2) / sqrt(2*pi)
 f = bslLD.Distribution(grid, 0.01, initFuncv=initFuncv)
 
+# Switch to GPU (if available)
+try
+    bslLD.use_cuda!()
+    println("Using GPU acceleration")
+catch
+    println("GPU not available, using CPU")
+end
+
 # Visualize
 using Plots
 heatmap(f.data[:, :]', c=:viridis)
@@ -58,6 +68,7 @@ bslLD/
 - Dierckx.jl - Spline interpolation
 - StaticArrays.jl - Performance optimization
 - Plots.jl - Visualization
+- CUDA.jl - GPU acceleration (optional)
 
 ## Related Projects
 
