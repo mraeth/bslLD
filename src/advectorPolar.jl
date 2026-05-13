@@ -1,5 +1,3 @@
-
-
 function advectX!(f::DistributionGrid1d2v{DT,Polar}, grid::PolarGrid, advector=advect1DFourier!) where DT
     dt = grid.dt
     for iv1 = 2 :size(f.data)[2]

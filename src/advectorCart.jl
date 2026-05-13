@@ -1,12 +1,90 @@
-function R(omega::Float64)
-    return [[cos(omega) ,sin(omega)] [-sin(omega), cos(omega)]]
+using StaticArrays
+
+function R(id::Int, φ::Real)
+    c, s = cos(φ), sin(φ)
+    if id == 1
+        return SMatrix{2,2}(1.0, 0.0, 0.0, c)
+    elseif id == 2
+        return SMatrix{2,2}(c, 0.0, 0.0, 1.0)
+    else  # id == 3
+        return SMatrix{2,2}(c, s, -s, c)
+    end
 end
 
+function R(φ::Real)
+    R(3, φ)
+end
 
 function advect1DFourier!(data::AbstractArray{Float64,1}, shift::Float64, grid::Grid)
     sshift = 2pi * shift .* fftfreq(size(data)[1])
     data .= real(ifft(fft(data) .* exp.(-sshift .* im)))
 end
+
+
+
+# Convert N-dimensional indices (1-based, column-major) to 1D index
+function index_nd_to_1d(indices::NTuple{N, Int}, sizes::NTuple{N, Int}) where N
+    i0 = 0
+    stride = 1
+    for k in 1:N
+        i0 += (indices[k] - 1) * stride
+        stride *= sizes[k]
+    end
+    return i0 + 1
+end
+
+# Convert 1D index (1-based) to N-dimensional indices (column-major)
+function index_1d_to_nd(i::Int, sizes::NTuple{N, Int}) where N
+    i0 = i - 1  # 0-based
+    indices = zeros(Int, N)
+    for k in 1:N
+        indices[k] = i0 % sizes[k] + 1
+        i0 = i0 ÷ sizes[k]
+    end
+    return Tuple(indices)
+end
+
+# Convert combined indices (X + Y) to 1D index
+function index_combined_to_1d(
+    indicesX::NTuple{M, Int},
+    indicesY::NTuple{N, Int},
+    sizesX::NTuple{M, Int},
+    sizesY::NTuple{N, Int}
+) where {M, N}
+    iX = index_nd_to_1d(indicesX, sizesX)
+    strideX = prod(sizesX)
+    iY = index_nd_to_1d(indicesY, sizesY)
+    return iX + (iY - 1) * strideX
+end
+
+# Convert 1D index back to (X, Y) indices
+function index_1d_to_combined(
+    i::Int,
+    sizesX::NTuple{M, Int},
+    sizesY::NTuple{N, Int}
+) where {M, N}
+    strideX = prod(sizesX)
+    iX = (i - 1) % strideX + 1
+    iY = (i - 1) ÷ strideX + 1
+    return (index_1d_to_nd(iX, sizesX), index_1d_to_nd(iY, sizesY))
+end
+
+
+@inline function compute_x_shift(grid::Grid, index::Int, dir::Int)
+    sx = Tuple(map(length, grid.xaxes))
+    sv = Tuple(map(length, grid.vaxes))
+
+    (ixs,ivs) = index_1d_to_combined(index,sx,sv)
+    
+    xdisp = 0.0
+    for dv in 1:length(ivs)
+            xdisp += grid.vaxes[dv][ivs[dv]] * R(1, grid.b0 * grid.time[grid.index[1]])[dir, dv]
+    end
+
+    return grid.dt * xdisp
+end
+
+
 
 @kernel function ka_advect_x_1d1v_phase!(ff, kx, vaxis, dt, dx)
     ix, iv = @index(Global, NTuple)
