@@ -5,18 +5,14 @@ authors = ["Mario Raeth <mario.raeth@ipp.mpg.de>"]
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
-CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 CubicSplines = "9c784101-8907-5a6d-9be6-98f00873c89b"
 DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"
 Dierckx = "39dd38d3-220a-591b-8e3c-4c3a8c710a94"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 FastGaussQuadrature = "442a2c76-b920-505d-bb47-c5924d526838"
-GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 GaussQuadrature = "d54b0c1a-921d-58e0-8e36-89d8069c0969"
 Interpolations = "a98d9a8b-a2ab-59e6-89dd-64a1c18fca59"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
-Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
-Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 Polynomials = "f27b6e38-b328-58d1-80ce-0feddd5e7a45"
 Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 ProgressBars = "49802e3a-d2f1-5c88-81d8-b72133a6f568"
@@ -24,6 +20,16 @@ Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 SpecialPolynomials = "a25cea48-d430-424a-8ee7-0d3ad3742e9e"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+
+[extensions]
+bslLDCUDAExt = "CUDA"
+bslLDPlotsExt = "Plots"
 
 [compat]
 AbstractFFTs = "1.5.0"

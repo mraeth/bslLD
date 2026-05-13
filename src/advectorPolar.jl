@@ -1,3 +1,12 @@
+
+function advect1DFourier!(data::AbstractArray{Float64,1}, shift::Float64, grid::Grid)
+    sshift = 2pi * shift .* fftfreq(size(data)[1])
+    data .= real(ifft(fft(data) .* exp.(-sshift .* im)))
+end
+
+
+
+
 function advectX!(f::DistributionGrid1d2v{DT,Polar}, grid::PolarGrid, advector=advect1DFourier!) where DT
     dt = grid.dt
     for iv1 = 2 :size(f.data)[2]

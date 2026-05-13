@@ -15,12 +15,6 @@ function R(φ::Real)
     R(3, φ)
 end
 
-function advect1DFourier!(data::AbstractArray{Float64,1}, shift::Float64, grid::Grid)
-    sshift = 2pi * shift .* fftfreq(size(data)[1])
-    data .= real(ifft(fft(data) .* exp.(-sshift .* im)))
-end
-
-
 
 # Convert N-dimensional indices (1-based, column-major) to 1D index
 function index_nd_to_1d(indices::NTuple{N, Int}, sizes::NTuple{N, Int}) where N

@@ -4,17 +4,12 @@ function use_cpu!()
 end
 
 function cuda_available()
-    try
-        return CUDA.functional()
-    catch
-        return false
-    end
+    return _cuda_available()
 end
 
 function use_cuda!()
     cuda_available() || error("CUDA is installed but no functional GPU is available")
-    set_execution_space!(; alloc=x -> CUDA.CuArray(x), exec=CUDA.CUDABackend())
-    return nothing
+    return _set_cuda_execution_space!()
 end
 
 function backend_copy(x::AbstractArray)
@@ -40,8 +35,6 @@ end
 function backend_synchronize!()
     exec = backend()
     KernelAbstractions.synchronize(exec)
-    if exec isa CUDA.CUDABackend
-        CUDA.synchronize()
-    end
+    _backend_synchronize!(exec)
     return nothing
 end
