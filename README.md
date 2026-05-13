@@ -11,8 +11,7 @@ This package serves as a testing ground for numerical methods intended for [BSL6
 - **Advection methods**: Fourier-based and spline interpolation
 - **Field solvers**: FFT-based Poisson solver for electrostatic problems
 - **Parallelization**: Threaded velocity space advection
-- **Hardware abstraction**: Unified CPU/GPU execution with KernelAbstractions.jl
-- **GPU acceleration**: Support for CUDA-enabled GPUs with automatic fallback to CPU
+- **GPU acceleration**: KernelAbstractions-based implementations for GPU computing
 
 ## Installation
 
@@ -61,6 +60,41 @@ bslLD/
 ├── notebooks/     # Development and exploration notebooks
 └── examples/      # Example scripts and demos
 ```
+
+## GPU Capabilities
+
+The bslLD package leverages KernelAbstractions.jl to provide GPU-compatible implementations of core algorithms. The advection functions in `advector.jl` utilize kernel-based parallelization that can run efficiently on both CPU and GPU backends.
+
+Key GPU-enabled features:
+- KernelAbstractions-based kernels for velocity space advection
+- GPU-compatible FFT operations
+- Parallel computation of distribution function updates
+- Automatic backend selection (CPU/GPU) through KernelAbstractions
+
+To run on GPU hardware, ensure you have appropriate GPU drivers and CUDA toolkit installed, then use:
+```julia
+using CUDA
+# All bslLD operations will automatically leverage GPU acceleration
+```
+
+## Backend Selection
+
+The package supports multiple execution backends through KernelAbstractions.jl:
+
+- **CPU backend** (default): Operations run on the CPU
+- **GPU backend**: Operations run on NVIDIA GPUs via CUDA
+
+Switch between backends by loading the appropriate package:
+```julia
+# For CPU execution (default)
+# No special import needed
+
+# For GPU execution
+using CUDA
+# All bslLD operations will automatically use GPU backend
+```
+
+The backend is automatically selected based on the loaded packages and available hardware. KernelAbstractions handles the backend dispatch transparently, allowing the same code to run efficiently on different hardware platforms.
 
 ## Dependencies
 
