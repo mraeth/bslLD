@@ -1,23 +1,22 @@
 using StaticArrays
 
-function R(id::Int, φ::Real)
-    c, s = cos(φ), sin(φ)
+
+function R(id::Int, phi::Real)
+    c, s = cos(phi), sin(phi)
     if id == 1
-        return SMatrix{2,2}(1.0, 0.0, 0.0, c)
+        # Rotation around X-axis
+        return SMatrix{3,3}(1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c)
     elseif id == 2
-        return SMatrix{2,2}(c, 0.0, 0.0, 1.0)
-    else  # id == 3
-        return SMatrix{2,2}(c, s, -s, c)
+        # Rotation around Y-axis
+        return SMatrix{3,3}(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c)
+    else
+        # Rotation around Z-axis
+        return SMatrix{3,3}(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0)
     end
 end
 
-function R(φ::Real)
-    R(3, φ)
-end
-
-
 # Convert N-dimensional indices (1-based, column-major) to 1D index
-function index_nd_to_1d(indices::NTuple{N, Int}, sizes::NTuple{N, Int}) where N
+function index_nd_to_1d(indices::NTuple{N, Int}, sizes::NTuple{N, Int}) where {N}
     i0 = 0
     stride = 1
     for k in 1:N
@@ -27,15 +26,18 @@ function index_nd_to_1d(indices::NTuple{N, Int}, sizes::NTuple{N, Int}) where N
     return i0 + 1
 end
 
+@inline function _index_1d_to_nd(i0::Int, sizes::NTuple{0, Int})
+    return ()
+end
+
+@inline function _index_1d_to_nd(i0::Int, sizes::NTuple{N, Int}) where {N}
+    idx = i0 % sizes[1] + 1
+    return (idx, _index_1d_to_nd(i0 ÷ sizes[1], Base.tail(sizes))...)
+end
+
 # Convert 1D index (1-based) to N-dimensional indices (column-major)
-function index_1d_to_nd(i::Int, sizes::NTuple{N, Int}) where N
-    i0 = i - 1  # 0-based
-    indices = zeros(Int, N)
-    for k in 1:N
-        indices[k] = i0 % sizes[k] + 1
-        i0 = i0 ÷ sizes[k]
-    end
-    return Tuple(indices)
+@inline function index_1d_to_nd(i::Int, sizes::NTuple{N, Int}) where {N}
+    return _index_1d_to_nd(i - 1, sizes)
 end
 
 # Convert combined indices (X + Y) to 1D index
@@ -43,7 +45,7 @@ function index_combined_to_1d(
     indicesX::NTuple{M, Int},
     indicesY::NTuple{N, Int},
     sizesX::NTuple{M, Int},
-    sizesY::NTuple{N, Int}
+    sizesY::NTuple{N, Int},
 ) where {M, N}
     iX = index_nd_to_1d(indicesX, sizesX)
     strideX = prod(sizesX)
@@ -52,10 +54,10 @@ function index_combined_to_1d(
 end
 
 # Convert 1D index back to (X, Y) indices
-function index_1d_to_combined(
+@inline function index_1d_to_combined(
     i::Int,
     sizesX::NTuple{M, Int},
-    sizesY::NTuple{N, Int}
+    sizesY::NTuple{N, Int},
 ) where {M, N}
     strideX = prod(sizesX)
     iX = (i - 1) % strideX + 1
@@ -63,160 +65,131 @@ function index_1d_to_combined(
     return (index_1d_to_nd(iX, sizesX), index_1d_to_nd(iY, sizesY))
 end
 
+backend_vector(values) = bslLD.backend_array(collect(values))
 
-@inline function compute_x_shift(grid::Grid, index::Int, dir::Int)
-    sx = Tuple(map(length, grid.xaxes))
-    sv = Tuple(map(length, grid.vaxes))
+struct XShiftContext{GT, KT, VAT, SXT, SVT, PT}
+    grid::GT
+    k::KT
+    vaxes::VAT
+    sizes_x::SXT
+    sizes_v::SVT
+    dir::Int
+    phi::PT
+end
 
-    (ixs,ivs) = index_1d_to_combined(index,sx,sv)
-    
-    xdisp = 0.0
+struct VShiftContext{GT, ET, KT, SXT, SVT, PT}
+    grid::GT
+    e_components::ET
+    k::KT
+    sizes_x::SXT
+    sizes_v::SVT
+    dir::Int
+    phi::PT
+end
+
+@inline function (ctx::XShiftContext)(index::Int)
+    return compute_x_phase(ctx, index)
+end
+
+@inline function (ctx::VShiftContext)(index::Int)
+    return compute_v_phase(ctx, index)
+end
+
+@inline function compute_x_phase(ctx::XShiftContext, index::Int)
+    ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
+
+    xdisp = zero(eltype(ctx.k))
+    rotation = R(ctx.grid.Bdir, ctx.phi)
     for dv in 1:length(ivs)
-            xdisp += grid.vaxes[dv][ivs[dv]] * R(1, grid.b0 * grid.time[grid.index[1]])[dir, dv]
+        xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
     end
 
-    return grid.dt * xdisp
+    return (ctx.grid.dt / ctx.grid.delta[ctx.dir]) * ctx.k[ixs[ctx.dir]] * xdisp
 end
 
+@inline function compute_v_phase(ctx::VShiftContext, index::Int)
+    ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
 
-
-@kernel function ka_advect_x_1d1v_phase!(ff, kx, vaxis, dt, dx)
-    ix, iv = @index(Global, NTuple)
-    if ix <= size(ff, 1) && iv <= size(ff, 2)
-        phase = -(dt / dx) * kx[ix] * vaxis[iv]
-        @inbounds ff[ix, iv] *= cis(phase)
+    delta_v = zero(eltype(ctx.k))
+    rotation = R(ctx.grid.Bdir, -ctx.phi)
+    for field_dir in 1:length(ctx.e_components)
+        delta_v += ctx.e_components[field_dir][ixs[1]] * rotation[ctx.dir, field_dir]
     end
+
+    return (ctx.grid.dt / ctx.grid.delta[length(ctx.sizes_x) + ctx.dir]) * ctx.k[ivs[ctx.dir]] * delta_v
 end
 
-@kernel function ka_advect_v_1d1v_phase!(ff, ex, kv, dt, dv)
-    ix, ik = @index(Global, NTuple)
-    if ix <= size(ff, 1) && ik <= size(ff, 2)
-        phase = -(dt / dv) * ex[ix] * kv[ik]
-        @inbounds ff[ix, ik] *= cis(phase)
-    end
-end
+@kernel function distribution_kernel!(ff, phase_context)
+    i = @index(Global)
 
-function advectX!(f::DistributionGrid{Float64,1,1,2}, grid::Grid)
-    ff = fft(f.data, 1)
-    kx = similar(ff, Float64, size(f.data, 1))
-    copyto!(kx, collect(2pi .* fftfreq(size(f.data, 1))))
-    vaxis = similar(ff, Float64, length(grid.vaxes[1]))
-    copyto!(vaxis, grid.vaxes[1])
-    exec = bslLD.backend()
-    kernel! = ka_advect_x_1d1v_phase!(exec)
-    kernel!(ff, kx, vaxis, grid.dt, grid.delta[1]; ndrange=size(ff))
-    KernelAbstractions.synchronize(exec)
-    f.data .= real(ifft(ff, 1))
-    return nothing
-end
-
-function advectV!(f::DistributionGrid{Float64,1,1,2}, grid::Grid, e::VectorField)
-    ff = fft(f.data, 2)
-    kv = similar(ff, Float64, size(f.data, 2))
-    copyto!(kv, collect(2pi .* fftfreq(size(f.data, 2))))
-    exec = bslLD.backend()
-    kernel! = ka_advect_v_1d1v_phase!(exec)
-    kernel!(ff, e[1].data, kv, grid.dt, grid.delta[2]; ndrange=size(ff))
-    KernelAbstractions.synchronize(exec)
-    f.data .= real(ifft(ff, 2))
-    return nothing
-end
-
-
-@kernel function ka_advect_x_1d2v_phase!(ff, kx, vaxis1, vaxis2, phi, dt, dx)
-    ix, iv1, iv2 = @index(Global, NTuple)
-    if ix <= size(ff, 1) && iv1 <= size(ff, 2) && iv2 <= size(ff, 3)
-        # Rotation matrix R(phi)[1,1]*v1 + R(phi)[1,2]*v2
-        xdisp = cos(phi) * vaxis1[iv1] + (-sin(phi)) * vaxis2[iv2]
-        phase = -(dt / dx) * kx[ix] * xdisp
-        @inbounds ff[ix, iv1, iv2] *= cis(phase)
+    if i <= length(ff)
+        phase = phase_context(i)
+        @inbounds ff[i] *= cis(-phase)
     end
 end
 
-@kernel function ka_advect_v1_1d2v_phase!(ff, ex1_rotated, kv1, dt, dv1)
-    ix, ik, iv2 = @index(Global, NTuple)
-    if ix <= size(ff, 1) && ik <= size(ff, 2) && iv2 <= size(ff, 3)
-        phase = -(dt / dv1) * ex1_rotated[ix] * kv1[ik]
-        @inbounds ff[ix, ik, iv2] *= cis(phase)
-    end
-end
-
-@kernel function ka_advect_v2_1d2v_phase!(ff, ex2_rotated, kv2, dt, dv2)
-    ix, iv1, ik = @index(Global, NTuple)
-    if ix <= size(ff, 1) && iv1 <= size(ff, 2) && ik <= size(ff, 3)
-        phase = -(dt / dv2) * ex2_rotated[ix] * kv2[ik]
-        @inbounds ff[ix, iv1, ik] *= cis(phase)
-    end
-end
-
-function advectX!(f::DistributionGrid{Float64,1,2,3}, grid::Grid) where DT
-    # FFT along x dimension (dim 1)
-    ff = fft(f.data, 1)
-
-    # Build kx frequencies on the appropriate backend array
-    kx = similar(ff, Float64, size(f.data, 1))
-    copyto!(kx, collect(2pi .* fftfreq(size(f.data, 1))))
-
-    # Build velocity axes on the appropriate backend array
-    vaxis1 = similar(ff, Float64, length(grid.vaxes[1]))
-    copyto!(vaxis1, grid.vaxes[1])
-
-    vaxis2 = similar(ff, Float64, length(grid.vaxes[2]))
-    copyto!(vaxis2, grid.vaxes[2])
-
-    # Current rotation angle
+function x_shift_context(grid::CartGrid, k, dir::Int)
+    sizes_x = Tuple(length.(grid.xaxes))
+    sizes_v = Tuple(length.(grid.vaxes))
+    vaxes = Tuple(backend_vector(axis) for axis in grid.vaxes)
     phi = grid.b0 * grid.time[grid.index[1]]
+    return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi)
+end
 
+function v_shift_context(grid::CartGrid, e::VectorField, k, dir::Int)
+    sizes_x = Tuple(length.(grid.xaxes))
+    sizes_v = Tuple(length.(grid.vaxes))
+    e_components = Tuple(component.data for component in e)
+    phi = grid.b0 * grid.time[grid.index[1]]
+    return VShiftContext(grid, e_components, k, sizes_x, sizes_v, dir, phi)
+end
+
+function fourier_wavenumbers(ff, n::Int)
+    k = similar(ff, Float64, n)
+    copyto!(k, collect(2pi .* fftfreq(n)))
+    return k
+end
+
+function advect_x_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX, NV, NXNV}
     exec = bslLD.backend()
-    kernel! = ka_advect_x_1d2v_phase!(exec)
-    kernel!(ff, kx, vaxis1, vaxis2, phi, grid.dt, grid.delta[1]; ndrange=size(ff))
-    KernelAbstractions.synchronize(exec)
+    kernel! = distribution_kernel!(exec)
 
-    f.data .= real(ifft(ff, 1))
+    for dir in 1:NX
+        fft_dim = dir
+
+        ff = fft(f.data, fft_dim)
+        kx = fourier_wavenumbers(ff, size(f.data, fft_dim))
+
+        kernel!(ff, x_shift_context(grid, kx, dir); ndrange=length(ff))
+        KernelAbstractions.synchronize(exec)
+
+        f.data .= real(ifft(ff, fft_dim))
+    end
     return nothing
 end
 
-function advectV!(f::DistributionGrid{Float64,1,2,3}, grid::Grid, e::VectorField) where DT
-    dt  = grid.dt
-    phi = -grid.b0 * grid.time[grid.index[1]]
-    Rphi = R(phi)   # 2×2 rotation matrix
-
+function advect_v_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField) where {NX, NV, NXNV}
     exec = bslLD.backend()
+    kernel! = distribution_kernel!(exec)
 
-    # --- Step 1: advect along v1 dimension (dim 2) ---
-    # FFT along v1
-    ff = fft(f.data, 2)
+    for dir in 1:NV
+        fft_dim = length(grid.xaxes) + dir
+        ff = fft(f.data, fft_dim)
+        kv = fourier_wavenumbers(ff, size(f.data, fft_dim))
 
-    # Rotated E-field component along v1: ex1_rot[ix] = R(-phi)[1,1]*e1[ix] + R(-phi)[1,2]*e2[ix]
-    ex1_rotated = similar(ff, Float64, size(f.data, 1))
-    copyto!(ex1_rotated,
-        Rphi[1,1] .* e[1].data)
+        kernel!(ff, v_shift_context(grid, e, kv, dir); ndrange=length(ff))
+        KernelAbstractions.synchronize(exec)
 
-    kv1 = similar(ff, Float64, size(f.data, 2))
-    copyto!(kv1, collect(2pi .* fftfreq(size(f.data, 2))))
+        f.data .= real(ifft(ff, fft_dim))
+    end
 
-    kernel! = ka_advect_v1_1d2v_phase!(exec)
-    kernel!(ff, ex1_rotated, kv1, dt, grid.delta[2]; ndrange=size(ff))
-    KernelAbstractions.synchronize(exec)
-
-    f.data .= real(ifft(ff, 2))
-
-    # --- Step 2: advect along v2 dimension (dim 3) ---
-    # FFT along v2
-    ff = fft(f.data, 3)
-
-    # Rotated E-field component along v2: ex2_rot[ix] = R(-phi)[2,1]*e1[ix] + R(-phi)[2,2]*e2[ix]
-    ex2_rotated = similar(ff, Float64, size(f.data, 1))
-    copyto!(ex2_rotated,
-        Rphi[2,1] .* e[1].data )
-
-    kv2 = similar(ff, Float64, size(f.data, 3))
-    copyto!(kv2, collect(2pi .* fftfreq(size(f.data, 3))))
-
-    kernel! = ka_advect_v2_1d2v_phase!(exec)
-    kernel!(ff, ex2_rotated, kv2, dt, grid.delta[3]; ndrange=size(ff))
-    KernelAbstractions.synchronize(exec)
-
-    f.data .= real(ifft(ff, 3))
     return nothing
+end
+
+function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX, NV, NXNV}
+    return advect_x_generic!(f, grid)
+end
+
+function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField) where {NX, NV, NXNV}
+    return advect_v_generic!(f, grid, e)
 end

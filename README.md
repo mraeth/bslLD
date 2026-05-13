@@ -11,7 +11,7 @@ This package serves as a testing ground for numerical methods intended for [BSL6
 - **Advection methods**: Fourier-based and spline interpolation
 - **Field solvers**: FFT-based Poisson solver for electrostatic problems
 - **Parallelization**: Threaded velocity space advection
-- **GPU acceleration**: KernelAbstractions-based implementations for GPU computing
+- **Optional GPU acceleration**: KernelAbstractions-based implementations for GPU computing
 
 ## Installation
 
@@ -26,7 +26,21 @@ Or add to your Julia environment:
 ] dev /path/to/bslLD
 ```
 
+Optional functionality is provided through weak dependencies:
+
+- `CUDA.jl` enables GPU execution
+- `Plots.jl` enables the plotting helper functions
+
+For example, in an environment where you want GPU support and plotting:
+
+```julia
+using Pkg
+Pkg.add(["CUDA", "Plots"])
+```
+
 ## Quick Start
+
+### CPU-only usage
 
 ```julia
 using bslLD
@@ -38,18 +52,40 @@ grid = bslLD.Grid([0.0, -6.0], [10.0, 6.0], [0.02, 0.1], 0.05, 2000, 1)
 initFuncv(v) = v^2 * exp(-v^2 / 2) / sqrt(2*pi)
 f = bslLD.Distribution(grid, 0.01, initFuncv=initFuncv)
 
-# Switch to GPU (if available)
-try
-    bslLD.use_cuda!()
-    println("Using GPU acceleration")
-catch
-    println("GPU not available, using CPU")
-end
-
-# Visualize
-using Plots
-heatmap(f.data[:, :]', c=:viridis)
+# CPU is the default backend
+bslLD.use_cpu!()
 ```
+
+### GPU usage with CUDA
+
+`CUDA` is not loaded by `bslLD` automatically. To use GPU functionality, load `CUDA` in the Julia session and then switch backends:
+
+```julia
+using CUDA
+using bslLD
+
+grid = bslLD.Grid([0.0, -6.0], [10.0, 6.0], [0.02, 0.1], 0.05, 2000, 1)
+initFuncv(v) = v^2 * exp(-v^2 / 2) / sqrt(2*pi)
+f = bslLD.Distribution(grid, 0.01, initFuncv=initFuncv)
+
+bslLD.use_cuda!()
+println("Using GPU acceleration")
+```
+
+If `CUDA` has not been loaded, `bslLD.use_cuda!()` will throw an error explaining that `using CUDA` is required first.
+
+### Plotting
+
+Plotting support is also optional. Load `Plots` before calling `bslLD` plotting helpers:
+
+```julia
+using Plots
+using bslLD
+
+fig = bslLD.heatmap_fv(Array(f.data[:, :]), grid)
+```
+
+If `Plots` has not been loaded, `bslLD.heatmap_fv(...)` will throw an error explaining that `using Plots` is required first.
 
 ## Project Structure
 
@@ -63,18 +99,20 @@ bslLD/
 
 ## GPU Capabilities
 
-The bslLD package leverages KernelAbstractions.jl to provide GPU-compatible implementations of core algorithms. The advection functions in `advector.jl` utilize kernel-based parallelization that can run efficiently on both CPU and GPU backends.
+The bslLD package leverages KernelAbstractions.jl to provide GPU-compatible implementations of core algorithms. The advection functions in `src/advectorCart.jl` and `src/advectorPolar.jl` utilize kernel-based parallelization that can run efficiently on both CPU and GPU backends.
 
 Key GPU-enabled features:
 - KernelAbstractions-based kernels for velocity space advection
 - GPU-compatible FFT operations
 - Parallel computation of distribution function updates
-- Automatic backend selection (CPU/GPU) through KernelAbstractions
+- Explicit backend switching through `bslLD.use_cpu!()` and `bslLD.use_cuda!()`
 
 To run on GPU hardware, ensure you have appropriate GPU drivers and CUDA toolkit installed, then use:
 ```julia
 using CUDA
-# All bslLD operations will automatically leverage GPU acceleration
+using bslLD
+
+bslLD.use_cuda!()
 ```
 
 ## Backend Selection
@@ -82,27 +120,29 @@ using CUDA
 The package supports multiple execution backends through KernelAbstractions.jl:
 
 - **CPU backend** (default): Operations run on the CPU
-- **GPU backend**: Operations run on NVIDIA GPUs via CUDA
+- **GPU backend**: Operations run on NVIDIA GPUs via CUDA when `CUDA.jl` is loaded
 
-Switch between backends by loading the appropriate package:
+Switch between backends explicitly:
 ```julia
-# For CPU execution (default)
-# No special import needed
+using bslLD
 
-# For GPU execution
+# CPU execution
+bslLD.use_cpu!()
+
+# GPU execution
 using CUDA
-# All bslLD operations will automatically use GPU backend
+bslLD.use_cuda!()
 ```
 
-The backend is automatically selected based on the loaded packages and available hardware. KernelAbstractions handles the backend dispatch transparently, allowing the same code to run efficiently on different hardware platforms.
+The package does not switch to CUDA automatically. The CUDA extension is only available once `CUDA.jl` has been loaded in the current Julia session.
 
 ## Dependencies
 
 - FFTW.jl - Fast Fourier transforms
 - Dierckx.jl - Spline interpolation
 - StaticArrays.jl - Performance optimization
-- Plots.jl - Visualization
-- CUDA.jl - GPU acceleration (optional)
+- Plots.jl - Optional plotting support
+- CUDA.jl - Optional GPU acceleration
 
 ## Related Projects
 
