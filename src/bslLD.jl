@@ -59,6 +59,8 @@ include("grid.jl")
 include("distribution.jl")
 include("fields.jl")
 include("advectorCart.jl")
+include("differential_operators.jl")
+include("maxwell.jl")
 include("advectorPolar.jl")
 
 greet() = print("Hello World!")

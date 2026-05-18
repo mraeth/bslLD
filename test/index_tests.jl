@@ -25,4 +25,6 @@ include("../src/advectorCart.jl")
     @test index_nd_to_1d((2, 3, 4), (2, 3, 4)) == 24
     @test index_1d_to_nd(1, (2, 3, 4)) == (1, 1, 1)
     @test index_1d_to_nd(24, (2, 3, 4)) == (2, 3, 4)
+    
+    println("✓ All index operations tests passed")
 end
