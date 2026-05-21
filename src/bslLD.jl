@@ -62,6 +62,7 @@ include("advectorCart.jl")
 include("differential_operators.jl")
 include("maxwell.jl")
 include("advectorPolar.jl")
+include("solvers.jl")
 
 greet() = print("Hello World!")
 
