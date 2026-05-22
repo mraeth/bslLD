@@ -1,6 +1,6 @@
 module bslLD
 
-using AbstractFFTs, FFTW, KernelAbstractions
+using AbstractFFTs, Adapt, FFTW, KernelAbstractions
 using Dierckx, Base.Threads, StaticArrays
 
 const DEFAULT_ALLOCATOR = Ref{Function}(identity)

@@ -4,6 +4,8 @@ struct DifferentiateContext{KT, ST}
     dir::Int
 end
 
+Adapt.@adapt_structure DifferentiateContext
+
 @inline function (ctx::DifferentiateContext)(index::Int)
     return compute_derivative_multiplier(ctx, index)
 end

@@ -1,5 +1,7 @@
 cartesian_test_cases() = ((1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (3, 1))
 
+all_axes(grid) = (grid.xaxes..., grid.vaxes...)
+
 function cartesian_grid(nx::Int, nv::Int)
     eta_min = vcat(fill(0.0, nx), fill(-1.5, nv))
     eta_max = vcat(fill(2pi, nx), fill(1.5, nv))
@@ -10,7 +12,7 @@ end
 function advection_seed_data(grid)
     nx = length(grid.xaxes)
     nv = length(grid.vaxes)
-    dims = Tuple(length.(vcat(grid.xaxes, grid.vaxes)))
+    dims = Tuple(length.(all_axes(grid)))
 
     return Float64[
         sum(0.1 * dir * sin(2pi * (idx[dir] - 1) / dims[dir]) for dir in 1:nx) +
@@ -22,7 +24,7 @@ end
 function expected_after_advect_x(grid)
     nx = length(grid.xaxes)
     nv = length(grid.vaxes)
-    dims = Tuple(length.(vcat(grid.xaxes, grid.vaxes)))
+    dims = Tuple(length.(all_axes(grid)))
     expected = Array{Float64}(undef, dims...)
 
     for idx in CartesianIndices(expected)
@@ -54,7 +56,7 @@ end
 function expected_after_advect_v(grid, e_field)
     nx = length(grid.xaxes)
     nv = length(grid.vaxes)
-    dims = Tuple(length.(vcat(grid.xaxes, grid.vaxes)))
+    dims = Tuple(length.(all_axes(grid)))
     field_strengths = [component.data[begin] for component in e_field]
     expected = Array{Float64}(undef, dims...)
 
@@ -88,7 +90,7 @@ end
                 initial_mass_x = sum(f_x.data)
                 bslLD.advectX!(f_x, grid)
 
-                @test size(f_x.data) == Tuple(length.(vcat(grid.xaxes, grid.vaxes)))
+                @test size(f_x.data) == Tuple(length.(all_axes(grid)))
                 @test all(isfinite, f_x.data)
                 @test maximum(abs.(f_x.data .- expected_x)) < 1e-10
                 @test abs(sum(f_x.data) - initial_mass_x) < 1e-10 * max(abs(initial_mass_x), 1.0)
@@ -100,7 +102,7 @@ end
                 initial_mass_v = sum(f_v.data)
                 bslLD.advectV!(f_v, grid, e_field)
 
-                @test size(f_v.data) == Tuple(length.(vcat(grid.xaxes, grid.vaxes)))
+                @test size(f_v.data) == Tuple(length.(all_axes(grid)))
                 @test all(isfinite, f_v.data)
                 @test maximum(abs.(f_v.data .- expected_v)) < 1e-10
                 @test abs(sum(f_v.data) - initial_mass_v) < 1e-10 * max(abs(initial_mass_v), 1.0)

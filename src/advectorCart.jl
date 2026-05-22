@@ -87,6 +87,9 @@ struct VShiftContext{GT, ET, KT, SXT, SVT, PT}
     phi::PT
 end
 
+Adapt.@adapt_structure XShiftContext
+Adapt.@adapt_structure VShiftContext
+
 @inline function (ctx::XShiftContext)(index::Int)
     return compute_x_phase(ctx, index)
 end

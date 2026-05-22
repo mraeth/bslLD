@@ -16,8 +16,8 @@ function Distribution(grid::CartGrid, epsilon;
     initFuncv = (v-> exp(-v^2 / 2) / sqrt(2*pi)), initFuncv1 = initFuncv)
 fct_sp(x) = initFuncx(x)
 fct_v(v) = initFuncv(v)
-dx = map(x->fct_sp.(x), grid.xaxes)
-dv = map(x->fct_v.(x), grid.vaxes)
+dx = [fct_sp.(x) for x in grid.xaxes]
+dv = [fct_v.(x) for x in grid.vaxes]
 if length(dv)==2
     dv[2].=initFuncv1.(grid.vaxes[2])
 end
@@ -39,7 +39,7 @@ function Distribution(grid::PolarGrid, epsilon;
     initFuncv = (v-> exp(-v^2 / 2) / sqrt(2*pi)))
 fct_sp(x) = initFuncx(x)
 fct_v(v) = initFuncv(v)
-dx = map(x->fct_sp.(x), grid.xaxes)
+dx = [fct_sp.(x) for x in grid.xaxes]
 dv = [fct_v.(grid.vaxes[1]), sin.(grid.vaxes[2])]
 da = vcat(dx,dv)
 data = bslLD.backend_array(outer_product(da))

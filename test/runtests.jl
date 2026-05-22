@@ -8,4 +8,5 @@ using bslLD
     include("differential_operators_test.jl")
     include("solvers_test.jl")
     include("maxwell_test.jl")
+    include("gpu_test.jl")
 end
