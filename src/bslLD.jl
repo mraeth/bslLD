@@ -5,6 +5,8 @@ using Dierckx, Base.Threads, StaticArrays
 
 const DEFAULT_ALLOCATOR = Ref{Function}(identity)
 const DEFAULT_BACKEND = Ref{Any}(KernelAbstractions.CPU())
+const CUDA_AVAILABLE_HOOK = Ref{Function}(() -> false)
+const SET_CUDA_EXECUTION_SPACE_HOOK = Ref{Function}(() -> error("CUDA-dependent functionality requires `using CUDA` in the active Julia session."))
 
 function _allocator_ref()
     if !isdefined(@__MODULE__, :DEFAULT_ALLOCATOR)
@@ -24,11 +26,8 @@ allocate(x) = _allocator_ref()[](x)
 backend() = _backend_ref()[]
 
 _backend_array_matches(::Any, ::AbstractArray) = false
-_cuda_available() = false
-
-function _set_cuda_execution_space!()
-    error("CUDA-dependent functionality requires `using CUDA` in the active Julia session.")
-end
+_cuda_available() = CUDA_AVAILABLE_HOOK[]()
+_set_cuda_execution_space!() = SET_CUDA_EXECUTION_SPACE_HOOK[]()
 
 _backend_synchronize!(::Any) = nothing
 
@@ -63,6 +62,7 @@ include("differential_operators.jl")
 include("maxwell.jl")
 include("advectorPolar.jl")
 include("solvers.jl")
+include("execution.jl")
 
 greet() = print("Hello World!")
 

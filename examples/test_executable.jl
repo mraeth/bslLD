@@ -1,2 +1,0 @@
-using bslLD
-bslLD.greet()
