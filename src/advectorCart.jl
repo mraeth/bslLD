@@ -134,7 +134,7 @@ end
 function x_shift_context(grid::CartGrid, k, dir::Int)
     sizes_x = Tuple(length.(grid.xaxes))
     sizes_v = Tuple(length.(grid.vaxes))
-    vaxes = Tuple(backend_vector(axis) for axis in grid.vaxes)
+    vaxes = map(backend_vector, grid.vaxes)
     phi = grid.b0 * grid.time[grid.index[1]]
     return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi)
 end
@@ -154,38 +154,112 @@ function fourier_wavenumbers(ff, n::Int)
 end
 
 function advect_x_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX, NV, NXNV}
-    exec = bslLD.backend()
+    return _advect_x_impl!(f, grid, bslLD.backend())
+end
+
+function _advect_x_impl!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, exec) where {NX, NV, NXNV}
     kernel! = distribution_kernel!(exec)
-
     for dir in 1:NX
-        fft_dim = dir
-
-        ff = fft(f.data, fft_dim)
-        kx = fourier_wavenumbers(ff, size(f.data, fft_dim))
-
+        ff = fft(f.data, dir)
+        kx = fourier_wavenumbers(ff, size(f.data, dir))
         kernel!(ff, x_shift_context(grid, kx, dir); ndrange=length(ff))
         KernelAbstractions.synchronize(exec)
-
-        f.data .= real(ifft(ff, fft_dim))
+        f.data .= real(ifft(ff, dir))
     end
     return nothing
 end
 
 function advect_v_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField) where {NX, NV, NXNV}
-    exec = bslLD.backend()
-    kernel! = distribution_kernel!(exec)
+    return _advect_v_impl!(f, grid, e, bslLD.backend())
+end
 
+function _advect_v_impl!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField, exec) where {NX, NV, NXNV}
+    kernel! = distribution_kernel!(exec)
     for dir in 1:NV
-        fft_dim = length(grid.xaxes) + dir
+        fft_dim = NX + dir
         ff = fft(f.data, fft_dim)
         kv = fourier_wavenumbers(ff, size(f.data, fft_dim))
-
         kernel!(ff, v_shift_context(grid, e, kv, dir); ndrange=length(ff))
         KernelAbstractions.synchronize(exec)
-
         f.data .= real(ifft(ff, fft_dim))
     end
+    return nothing
+end
 
+# --- AdvectionPlan: pre-allocated buffers and cached data for zero-allocation advection ---
+
+struct AdvectionPlan{FB, PXF, PXI, PVF, PVI, KXT, KVT, VAT, BK}
+    ff_buf  :: FB   # Complex{Float64} work buffer, same shape as f.data
+    fwd_x   :: PXF  # ntuple of in-place forward FFT plans, one per x-dim
+    inv_x   :: PXI  # ntuple of in-place inverse FFT plans, one per x-dim
+    fwd_v   :: PVF  # ntuple of in-place forward FFT plans, one per v-dim
+    inv_v   :: PVI  # ntuple of in-place inverse FFT plans, one per v-dim
+    kx      :: KXT  # ntuple of wavenumber arrays for x-dims (on backend)
+    kv      :: KVT  # ntuple of wavenumber arrays for v-dims (on backend)
+    vaxes   :: VAT  # ntuple of velocity axes already copied to backend
+    backend :: BK
+end
+
+function AdvectionPlan(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX,NV,NXNV}
+    ff_buf = similar(f.data, Complex{Float64})
+    fwd_x  = ntuple(d -> plan_fft!(ff_buf, d), Val(NX))
+    inv_x  = ntuple(d -> plan_ifft!(ff_buf, d), Val(NX))
+    fwd_v  = ntuple(d -> plan_fft!(ff_buf, NX + d), Val(NV))
+    inv_v  = ntuple(d -> plan_ifft!(ff_buf, NX + d), Val(NV))
+    kx     = ntuple(Val(NX)) do d
+        k = similar(f.data, Float64, size(f.data, d))
+        copyto!(k, collect(2pi .* fftfreq(size(f.data, d))))
+        k
+    end
+    kv     = ntuple(Val(NV)) do d
+        k = similar(f.data, Float64, size(f.data, NX + d))
+        copyto!(k, collect(2pi .* fftfreq(size(f.data, NX + d))))
+        k
+    end
+    vaxes  = map(backend_vector, grid.vaxes)
+    return AdvectionPlan(ff_buf, fwd_x, inv_x, fwd_v, inv_v, kx, kv, vaxes, bslLD.backend())
+end
+
+function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, plan::AdvectionPlan) where {NX,NV,NXNV}
+    return _advect_x_planned!(f, grid, plan, plan.backend)
+end
+
+function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
+    kernel! = distribution_kernel!(exec)
+    sizes_x = Tuple(length.(grid.xaxes))
+    sizes_v = Tuple(length.(grid.vaxes))
+    for dir in 1:NX
+        @. plan.ff_buf = f.data
+        plan.fwd_x[dir] * plan.ff_buf
+        phi = grid.b0 * grid.time[grid.index[1]]
+        ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi)
+        kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
+        KernelAbstractions.synchronize(exec)
+        plan.inv_x[dir] * plan.ff_buf
+        @. f.data = real(plan.ff_buf)
+    end
+    return nothing
+end
+
+function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField, plan::AdvectionPlan) where {NX,NV,NXNV}
+    return _advect_v_planned!(f, grid, e, plan, plan.backend)
+end
+
+function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
+    kernel! = distribution_kernel!(exec)
+    sizes_x = Tuple(length.(grid.xaxes))
+    sizes_v = Tuple(length.(grid.vaxes))
+    e_components = ntuple(i -> e[i].data, Val(NV))
+    for dir in 1:NV
+        @. plan.ff_buf = f.data
+        plan.fwd_v[dir] * plan.ff_buf
+        phi = grid.b0 * grid.time[grid.index[1]]
+        ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi)
+        kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
+        KernelAbstractions.synchronize(exec)
+        plan.inv_v[dir] * plan.ff_buf
+        @. f.data = real(plan.ff_buf)
+    end
     return nothing
 end
 

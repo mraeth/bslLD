@@ -36,16 +36,16 @@ function differentiate(field::ScalarField{T, N}, grid::Grid, dir::Int) where {T,
     1 <= N <= 3 || throw(ArgumentError("differentiate currently supports 1D, 2D, and 3D ScalarFields"))
     1 <= dir <= N || throw(ArgumentError("direction $dir is outside the field dimensions"))
     dir <= length(grid.xaxes) || throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
+    return _differentiate_impl(field, grid, dir, bslLD.backend())
+end
 
-    exec = bslLD.backend()
+function _differentiate_impl(field::ScalarField{T, N}, grid::Grid, dir::Int, exec) where {T, N}
     kernel! = differentiate_kernel!(exec)
     fhat = fft(field.data, dir)
     k = spectral_wavenumbers(field.data, grid, dir)
     ctx = DifferentiateContext(k, size(fhat), dir)
-
     kernel!(fhat, ctx; ndrange=length(fhat))
     KernelAbstractions.synchronize(exec)
-
     return ScalarField(real(ifft(fhat, dir)))
 end
 

@@ -53,10 +53,10 @@ return DistributionGrid{
 }(data)
 end
 
-function compute_density(f :: DistributionGrid, grid::CartGrid)
-    dim = Tuple(i for i=length(grid.xaxes)+1:length(grid.xaxes)+length(grid.vaxes))
-    dv = prod(grid.delta[1+length(grid.xaxes):end])
-    return ScalarField(reshape(sum(f.data, dims =dim)*dv, Tuple([length(axes) for axes in grid.xaxes])))
+function compute_density(f::DistributionGrid{DT,NX,NV,NXNV,Cart}, grid::CartGrid) where {DT,NX,NV,NXNV}
+    dim = ntuple(i -> NX + i, Val(NV))
+    dv = prod(grid.delta[1+NX:NX+NV])
+    return ScalarField(reshape(sum(f.data, dims=dim) * dv, ntuple(i -> length(grid.xaxes[i]), Val(NX))))
 end
 
 function compute_density(f :: DistributionGrid, grid::PolarGrid)

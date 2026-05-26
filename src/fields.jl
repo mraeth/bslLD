@@ -9,8 +9,9 @@ end
 
 import Base: +, *, getindex, iterate, length
 
-struct VectorField{DT,N,SF<:ScalarField{DT,N}}
-    data :: Vector{SF}
+
+struct VectorField{DT, N, SF<:ScalarField{DT,N}, NF}
+    data :: NTuple{NF, SF}
 
     function VectorField(data::AbstractVector{<:ScalarField})
         isempty(data) && throw(ArgumentError("VectorField requires at least one component"))
@@ -19,11 +20,13 @@ struct VectorField{DT,N,SF<:ScalarField{DT,N}}
         component_type = typeof(first_component)
 
         for component in data
-            axes(component.data) == component_axes || throw(DimensionMismatch("VectorField component axes must match"))
-            typeof(component) == component_type || throw(ArgumentError("VectorField components must have the same concrete array type after allocation"))
+            axes(component.data) == component_axes || throw(DimensionMismatch("..."))
+            typeof(component) == component_type    || throw(ArgumentError("..."))
         end
 
-        return new{eltype(first_component.data), ndims(first_component.data), component_type}(collect(data))
+        tup = Tuple(data)  # convert Vector → NTuple at construction time
+        return new{eltype(first_component.data), ndims(first_component.data),
+                   component_type, length(tup)}(tup)
     end
 end
 
