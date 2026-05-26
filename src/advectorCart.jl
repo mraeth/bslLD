@@ -75,6 +75,8 @@ struct XShiftContext{GT, KT, VAT, SXT, SVT, PT}
     sizes_v::SVT
     dir::Int
     phi::PT
+    dt::PT
+
 end
 
 struct VShiftContext{GT, ET, KT, SXT, SVT, PT}
@@ -85,6 +87,7 @@ struct VShiftContext{GT, ET, KT, SXT, SVT, PT}
     sizes_v::SVT
     dir::Int
     phi::PT
+    dt::PT
 end
 
 Adapt.@adapt_structure XShiftContext
@@ -107,7 +110,7 @@ end
         xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
     end
 
-    return (ctx.grid.dt / ctx.grid.delta[ctx.dir]) * ctx.k[ixs[ctx.dir]] * xdisp
+    return (ctx.dt / ctx.grid.delta[ctx.dir]) * ctx.k[ixs[ctx.dir]] * xdisp
 end
 
 @inline function compute_v_phase(ctx::VShiftContext, index::Int)
@@ -119,7 +122,7 @@ end
         delta_v += ctx.e_components[field_dir][ixs[1]] * rotation[ctx.dir, field_dir]
     end
 
-    return (ctx.grid.dt / ctx.grid.delta[length(ctx.sizes_x) + ctx.dir]) * ctx.k[ivs[ctx.dir]] * delta_v
+    return (ctx.dt / ctx.grid.delta[length(ctx.sizes_x) + ctx.dir]) * ctx.k[ivs[ctx.dir]] * delta_v
 end
 
 @kernel function distribution_kernel!(ff, phase_context)
@@ -131,20 +134,22 @@ end
     end
 end
 
-function x_shift_context(grid::CartGrid, k, dir::Int)
+function x_shift_context(grid::CartGrid, simTime::SimulationTime, k, dir::Int)
     sizes_x = Tuple(length.(grid.xaxes))
     sizes_v = Tuple(length.(grid.vaxes))
     vaxes = map(backend_vector, grid.vaxes)
-    phi = grid.b0 * grid.time[grid.index[1]]
-    return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi)
+    phi = simTime.phase
+    dt = simTime.dt
+    return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi, dt)
 end
 
-function v_shift_context(grid::CartGrid, e::VectorField, k, dir::Int)
+function v_shift_context(grid::CartGrid, simTime::SimulationTime, e::VectorField, k, dir::Int)
     sizes_x = Tuple(length.(grid.xaxes))
     sizes_v = Tuple(length.(grid.vaxes))
     e_components = Tuple(component.data for component in e)
-    phi = grid.b0 * grid.time[grid.index[1]]
-    return VShiftContext(grid, e_components, k, sizes_x, sizes_v, dir, phi)
+    phi = simTime.phase
+    dt = simTime.dt
+    return VShiftContext(grid, e_components, k, sizes_x, sizes_v, dir, phi, dt)
 end
 
 function fourier_wavenumbers(ff, n::Int)
@@ -153,33 +158,33 @@ function fourier_wavenumbers(ff, n::Int)
     return k
 end
 
-function advect_x_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX, NV, NXNV}
-    return _advect_x_impl!(f, grid, bslLD.backend())
+function advect_x_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime) where {NX, NV, NXNV}
+    return _advect_x_impl!(f, grid, simTime, bslLD.backend())
 end
 
-function _advect_x_impl!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, exec) where {NX, NV, NXNV}
+function _advect_x_impl!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, exec) where {NX, NV, NXNV}
     kernel! = distribution_kernel!(exec)
     for dir in 1:NX
         ff = fft(f.data, dir)
         kx = fourier_wavenumbers(ff, size(f.data, dir))
-        kernel!(ff, x_shift_context(grid, kx, dir); ndrange=length(ff))
+        kernel!(ff, x_shift_context(grid, simTime, kx, dir); ndrange=length(ff))
         KernelAbstractions.synchronize(exec)
         f.data .= real(ifft(ff, dir))
     end
     return nothing
 end
 
-function advect_v_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField) where {NX, NV, NXNV}
-    return _advect_v_impl!(f, grid, e, bslLD.backend())
+function advect_v_generic!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField) where {NX, NV, NXNV}
+    return _advect_v_impl!(f, grid, simTime, e, bslLD.backend())
 end
 
-function _advect_v_impl!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField, exec) where {NX, NV, NXNV}
+function _advect_v_impl!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime,  e::VectorField, exec) where {NX, NV, NXNV}
     kernel! = distribution_kernel!(exec)
     for dir in 1:NV
         fft_dim = NX + dir
         ff = fft(f.data, fft_dim)
         kv = fourier_wavenumbers(ff, size(f.data, fft_dim))
-        kernel!(ff, v_shift_context(grid, e, kv, dir); ndrange=length(ff))
+        kernel!(ff, v_shift_context(grid, simTime, e, kv, dir); ndrange=length(ff))
         KernelAbstractions.synchronize(exec)
         f.data .= real(ifft(ff, fft_dim))
     end
@@ -220,19 +225,20 @@ function AdvectionPlan(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartG
     return AdvectionPlan(ff_buf, fwd_x, inv_x, fwd_v, inv_v, kx, kv, vaxes, bslLD.backend())
 end
 
-function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, plan::AdvectionPlan) where {NX,NV,NXNV}
-    return _advect_x_planned!(f, grid, plan, plan.backend)
+function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, plan::AdvectionPlan) where {NX,NV,NXNV}
+    return _advect_x_planned!(f, grid, simTime, plan, plan.backend)
 end
 
-function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
+function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
     kernel! = distribution_kernel!(exec)
     sizes_x = Tuple(length.(grid.xaxes))
     sizes_v = Tuple(length.(grid.vaxes))
     for dir in 1:NX
         @. plan.ff_buf = f.data
         plan.fwd_x[dir] * plan.ff_buf
-        phi = grid.b0 * grid.time[grid.index[1]]
-        ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi)
+        phi = simTime.phase
+        dt = simTime.dt
+        ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi, dt)
         kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
         KernelAbstractions.synchronize(exec)
         plan.inv_x[dir] * plan.ff_buf
@@ -241,11 +247,11 @@ function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
     return nothing
 end
 
-function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField, plan::AdvectionPlan) where {NX,NV,NXNV}
-    return _advect_v_planned!(f, grid, e, plan, plan.backend)
+function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime,  e::VectorField, plan::AdvectionPlan) where {NX,NV,NXNV}
+    return _advect_v_planned!(f, grid, simTime, e, plan, plan.backend)
 end
 
-function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
+function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid,simTime::SimulationTime, e::VectorField, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
     kernel! = distribution_kernel!(exec)
     sizes_x = Tuple(length.(grid.xaxes))
     sizes_v = Tuple(length.(grid.vaxes))
@@ -253,8 +259,9 @@ function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
     for dir in 1:NV
         @. plan.ff_buf = f.data
         plan.fwd_v[dir] * plan.ff_buf
-        phi = grid.b0 * grid.time[grid.index[1]]
-        ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi)
+        phi = simTime.phase
+        dt = simTime.dt
+        ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi, dt)
         kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
         KernelAbstractions.synchronize(exec)
         plan.inv_v[dir] * plan.ff_buf
@@ -263,10 +270,10 @@ function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
     return nothing
 end
 
-function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX, NV, NXNV}
-    return advect_x_generic!(f, grid)
+function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime) where {NX, NV, NXNV}
+    return advect_x_generic!(f, grid, simTime)
 end
 
-function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, e::VectorField) where {NX, NV, NXNV}
-    return advect_v_generic!(f, grid, e)
+function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField) where {NX, NV, NXNV}
+    return advect_v_generic!(f, grid, simTime, e)
 end
