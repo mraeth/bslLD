@@ -186,10 +186,16 @@ function AdvectionPlan(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartG
     return AdvectionPlan(ff_buf, fwd_x, inv_x, fwd_v, inv_v, kx, kv, vaxes, bslLD.backend())
 end
 
-const _plan_cache = WeakKeyDict{Any, AdvectionPlan}()
+const _plan_cache = IdDict{Any, Dict{Any, AdvectionPlan}}()
+const _plan_cache_lock = ReentrantLock()
+
+@inline _plan_cache_key(grid::CartGrid) = (grid.xaxes, grid.vaxes, grid.delta, grid.Bdir)
 
 function _get_plan(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX,NV,NXNV}
-    get!(() -> AdvectionPlan(f, grid), _plan_cache, f)
+    lock(_plan_cache_lock) do
+        plans_for_data = get!(() -> Dict{Any, AdvectionPlan}(), _plan_cache, f.data)
+        get!(() -> AdvectionPlan(f, grid), plans_for_data, _plan_cache_key(grid))
+    end
 end
 
 function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, plan::AdvectionPlan) where {NX,NV,NXNV}
