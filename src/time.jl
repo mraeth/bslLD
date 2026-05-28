@@ -8,7 +8,9 @@ mutable struct SimulationTime{T<:AbstractFloat}
     nmax::Int
     gyro_frequency::T
     wall_start_ns::UInt64
+    _progress::Union{Progress, Nothing}
 end
+
 
 function SimulationTime(
     dt::T,
@@ -30,6 +32,7 @@ function SimulationTime(
         Int(nmax),
         T(gyro_frequency),
         time_ns(),
+        nothing
     )
 end
 
@@ -49,8 +52,11 @@ function advance!(t::SimulationTime{T}; wrap_phase::Bool = true) where {T<:Abstr
 
     return t
 end
-
-function continue_advection(t::SimulationTime)
+function continue_advection(t::SimulationTime, show_progress::Bool = false)
+    if show_progress
+        isnothing(t._progress) && (t._progress = Progress(round(Int, t.final_T / t.dt); desc="Simulating: ", showspeed=true))
+        next!(t._progress; showvalues=[(:step, t.step), (:time, t.current_T)])
+    end
     return t.current_T < t.final_T && t.step < t.nmax
 end
 

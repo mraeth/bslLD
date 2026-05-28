@@ -6,7 +6,6 @@ authors = ["Mario Raeth <mario.raeth@ipp.mpg.de>"]
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
-CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 CubicSplines = "9c784101-8907-5a6d-9be6-98f00873c89b"
 DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"
@@ -22,6 +21,7 @@ Latexify = "23fbe1c1-3f47-55db-b15f-69d7ec21a316"
 Polynomials = "f27b6e38-b328-58d1-80ce-0feddd5e7a45"
 Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 ProgressBars = "49802e3a-d2f1-5c88-81d8-b72133a6f568"
+ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
 RemoteREPL = "1bd9f7bb-701c-4338-bec7-ac987af7c555"
 Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
@@ -32,6 +32,9 @@ TaylorSeries = "6aa5eb33-94cf-58f4-a9d0-e4b2c4fc25ea"
 
 [extensions]
 bslLDCUDAExt = "CUDA"
+
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 
 [compat]
 AbstractFFTs = "1.5.0"
@@ -51,6 +54,7 @@ Latexify = "0.16.10"
 Polynomials = "4.1.0"
 Profile = "1.11.0"
 ProgressBars = "1.5.1"
+ProgressMeter = "1.11.0"
 RemoteREPL = "0.3.1"
 Revise = "3.12.3"
 SpecialFunctions = "2.6.1"

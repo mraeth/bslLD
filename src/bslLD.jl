@@ -1,7 +1,7 @@
 module bslLD
 
 using AbstractFFTs, Adapt, FFTW, KernelAbstractions
-using Dierckx, Base.Threads, StaticArrays
+using Dierckx, Base.Threads, StaticArrays, ProgressMeter
 
 const DEFAULT_ALLOCATOR = Ref{Function}(identity)
 const DEFAULT_BACKEND = Ref{Any}(KernelAbstractions.CPU())
