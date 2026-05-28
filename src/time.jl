@@ -1,5 +1,6 @@
 mutable struct SimulationTime{T<:AbstractFloat}
     dt::T
+    fraction_dt::T
     current_T::T
     final_T::T
     step::Int
@@ -21,6 +22,7 @@ function SimulationTime(
 
     return SimulationTime{T}(
         dt,
+        1.0,
         T(current_T),
         final_T,
         Int(step),

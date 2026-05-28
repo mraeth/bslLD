@@ -139,7 +139,7 @@ function x_shift_context(grid::CartGrid, simTime::SimulationTime, k, dir::Int)
     sizes_v = Tuple(length.(grid.vaxes))
     vaxes = map(backend_vector, grid.vaxes)
     phi = simTime.phase
-    dt = simTime.dt
+    dt = simTime.dt*simTime.fraction_dt
     return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi, dt)
 end
 
@@ -148,7 +148,7 @@ function v_shift_context(grid::CartGrid, simTime::SimulationTime, e::VectorField
     sizes_v = Tuple(length.(grid.vaxes))
     e_components = Tuple(component.data for component in e)
     phi = simTime.phase
-    dt = simTime.dt
+    dt = simTime.dt*simTime.fraction_dt
     return VShiftContext(grid, e_components, k, sizes_x, sizes_v, dir, phi, dt)
 end
 
@@ -210,7 +210,7 @@ function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
         @. plan.ff_buf = f.data
         plan.fwd_x[dir] * plan.ff_buf
         phi = simTime.phase
-        dt = simTime.dt
+        dt = simTime.dt*simTime.fraction_dt
         ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi, dt)
         kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
         KernelAbstractions.synchronize(exec)
@@ -233,7 +233,7 @@ function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
         @. plan.ff_buf = f.data
         plan.fwd_v[dir] * plan.ff_buf
         phi = simTime.phase
-        dt = simTime.dt
+        dt = simTime.dt*simTime.fraction_dt
         ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi, dt)
         kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
         KernelAbstractions.synchronize(exec)
