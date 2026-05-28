@@ -12,8 +12,15 @@ struct Moments{SF<:ScalarField,VF<:Union{Nothing,VectorField}}
     end
 end
 
-struct PoissonFieldSolver <: AbstractFieldSolver end
+struct PoissonFieldSolver{DT<:AbstractFloat} <: AbstractFieldSolver
+    factor::DT
+end
+PoissonFieldSolver() = PoissonFieldSolver(1.0)
+PoissonFieldSolver(factor::Real) = PoissonFieldSolver(float(factor))
 struct AdiabaticFieldSolver <: AbstractFieldSolver end
+
+
+
 
 struct FieldSolution{VF<:VectorField}
     E::VF
@@ -52,9 +59,9 @@ function background_field(grid::Grid)
     return VectorField(components)
 end
 
-function poisson_potential(rho::ScalarField, grid::Grid)
+function poisson_potential(rho::ScalarField, grid::Grid, coefficient::T) where {T<:AbstractFloat}
     rhohat = fft_spatial(rho.data, grid)
-    k2 = spectral_wave_number_squared(rho, grid)
+    k2 = spectral_wave_number_squared(rho, grid) .* coefficient
     phihat = -rhohat
     zero_mode = k2 .== 0
     phihat[.!zero_mode] ./= k2[.!zero_mode]
@@ -68,8 +75,8 @@ function electric_field_from_potential(phi::ScalarField, grid::Grid)
     return vectorfield_from_spatial_components(e_components)
 end
 
-function solve_fields(moments::Moments, grid::Grid, ::PoissonFieldSolver)
-    phi = poisson_potential(moments.rho, grid)
+function solve_fields(moments::Moments, grid::Grid, solver::PoissonFieldSolver)
+    phi = poisson_potential(moments.rho, grid, solver.factor)
     return FieldSolution(
         electric_field_from_potential(phi, grid),
         zero_vectorfield3(grid),
