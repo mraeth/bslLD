@@ -1,9 +1,12 @@
 #!/usr/bin/env julia
 
 using Pkg
-Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+Pkg.activate(joinpath(@__DIR__, "."); io=devnull)
+Pkg.develop(path=joinpath(@__DIR__, ".."); io=devnull)
+
 
 using Statistics
+using CUDA
 using bslLD
 using KernelAbstractions
 
@@ -17,8 +20,10 @@ const DEFAULTS = (
 )
 
 const ROUTINES = (
-    ("advectX!", (f, grid, _) -> bslLD.advectX!(f, grid)),
-    ("advectV!", bslLD.advectV!),
+    ("advectX!      ", (f, grid, _, _plan)      -> bslLD.advectX!(f, grid)),
+    ("advectV!      ", (f, grid, e, _plan)       -> bslLD.advectV!(f, grid, e)),
+    ("advectX!(plan)", (f, grid, _, plan)        -> bslLD.advectX!(f, grid, plan)),
+    ("advectV!(plan)", (f, grid, e, plan)        -> bslLD.advectV!(f, grid, e, plan)),
 )
 
 function parse_args(args)
@@ -42,7 +47,8 @@ function make_inputs(nx, nv, dt, epsilon)
     f = bslLD.Distribution(grid, epsilon)
     ex = @. 0.05 * sin(2pi * grid.xaxes[1] / grid.max[1])
     e = bslLD.VectorField([collect(ex)])
-    return grid, f, e
+    plan = bslLD.AdvectionPlan(f, grid)
+    return grid, f, e, plan
 end
 
 function clone_inputs(f, e)
@@ -58,16 +64,16 @@ function summarize(times)
 end
 
 function print_summary(device, routine, stats)
-    println(rpad(device, 8), rpad(routine, 10),
+    println(rpad(device, 8), rpad(routine, 18),
         "min=", round(stats.minimum * 1e3; digits=3), " ms  ",
         "median=", round(stats.median * 1e3; digits=3), " ms  ",
         "mean=", round(stats.mean * 1e3; digits=3), " ms")
 end
 
-function benchmark_routine!(routine!, f_template, grid, e_template, samples, warmup; sync! = (() -> nothing))
+function benchmark_routine!(routine!, f_template, grid, e_template, plan, samples, warmup; sync! = (() -> nothing))
     for _ in 1:warmup
         f, e = clone_inputs(f_template, e_template)
-        routine!(f, grid, e)
+        routine!(f, grid, e, plan)
         sync!()
     end
 
@@ -75,7 +81,7 @@ function benchmark_routine!(routine!, f_template, grid, e_template, samples, war
     for _ in 1:samples
         f, e = clone_inputs(f_template, e_template)
         elapsed = @elapsed begin
-            routine!(f, grid, e)
+            routine!(f, grid, e, plan)
             sync!()
         end
         push!(times, elapsed)
@@ -85,11 +91,11 @@ end
 
 function bench(device, use_backend!, make_inputs, samples, warmup; sync! = (() -> nothing))
     use_backend!()
-    grid, f_template, e_template = make_inputs()
+    grid, f_template, e_template, plan = make_inputs()
 
     println(device, " benchmarks")
     stats = Dict(
-        label => benchmark_routine!(routine!, f_template, grid, e_template, samples, warmup; sync!)
+        label => benchmark_routine!(routine!, f_template, grid, e_template, plan, samples, warmup; sync!)
         for (label, routine!) in ROUTINES
     )
     for (label, _) in ROUTINES
@@ -100,9 +106,9 @@ end
 
 function print_speedups(cpu_stats, gpu_stats)
     println("\nGPU speedup vs CPU (median runtime)")
-    for routine in ("advectX!", "advectV!")
-        speedup = cpu_stats[routine].median / gpu_stats[routine].median
-        println(rpad(routine, 10), round(speedup; digits=2), "x")
+    for (label, _) in ROUTINES
+        speedup = cpu_stats[label].median / gpu_stats[label].median
+        println(rpad(label, 18), round(speedup; digits=2), "x")
     end
 end
 

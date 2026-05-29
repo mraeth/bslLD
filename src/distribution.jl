@@ -16,8 +16,8 @@ function Distribution(grid::CartGrid, epsilon;
     initFuncv = (v-> exp(-v^2 / 2) / sqrt(2*pi)), initFuncv1 = initFuncv)
 fct_sp(x) = initFuncx(x)
 fct_v(v) = initFuncv(v)
-dx = map(x->fct_sp.(x), grid.xaxes)
-dv = map(x->fct_v.(x), grid.vaxes)
+dx = [fct_sp.(x) for x in grid.xaxes]
+dv = [fct_v.(x) for x in grid.vaxes]
 if length(dv)==2
     dv[2].=initFuncv1.(grid.vaxes[2])
 end
@@ -39,7 +39,7 @@ function Distribution(grid::PolarGrid, epsilon;
     initFuncv = (v-> exp(-v^2 / 2) / sqrt(2*pi)))
 fct_sp(x) = initFuncx(x)
 fct_v(v) = initFuncv(v)
-dx = map(x->fct_sp.(x), grid.xaxes)
+dx = [fct_sp.(x) for x in grid.xaxes]
 dv = [fct_v.(grid.vaxes[1]), sin.(grid.vaxes[2])]
 da = vcat(dx,dv)
 data = bslLD.backend_array(outer_product(da))
@@ -53,10 +53,10 @@ return DistributionGrid{
 }(data)
 end
 
-function compute_density(f :: DistributionGrid, grid::CartGrid)
-    dim = Tuple(i for i=length(grid.xaxes)+1:length(grid.xaxes)+length(grid.vaxes))
-    dv = prod(grid.delta[1+length(grid.xaxes):end])
-    return ScalarField(reshape(sum(f.data, dims =dim)*dv, Tuple([length(axes) for axes in grid.xaxes])))
+function compute_density(f::DistributionGrid{DT,NX,NV,NXNV,Cart}, grid::CartGrid) where {DT,NX,NV,NXNV}
+    dim = ntuple(i -> NX + i, Val(NV))
+    dv = prod(grid.delta[1+NX:NX+NV])
+    return ScalarField(reshape(sum(f.data, dims=dim) * dv, ntuple(i -> length(grid.xaxes[i]), Val(NX))))
 end
 
 function compute_density(f :: DistributionGrid, grid::PolarGrid)

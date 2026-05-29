@@ -22,13 +22,12 @@ end
 function spectral_wavenumber_views(field::ScalarField, grid::Grid)
     ndims_x = spatial_ndims(grid)
     ndims_data = ndims(field.data)
-    return Tuple(
+    return ntuple(ndims_x) do dir
         reshape(
             spectral_wavenumbers(field.data, grid, dir),
             ntuple(d -> d == dir ? size(field.data, dir) : 1, ndims_data),
         )
-        for dir in 1:ndims_x
-    )
+    end
 end
 
 function spectral_wave_number_squared(field::ScalarField, grid::Grid)
