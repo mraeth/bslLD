@@ -4,13 +4,13 @@ using bslLD
 @testset "Differentiate" begin
     bslLD.set_execution_space!(exec=bslLD.backend())
 
-    grid1 = bslLD.Grid([0.0], [2pi], [32], 0.1, 1, 1)
+    grid1 = bslLD.Grid([0.0], [2pi], [32], 1)
     x1 = grid1.xaxes[1]
     f1 = bslLD.ScalarField(sin.(x1))
     df1 = bslLD.differentiate(f1, grid1, 1)
     @test maximum(abs.(df1.data .- cos.(x1))) < 1e-10
 
-    grid2 = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 0.1, 1, 2)
+    grid2 = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 2)
     x2 = grid2.xaxes[1]
     y2 = grid2.xaxes[2]
     data2 = [sin(x) + cos(2y) for x in x2, y in y2]
@@ -20,7 +20,7 @@ using bslLD
     @test maximum(abs.(dfdx2.data .- [cos(x) for x in x2, y in y2])) < 1e-10
     @test maximum(abs.(dfdy2.data .- [-2sin(2y) for x in x2, y in y2])) < 1e-10
 
-    grid3 = bslLD.Grid([0.0, 0.0, 0.0], [2pi, 2pi, 2pi], [16, 12, 10], 0.1, 1, 3)
+    grid3 = bslLD.Grid([0.0, 0.0, 0.0], [2pi, 2pi, 2pi], [16, 12, 10], 3)
     x3 = grid3.xaxes[1]
     y3 = grid3.xaxes[2]
     z3 = grid3.xaxes[3]
@@ -33,7 +33,7 @@ end
 @testset "Grad Div Curl" begin
     bslLD.set_execution_space!(exec=bslLD.backend())
 
-    grid1 = bslLD.Grid([0.0], [2pi], [32], 0.1, 1, 1)
+    grid1 = bslLD.Grid([0.0], [2pi], [32], 1)
     x1 = grid1.xaxes[1]
     phi1 = bslLD.ScalarField(sin.(x1))
     grad1 = bslLD.grad(phi1, grid1)
@@ -64,7 +64,7 @@ end
     @test maximum(abs.(curl1_3[2].data .- sin.(x1))) < 1e-10
     @test maximum(abs.(curl1_3[3].data .- cos.(x1))) < 1e-10
 
-    grid2 = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 0.1, 1, 2)
+    grid2 = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 2)
     x2 = grid2.xaxes[1]
     y2 = grid2.xaxes[2]
 
@@ -96,7 +96,7 @@ end
     @test maximum(abs.(curl2_3[2].data .- [-cos(x + y) for x in x2, y in y2])) < 1e-10
     @test maximum(abs.(curl2_3[3].data)) < 1e-10
 
-    grid3 = bslLD.Grid([0.0, 0.0, 0.0], [2pi, 2pi, 2pi], [16, 12, 10], 0.1, 1, 3)
+    grid3 = bslLD.Grid([0.0, 0.0, 0.0], [2pi, 2pi, 2pi], [16, 12, 10], 3)
     x3 = grid3.xaxes[1]
     y3 = grid3.xaxes[2]
     z3 = grid3.xaxes[3]

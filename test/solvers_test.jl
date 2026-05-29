@@ -7,7 +7,7 @@ function zero_current_field(grid)
 end
 
 @testset "Moments" begin
-    grid = bslLD.Grid([0.0], [2pi], [16], 0.05, 1, 1)
+    grid = bslLD.Grid([0.0], [2pi], [16], 1)
     rho = bslLD.ScalarField(sin.(grid.xaxes[1]))
     current = zero_current_field(grid)
 
@@ -27,7 +27,7 @@ end
     bslLD.set_execution_space!(exec=bslLD.backend())
 
     @testset "Poisson 1D" begin
-        grid = bslLD.Grid([0.0], [2pi], [32], 0.05, 1, 1, 2.5, 2)
+        grid = bslLD.Grid([0.0], [2pi], [32], 1, 2.5, 2)
         x = grid.xaxes[1]
         rho = bslLD.ScalarField(-sin.(x))
         solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonFieldSolver())
@@ -45,7 +45,7 @@ end
     end
 
     @testset "Poisson 2D" begin
-        grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 0.05, 1, 2, 1.25, 3)
+        grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 2, 1.25, 3)
         x = grid.xaxes[1]
         y = grid.xaxes[2]
         rho = bslLD.ScalarField([-sin(xi) + cos(yi) for xi in x, yi in y])
@@ -63,7 +63,7 @@ end
     end
 
     @testset "Poisson 3D" begin
-        grid = bslLD.Grid([0.0, 0.0, 0.0], [2pi, 2pi, 2pi], [16, 12, 10], 0.05, 1, 3)
+        grid = bslLD.Grid([0.0, 0.0, 0.0], [2pi, 2pi, 2pi], [16, 12, 10], 3)
         x = grid.xaxes[1]
         y = grid.xaxes[2]
         z = grid.xaxes[3]
@@ -82,7 +82,7 @@ end
     end
 
     @testset "Adiabatic" begin
-        grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 0.05, 1, 2, 0.75, 1)
+        grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [24, 20], 2, 0.75, 1)
         x = grid.xaxes[1]
         y = grid.xaxes[2]
         rho = bslLD.ScalarField([sin(xi) + cos(2yi) for xi in x, yi in y])
