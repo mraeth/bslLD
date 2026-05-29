@@ -67,6 +67,10 @@ end
 
 backend_vector(values) = bslLD.backend_array(collect(values))
 
+@inline _effective_dt(simTime::SimulationTime) = simTime.dt * simTime.fraction_dt
+
+@inline _cartesian_axis_sizes(grid::CartGrid) = (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
+
 struct XShiftContext{GT, KT, VAT, SXT, SVT, PT}
     grid::GT
     k::KT
@@ -76,7 +80,6 @@ struct XShiftContext{GT, KT, VAT, SXT, SVT, PT}
     dir::Int
     phi::PT
     dt::PT
-
 end
 
 struct VShiftContext{GT, ET, KT, SXT, SVT, PT}
@@ -135,20 +138,18 @@ end
 end
 
 function x_shift_context(grid::CartGrid, simTime::SimulationTime, k, dir::Int)
-    sizes_x = Tuple(length.(grid.xaxes))
-    sizes_v = Tuple(length.(grid.vaxes))
+    sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     vaxes = map(backend_vector, grid.vaxes)
     phi = simTime.phase
-    dt = simTime.dt*simTime.fraction_dt
+    dt = _effective_dt(simTime)
     return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi, dt)
 end
 
 function v_shift_context(grid::CartGrid, simTime::SimulationTime, e::VectorField, k, dir::Int)
-    sizes_x = Tuple(length.(grid.xaxes))
-    sizes_v = Tuple(length.(grid.vaxes))
+    sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     e_components = Tuple(component.data for component in e)
     phi = simTime.phase
-    dt = simTime.dt*simTime.fraction_dt
+    dt = _effective_dt(simTime)
     return VShiftContext(grid, e_components, k, sizes_x, sizes_v, dir, phi, dt)
 end
 
@@ -202,43 +203,41 @@ function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, 
     return _advect_x_planned!(f, grid, simTime, plan, plan.backend)
 end
 
+function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
+    @. ff_buf = f.data
+    fwd_plan * ff_buf
+    kernel!(ff_buf, ctx; ndrange=length(ff_buf))
+    KernelAbstractions.synchronize(exec)
+    inv_plan * ff_buf
+    @. f.data = real(ff_buf)
+    return nothing
+end
+
 function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
     kernel! = distribution_kernel!(exec)
-    sizes_x = Tuple(length.(grid.xaxes))
-    sizes_v = Tuple(length.(grid.vaxes))
+    sizes_x, sizes_v = _cartesian_axis_sizes(grid)
+    phi = simTime.phase
+    dt = _effective_dt(simTime)
     for dir in 1:NX
-        @. plan.ff_buf = f.data
-        plan.fwd_x[dir] * plan.ff_buf
-        phi = simTime.phase
-        dt = simTime.dt*simTime.fraction_dt
         ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi, dt)
-        kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
-        KernelAbstractions.synchronize(exec)
-        plan.inv_x[dir] * plan.ff_buf
-        @. f.data = real(plan.ff_buf)
+        _apply_phase_shift!(f, plan.ff_buf, plan.fwd_x[dir], plan.inv_x[dir], kernel!, ctx, exec)
     end
     return nothing
 end
 
-function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime,  e::VectorField, plan::AdvectionPlan) where {NX,NV,NXNV}
+function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField, plan::AdvectionPlan) where {NX,NV,NXNV}
     return _advect_v_planned!(f, grid, simTime, e, plan, plan.backend)
 end
 
-function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid,simTime::SimulationTime, e::VectorField, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
+function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
     kernel! = distribution_kernel!(exec)
-    sizes_x = Tuple(length.(grid.xaxes))
-    sizes_v = Tuple(length.(grid.vaxes))
+    sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     e_components = ntuple(i -> e[i].data, Val(NV))
+    phi = simTime.phase
+    dt = _effective_dt(simTime)
     for dir in 1:NV
-        @. plan.ff_buf = f.data
-        plan.fwd_v[dir] * plan.ff_buf
-        phi = simTime.phase
-        dt = simTime.dt*simTime.fraction_dt
         ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi, dt)
-        kernel!(plan.ff_buf, ctx; ndrange=length(plan.ff_buf))
-        KernelAbstractions.synchronize(exec)
-        plan.inv_v[dir] * plan.ff_buf
-        @. f.data = real(plan.ff_buf)
+        _apply_phase_shift!(f, plan.ff_buf, plan.fwd_v[dir], plan.inv_v[dir], kernel!, ctx, exec)
     end
     return nothing
 end
