@@ -3,6 +3,8 @@ abstract type Distribution end
 
 struct DistributionGrid{DT,NX,NV,NXNV,ID,AT<:AbstractArray{DT,NXNV}}  <: Distribution
     data :: AT
+    m :: DT
+    q :: DT
 end
 
 const DistributionGrid1d1v{T,ID,AT} = DistributionGrid{T,1,1,2,ID,AT}
@@ -11,7 +13,18 @@ const DistributionGrid2d2v{T,ID,AT} = DistributionGrid{T,2,2,4,ID,AT}
 
 
 
-function Distribution(grid::CartGrid, epsilon; 
+@inline thermal_velocity(f::DistributionGrid) = inv(sqrt(f.m))
+@inline electric_acceleration_scale(f::DistributionGrid) = f.q / sqrt(f.m)
+
+function _species_parameters(::Type{DT}, m::Real, q::Real) where {DT}
+    m > 0 || throw(ArgumentError("distribution mass m must be positive"))
+    return DT(m), DT(q)
+end
+
+
+
+function Distribution(grid::CartGrid, epsilon;
+    m = 1.0, q = 1.0,
     initFuncx = (x-> (01. .+ epsilon * sin(2pi/(grid.xaxes[1][end]+grid.delta[1])*x ))),
     initFuncv = (v-> exp(-v^2 / 2) / sqrt(2*pi)), initFuncv1 = initFuncv)
 fct_sp(x) = initFuncx(x)
@@ -23,6 +36,7 @@ if length(dv)==2
 end
 da = vcat(dx,dv)
 data = bslLD.backend_array(outer_product(da))
+species_m, species_q = _species_parameters(Float64, m, q)
 return DistributionGrid{
     Float64,
     length(grid.xaxes),
@@ -30,11 +44,12 @@ return DistributionGrid{
     length(grid.xaxes) + length(grid.vaxes),
     Cart,
     typeof(data)
-}(data)
+}(data, species_m, species_q)
 end
 
 
-function Distribution(grid::PolarGrid, epsilon; 
+function Distribution(grid::PolarGrid, epsilon;
+    m = 1.0, q = 1.0,
     initFuncx = (x-> (01. .+ epsilon * sin(2pi/(grid.xaxes[1][end]+grid.delta[1])*x ))),
     initFuncv = (v-> exp(-v^2 / 2) / sqrt(2*pi)))
 fct_sp(x) = initFuncx(x)
@@ -43,6 +58,7 @@ dx = [fct_sp.(x) for x in grid.xaxes]
 dv = [fct_v.(grid.vaxes[1]), sin.(grid.vaxes[2])]
 da = vcat(dx,dv)
 data = bslLD.backend_array(outer_product(da))
+species_m, species_q = _species_parameters(Float64, m, q)
 return DistributionGrid{
     Float64,
     length(grid.xaxes),
@@ -50,7 +66,7 @@ return DistributionGrid{
     length(grid.xaxes) + length(grid.vaxes),
     Polar,
     typeof(data)
-}(data)
+}(data, species_m, species_q)
 end
 
 function compute_density(f::DistributionGrid{DT,NX,NV,NXNV,Cart}, grid::CartGrid) where {DT,NX,NV,NXNV}

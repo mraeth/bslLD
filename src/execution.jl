@@ -20,7 +20,7 @@ function backend_copy(f::DistributionGrid)
     data = backend_copy(f.data)
     _, NX, NV, NXNV, ID = typeof(f).parameters[1:5]
     DT = eltype(data)
-    return DistributionGrid{DT, NX, NV, NXNV, ID, typeof(data)}(data)
+    return DistributionGrid{DT, NX, NV, NXNV, ID, typeof(data)}(data, DT(f.m), DT(f.q))
 end
 
 function backend_copy(e::VectorField)

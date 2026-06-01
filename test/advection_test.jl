@@ -23,7 +23,7 @@ function advection_seed_data(grid)
     ]
 end
 
-function expected_after_advect_x(grid, simTime)
+function expected_after_advect_x(grid, simTime; vth=1.0)
     nx = length(grid.xaxes)
     nv = length(grid.vaxes)
     dims = Tuple(length.(all_axes(grid)))
@@ -32,7 +32,7 @@ function expected_after_advect_x(grid, simTime)
     for idx in CartesianIndices(expected)
         shift_sum = 0.0
         for dir in 1:nx
-            shift = dir <= nv ? simTime.dt * simTime.fraction_dt * grid.vaxes[dir][idx[nx + dir]] / grid.delta[dir] : 0.0
+            shift = dir <= nv ? simTime.dt * simTime.fraction_dt * vth * grid.vaxes[dir][idx[nx + dir]] / grid.delta[dir] : 0.0
             shift_sum += 0.1 * dir * sin(2pi * ((idx[dir] - 1) - shift) / dims[dir])
         end
 
@@ -55,7 +55,7 @@ function constant_electric_field(grid)
     ])
 end
 
-function expected_after_advect_v(grid, simTime, e_field)
+function expected_after_advect_v(grid, simTime, e_field; electric_scale=1.0)
     nx = length(grid.xaxes)
     nv = length(grid.vaxes)
     dims = Tuple(length.(all_axes(grid)))
@@ -67,7 +67,7 @@ function expected_after_advect_v(grid, simTime, e_field)
 
         shift_sum = 0.0
         for dir in 1:nv
-            shift = simTime.dt * simTime.fraction_dt * field_strengths[dir] / grid.delta[nx + dir]
+            shift = simTime.dt * simTime.fraction_dt * electric_scale * field_strengths[dir] / grid.delta[nx + dir]
             shift_sum += 0.2 * dir * cos(2pi * ((idx[nx + dir] - 1) - shift) / dims[nx + dir])
         end
 
@@ -111,5 +111,28 @@ end
                 @test abs(sum(f_v.data) - initial_mass_v) < 1e-10 * max(abs(initial_mass_v), 1.0)
             end
         end
+    end
+
+    @testset "Species-scaled Cartesian advection" begin
+        grid = cartesian_grid(1, 1)
+        simTime = advection_time()
+        initial = advection_seed_data(grid)
+        species_m = 4.0
+        species_q = -3.0
+
+        f_x = bslLD.Distribution(grid, 0.01; m=species_m, q=species_q)
+        f_x.data .= initial
+        expected_x = expected_after_advect_x(grid, simTime; vth=inv(sqrt(species_m)))
+        bslLD.advectX!(f_x, grid, simTime)
+
+        @test maximum(abs.(f_x.data .- expected_x)) < 1e-10
+
+        f_v = bslLD.Distribution(grid, 0.01; m=species_m, q=species_q)
+        f_v.data .= initial
+        e_field = constant_electric_field(grid)
+        expected_v = expected_after_advect_v(grid, simTime, e_field; electric_scale=species_q / sqrt(species_m))
+        bslLD.advectV!(f_v, grid, simTime, e_field)
+
+        @test maximum(abs.(f_v.data .- expected_v)) < 1e-10
     end
 end

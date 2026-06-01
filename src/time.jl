@@ -36,6 +36,10 @@ function SimulationTime(
     )
 end
 
+# Aux function to indexing SimulationTime with [n] to get n*dt
+Base.getindex(t::SimulationTime, i::Int) = t.dt * i
+
+
 function SimulationTime(dt::Real, final_T::Real; kwargs...)
     T = promote_type(typeof(float(dt)), typeof(float(final_T)))
     return SimulationTime(T(dt), T(final_T); kwargs...)

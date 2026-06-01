@@ -1,14 +1,23 @@
 abstract type AbstractFieldSolver end
 
-struct Moments{SF<:ScalarField,VF<:Union{Nothing,VectorField}}
-    rho::SF
-    J::VF
+struct Moments{SF<:ScalarField,VF<:Union{Nothing,VectorField},PF<:Union{Nothing,VectorField}}
+    rho       :: SF
+    J         :: VF
+    Pi_diff_z :: PF
 
-    function Moments(rho::SF, J::VF=nothing) where {SF<:ScalarField,VF<:Union{Nothing,VectorField}}
+    function Moments(
+        rho::SF,
+        J::VF=nothing,
+        Pi_diff_z::PF=nothing,
+    ) where {
+        SF<:ScalarField,
+        VF<:Union{Nothing,VectorField},
+        PF<:Union{Nothing,VectorField},
+    }
         if J !== nothing
             axes(rho.data) == axes(J[1].data) || throw(DimensionMismatch("Moments rho and J must share spatial axes"))
         end
-        return new{SF,VF}(rho, J)
+        return new{SF,VF,PF}(rho, J, Pi_diff_z)
     end
 end
 
@@ -90,4 +99,28 @@ function solve_fields(moments::Moments, grid::Grid, ::AdiabaticFieldSolver)
         zero_vectorfield3(grid),
         background_field(grid),
     )
+end
+
+struct SemiImplicitEMSolver{T<:AbstractFloat} <: AbstractFieldSolver
+    beta_i :: T
+    mu     :: T
+end
+
+function SemiImplicitEMSolver(beta_i::Real, mu::Real)
+    T = promote_type(typeof(float(beta_i)), typeof(float(mu)))
+    return SemiImplicitEMSolver{T}(T(beta_i), T(mu))
+end
+
+function solve_fields!(
+    sol::FieldSolution,
+    moments::Moments,
+    grid::Grid,
+    solver::SemiImplicitEMSolver,
+    dt::Real,
+)
+    moments.J         !== nothing || throw(ArgumentError("moments.J (J_i_⊥) is required for SemiImplicitEMSolver"))
+    moments.Pi_diff_z !== nothing || throw(ArgumentError("moments.Pi_diff_z (Π_e,z − Π_i,z) is required for SemiImplicitEMSolver"))
+    grid.Bdir == 3 || throw(ArgumentError("SemiImplicitEMSolver requires grid.Bdir == 3"))
+    _step_semi_implicit_em!(sol.E, sol.B, moments.J, moments.Pi_diff_z, grid, solver, dt)
+    return sol
 end

@@ -9,9 +9,10 @@ end
 
 function advectX!(f::DistributionGrid1d2v{DT,Polar}, grid::PolarGrid, advector=advect1DFourier!) where DT
     dt = grid.dt
+    vth = thermal_velocity(f)
     for iv1 = 2 :size(f.data)[2]
         for iv2 = 1:size(f.data)[3]
-            xdisp = grid.vaxes[1][iv1] * cos(grid.vaxes[2][iv2] + grid.b0 * grid.time[grid.index[1]])
+            xdisp = vth * grid.vaxes[1][iv1] * cos(grid.vaxes[2][iv2] + grid.b0 * grid.time[grid.index[1]])
             fshift =  dt * xdisp/ grid.delta[1]
             advector(view(f.data, :,iv1, iv2), fshift, grid)
         end
@@ -51,10 +52,11 @@ function advectV!(f::DistributionGrid1d2v{DT,Polar}, grid::PolarGrid, e::VectorF
     nphi = length(phigrid)
     imax = min(round(Int, (nphi / 2 - 1)), fld(nphi, 2))
     dt = grid.dt
+    electric_scale = electric_acceleration_scale(f)
 
     @threads for ix in 1:nx
-        delta_vx = dt * e[1].data[ix]
-        delta_vy = dt * e[2].data[ix]
+        delta_vx = dt * electric_scale * e[1].data[ix]
+        delta_vy = dt * electric_scale * e[2].data[ix]
         
         # Transformation for advection in the rotating frame
         delta_mux = delta_vx * cos(grid.b0 * grid.time[grid.index[1]]) + delta_vy * sin(grid.b0 * grid.time[grid.index[1]])

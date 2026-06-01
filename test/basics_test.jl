@@ -43,6 +43,15 @@ using Adapt
 
         @test size(f.data) == (length(grid.xaxes[1]), length(grid.vaxes[1]))
         @test f.data isa Array
+        @test f.m == 1.0
+        @test f.q == 1.0
+
+        ion = bslLD.Distribution(grid, 0.01; m=4.0, q=2.0)
+        @test ion.m == 4.0
+        @test ion.q == 2.0
+        @test bslLD.thermal_velocity(ion) == 0.5
+        @test bslLD.electric_acceleration_scale(ion) == 1.0
+        @test_throws ArgumentError bslLD.Distribution(grid, 0.01; m=0.0)
     end
 
     @testset "Fields" begin

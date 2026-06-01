@@ -7,7 +7,7 @@ struct ScalarField{DT,N,AT<:AbstractArray{DT,N}}
     end
 end
 
-import Base: +, *, getindex, iterate, length
+import Base: +, -, *, getindex, iterate, length
 
 
 struct VectorField{DT, N, SF<:ScalarField{DT,N}, NF}
@@ -41,6 +41,11 @@ iterate(field::VectorField, state...) = iterate(field.data, state...)
 function +(a::ScalarField{DT,N}, b::ScalarField{DT,N}) where {DT,N}
     axes(a.data) == axes(b.data) || throw(DimensionMismatch("ScalarField axes must match for addition"))
     return ScalarField(a.data .+ b.data)
+end
+
+function -(a::ScalarField{DT,N}, b::ScalarField{DT,N}) where {DT,N}
+    axes(a.data) == axes(b.data) || throw(DimensionMismatch("ScalarField axes must match for subtraction"))
+    return ScalarField(a.data .- b.data)
 end
 
 function +(a::ScalarField{DT,N}, b::Number) where {DT,N}

@@ -71,7 +71,7 @@ backend_vector(values) = bslLD.backend_array(collect(values))
 
 @inline _cartesian_axis_sizes(grid::CartGrid) = (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
 
-struct XShiftContext{GT, KT, VAT, SXT, SVT, PT}
+struct XShiftContext{GT, KT, VAT, SXT, SVT, PT, VTT}
     grid::GT
     k::KT
     vaxes::VAT
@@ -80,9 +80,10 @@ struct XShiftContext{GT, KT, VAT, SXT, SVT, PT}
     dir::Int
     phi::PT
     dt::PT
+    vth::VTT
 end
 
-struct VShiftContext{GT, ET, KT, SXT, SVT, PT}
+struct VShiftContext{GT, ET, KT, SXT, SVT, PT, EST}
     grid::GT
     e_components::ET
     k::KT
@@ -91,6 +92,7 @@ struct VShiftContext{GT, ET, KT, SXT, SVT, PT}
     dir::Int
     phi::PT
     dt::PT
+    electric_scale::EST
 end
 
 Adapt.@adapt_structure XShiftContext
@@ -113,7 +115,7 @@ end
         xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
     end
 
-    return (ctx.dt / ctx.grid.delta[ctx.dir]) * ctx.k[ixs[ctx.dir]] * xdisp
+    return (ctx.dt / ctx.grid.delta[ctx.dir]) * ctx.k[ixs[ctx.dir]] * ctx.vth * xdisp
 end
 
 @inline function compute_v_phase(ctx::VShiftContext, index::Int)
@@ -125,7 +127,7 @@ end
         delta_v += ctx.e_components[field_dir][ixs[1]] * rotation[ctx.dir, field_dir]
     end
 
-    return (ctx.dt / ctx.grid.delta[length(ctx.sizes_x) + ctx.dir]) * ctx.k[ivs[ctx.dir]] * delta_v
+    return (ctx.dt / ctx.grid.delta[length(ctx.sizes_x) + ctx.dir]) * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * delta_v
 end
 
 @kernel function distribution_kernel!(ff, phase_context)
@@ -137,20 +139,20 @@ end
     end
 end
 
-function x_shift_context(grid::CartGrid, simTime::SimulationTime, k, dir::Int)
+function x_shift_context(grid::CartGrid, simTime::SimulationTime, k, dir::Int; vth=1.0)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     vaxes = map(backend_vector, grid.vaxes)
     phi = simTime.phase
     dt = _effective_dt(simTime)
-    return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi, dt)
+    return XShiftContext(grid, k, vaxes, sizes_x, sizes_v, dir, phi, dt, vth)
 end
 
-function v_shift_context(grid::CartGrid, simTime::SimulationTime, e::VectorField, k, dir::Int)
+function v_shift_context(grid::CartGrid, simTime::SimulationTime, e::VectorField, k, dir::Int; electric_scale=1.0)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     e_components = Tuple(component.data for component in e)
     phi = simTime.phase
     dt = _effective_dt(simTime)
-    return VShiftContext(grid, e_components, k, sizes_x, sizes_v, dir, phi, dt)
+    return VShiftContext(grid, e_components, k, sizes_x, sizes_v, dir, phi, dt, electric_scale)
 end
 
 # --- AdvectionPlan: pre-allocated buffers and cached data for zero-allocation advection ---
@@ -218,8 +220,9 @@ function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     phi = simTime.phase
     dt = _effective_dt(simTime)
+    vth = thermal_velocity(f)
     for dir in 1:NX
-        ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi, dt)
+        ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi, dt, vth)
         _apply_phase_shift!(f, plan.ff_buf, plan.fwd_x[dir], plan.inv_x[dir], kernel!, ctx, exec)
     end
     return nothing
@@ -235,8 +238,9 @@ function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
     e_components = ntuple(i -> e[i].data, Val(NV))
     phi = simTime.phase
     dt = _effective_dt(simTime)
+    electric_scale = electric_acceleration_scale(f)
     for dir in 1:NV
-        ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi, dt)
+        ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi, dt, electric_scale)
         _apply_phase_shift!(f, plan.ff_buf, plan.fwd_v[dir], plan.inv_v[dir], kernel!, ctx, exec)
     end
     return nothing
