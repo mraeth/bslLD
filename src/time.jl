@@ -22,6 +22,8 @@ function SimulationTime(
     phase = zero(T),
 ) where {T<:AbstractFloat}
 
+    gyro_frequency >= 0 || throw(ArgumentError(
+        "gyro_frequency must be non-negative; charge sign is handled by electric_acceleration_scale"))
     return SimulationTime{T}(
         dt,
         1.0,

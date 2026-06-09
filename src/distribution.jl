@@ -75,6 +75,56 @@ function compute_density(f::DistributionGrid{DT,NX,NV,NXNV,Cart}, grid::CartGrid
     return ScalarField(reshape(sum(f.data, dims=dim) * dv, ntuple(i -> length(grid.xaxes[i]), Val(NX))))
 end
 
+function _current_arrays(f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+                         grid::CartGrid) where {DT,NX,NV,NXNV}
+
+    vdims = ntuple(i -> NX + i, Val(NV))
+    dv    = prod(grid.delta[NX+1:NX+NV])
+    xsize = ntuple(i -> length(grid.xaxes[i]), Val(NX))
+
+    return ntuple(a -> begin
+        v      = collect(grid.vaxes[a])
+        vshape = ntuple(k -> k == NX + a ? length(v) : 1, Val(NXNV))
+        vview  = reshape(v, vshape)
+
+        reshape(sum(f.data .* vview, dims=vdims) * dv, xsize)
+    end, Val(NV))
+end
+
+function _as_vectorfield(J)
+    return VectorField([
+        ScalarField(bslLD.backend_array(J[a])) for a in eachindex(J)
+    ])
+end
+
+function compute_current(f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+                         grid::CartGrid) where {DT,NX,NV,NXNV}
+
+    J = _current_arrays(f, grid)
+    return _as_vectorfield(J)
+end
+
+function compute_current(f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+                             grid::CartGrid,
+                             phase::Real) where {DT,NX,NV,NXNV}
+
+    1 <= NV <= 3 || error("This function expects 1 <= NV <= 3.")
+
+    Jrot = _current_arrays(f, grid)
+    phi = -bslLD.electric_acceleration_scale(f) * phase
+    Rot = R(grid.Bdir, phi)
+    Z = zero.(Jrot[1])
+    Jpad = ntuple(a -> a <= NV ? Jrot[a] : Z, Val(3))
+
+    Jlab = ntuple(a -> begin
+        Rot[a,1] .* Jpad[1] .+
+        Rot[a,2] .* Jpad[2] .+
+        Rot[a,3] .* Jpad[3]
+    end, Val(NV))
+    return _as_vectorfield(Jlab)
+end
+
+
 function compute_density(f :: DistributionGrid, grid::PolarGrid)
     dim = Tuple(i for i=length(grid.xaxes)+1:length(grid.xaxes)+length(grid.vaxes))
     dv = prod(grid.delta[1+length(grid.xaxes):end])
