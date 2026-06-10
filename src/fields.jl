@@ -7,7 +7,7 @@ struct ScalarField{DT,N,AT<:AbstractArray{DT,N}}
     end
 end
 
-import Base: +, -, *, getindex, iterate, length, size
+import Base: +, -, *, transpose, adjoint, getindex, iterate, length, size
 
 
 struct VectorField{DT, N, SF<:ScalarField{DT,N}, NF}
@@ -35,7 +35,7 @@ struct VectorField{DT, N, SF<:ScalarField{DT,N}, NF}
 end
 
 function VectorField(data::AbstractVector{<:AbstractArray})
-    return VectorField(ScalarField.(data))
+    return VectorField([ScalarField(bslLD.backend_array(x)) for x in data])
 end
 
 
@@ -71,7 +71,7 @@ function MatrixField(rows::AbstractVector{<:VectorField{DT,N,SF,NC}}) where {DT,
 end
 
 function MatrixField(data::AbstractMatrix{<:AbstractArray})
-    return MatrixField(ScalarField.(data))
+    return MatrixField([ScalarField(bslLD.backend_array(data[i,j])) for i in 1:size(data,1), j in 1:size(data,2)])
 end
 
 getindex(m::MatrixField{DT,N,SF,NR,NC,NF}, i::Int, j::Int) where {DT,N,SF,NR,NC,NF} = m.data[(i-1)*NC + j]
@@ -124,7 +124,39 @@ function *(a::VectorField{DT,N,SF,NF}, b::Number) where {DT,N,SF<:ScalarField{DT
     return VectorField(map(component -> component * b, a.data))
 end
 
+function +(a::VectorField{DT,N,SF,NF}, b::VectorField{DT,N,SF,NF}) where {DT,N,SF<:ScalarField{DT,N},NF}
+    return VectorField(map((ca, cb) -> ca + cb, a.data, b.data))
+end
 
+function -(a::VectorField{DT,N,SF,NF}, b::VectorField{DT,N,SF,NF}) where {DT,N,SF<:ScalarField{DT,N},NF}
+    return VectorField(map((ca, cb) -> ca - cb, a.data, b.data))
+end
+
+function *(R::AbstractMatrix{<:Number}, v::VectorField{DT,N,SF,NF}) where {DT,N,SF,NF}
+    NR_out = size(R, 1)
+    size(R, 2) == NF || throw(DimensionMismatch("matrix columns $(size(R,2)) must match VectorField length $NF"))
+    result = SF[sum(R[i,j] * v[j] for j in 1:NF) for i in 1:NR_out]
+    return VectorField(result)
+end
+
+function *(R::AbstractMatrix{<:Number}, m::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF}
+    NR_out = size(R, 1)
+    size(R, 2) == NR || throw(DimensionMismatch("matrix columns $(size(R,2)) must match MatrixField rows $NR"))
+    result = SF[sum(R[i,k] * m[k,j] for k in 1:NR) for i in 1:NR_out, j in 1:NC]
+    return MatrixField(result)
+end
+
+function *(m::MatrixField{DT,N,SF,NR,NC,NF}, R::AbstractMatrix{<:Number}) where {DT,N,SF,NR,NC,NF}
+    NC_out = size(R, 2)
+    size(R, 1) == NC || throw(DimensionMismatch("matrix rows $(size(R,1)) must match MatrixField columns $NC"))
+    result = SF[sum(m[i,k] * R[k,j] for k in 1:NC) for i in 1:NR, j in 1:NC_out]
+    return MatrixField(result)
+end
+
+transpose(m::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF} =
+    MatrixField(SF[m[j,i] for i in 1:NC, j in 1:NR])
+
+adjoint(m::MatrixField) = transpose(m)
 
 function +(a::MatrixField{DT,N,SF,NR,NC,NF}, b::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF}
     return MatrixField(reshape(SF[a[i,j] + b[i,j] for i in 1:NR for j in 1:NC], NR, NC))

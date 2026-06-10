@@ -1,3 +1,5 @@
+import RecipesBase
+
 mutable struct SimulationTime{T<:AbstractFloat}
     dt::T
     fraction_dt::T
@@ -73,4 +75,16 @@ end
 function reset_timer!(t::SimulationTime)
     t.wall_start_ns = time_ns()
     return t
+end
+
+Base.eltype(::Type{<:SimulationTime{T}}) where {T} = T
+Base.length(t::SimulationTime) = min(floor(Int, t.final_T / t.dt) + 1, t.nmax == typemax(Int) ? typemax(Int) : t.nmax + 1)
+
+function Base.iterate(t::SimulationTime, state::Int = 0)
+    (state > t.nmax || t.dt * state > t.final_T) && return nothing
+    return (t.dt * state, state + 1)
+end
+
+RecipesBase.@recipe function f(t::SimulationTime)
+    collect(t)
 end

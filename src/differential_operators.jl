@@ -72,6 +72,23 @@ function div(field::VectorField{T, N}, grid::Grid) where {T, N}
     return result
 end
 
+function div(field::MatrixField{DT,N,SF,NR,NC,NF}, grid::Grid) where {DT,N,SF,NR,NC,NF}
+    ndirs = spatial_ndims(grid)
+    ndirs >= 1 || throw(ArgumentError("div requires at least one spatial dimension"))
+    NC >= ndirs || throw(ArgumentError("div on a $ndirs-D grid requires at least $ndirs matrix columns"))
+
+    rows = Vector{SF}(undef, NR)
+    for i in 1:NR
+        row_result = differentiate(field[i, 1], grid, 1)
+        for dir in 2:ndirs
+            row_result = row_result + differentiate(field[i, dir], grid, dir)
+        end
+        rows[i] = row_result
+    end
+
+    return VectorField(rows)
+end
+
 function curl(field::VectorField, grid::Grid)
     ndims_x = spatial_ndims(grid)
     ncomp = ncomponents(field)
