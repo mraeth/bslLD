@@ -31,7 +31,7 @@ function backend_copy(e::ScalarField)
     return ScalarField(backend_copy(e.data))
 end
 
-function backend_copy(m::MatrixField{DT,N,SF,NR,NC}) where {DT,N,SF,NR,NC}
+function backend_copy(m::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF}
     return MatrixField(reshape(SF[backend_copy(m[i,j]) for i in 1:NR for j in 1:NC], NR, NC))
 end
 

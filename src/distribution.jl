@@ -125,6 +125,51 @@ function compute_current(f::DistributionGrid{DT,NX,NV,NXNV,Cart},
 end
 
 
+function _momentum_tensor_arrays(f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+                                  grid::CartGrid) where {DT,NX,NV,NXNV}
+    vdims = ntuple(i -> NX + i, Val(NV))
+    dv    = prod(grid.delta[NX+1:NX+NV])
+    xsize = ntuple(i -> length(grid.xaxes[i]), Val(NX))
+
+    return [begin
+        va      = collect(grid.vaxes[a])
+        vb      = collect(grid.vaxes[b])
+        vashape = ntuple(k -> k == NX + a ? length(va) : 1, Val(NXNV))
+        vbshape = ntuple(k -> k == NX + b ? length(vb) : 1, Val(NXNV))
+        reshape(sum(f.data .* reshape(va, vashape) .* reshape(vb, vbshape), dims=vdims) * dv, xsize)
+    end for a in 1:NV, b in 1:NV]
+end
+
+function _as_matrixfield(Pi)
+    NR, NC = size(Pi)
+    return MatrixField([ScalarField(bslLD.backend_array(Pi[a,b])) for a in 1:NR, b in 1:NC])
+end
+
+function compute_momentum_tensor(f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+                                  grid::CartGrid) where {DT,NX,NV,NXNV}
+    Pi = _momentum_tensor_arrays(f, grid)
+    return _as_matrixfield(Pi)
+end
+
+function compute_momentum_tensor(f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+                                  grid::CartGrid, phase::Real) where {DT,NX,NV,NXNV}
+    1 <= NV <= 3 || error("This function expects 1 <= NV <= 3.")
+
+    Pi_rot = _momentum_tensor_arrays(f, grid)
+    phi    = -bslLD.electric_acceleration_scale(f) * phase
+    Rot    = R(grid.Bdir, phi)
+    Z      = zero.(Pi_rot[1,1])
+
+    Pi_pad = ntuple(p -> ntuple(q -> p <= NV && q <= NV ? Pi_rot[p,q] : Z, Val(3)), Val(3))
+
+    Pi_lab = [begin
+        sum(Rot[a,p] .* Rot[b,q] .* Pi_pad[p][q] for p in 1:3, q in 1:3)
+    end for a in 1:NV, b in 1:NV]
+
+    return _as_matrixfield(Pi_lab)
+end
+
+
 function compute_density(f :: DistributionGrid, grid::PolarGrid)
     dim = Tuple(i for i=length(grid.xaxes)+1:length(grid.xaxes)+length(grid.vaxes))
     dv = prod(grid.delta[1+length(grid.xaxes):end])

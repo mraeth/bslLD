@@ -39,8 +39,8 @@ function VectorField(data::AbstractVector{<:AbstractArray})
 end
 
 
-struct MatrixField{DT, N, SF<:ScalarField{DT,N}, NR, NC}
-    data :: NTuple{NR*NC, SF}
+struct MatrixField{DT, N, SF<:ScalarField{DT,N}, NR, NC, NF}
+    data :: NTuple{NF, SF}
 
     function MatrixField(data::AbstractMatrix{<:ScalarField})
         NR, NC = size(data)
@@ -54,7 +54,7 @@ struct MatrixField{DT, N, SF<:ScalarField{DT,N}, NR, NC}
         end
         tup = Tuple(data[i, j] for i in 1:NR for j in 1:NC)
         return new{eltype(first_component.data), ndims(first_component.data),
-                   component_type, NR, NC}(tup)
+                   component_type, NR, NC, NR*NC}(tup)
     end
 end
 
@@ -74,10 +74,10 @@ function MatrixField(data::AbstractMatrix{<:AbstractArray})
     return MatrixField(ScalarField.(data))
 end
 
-getindex(m::MatrixField{DT,N,SF,NR,NC}, i::Int, j::Int) where {DT,N,SF,NR,NC} = m.data[(i-1)*NC + j]
-getindex(m::MatrixField{DT,N,SF,NR,NC}, i::Int) where {DT,N,SF,NR,NC} =
+getindex(m::MatrixField{DT,N,SF,NR,NC,NF}, i::Int, j::Int) where {DT,N,SF,NR,NC,NF} = m.data[(i-1)*NC + j]
+getindex(m::MatrixField{DT,N,SF,NR,NC,NF}, i::Int) where {DT,N,SF,NR,NC,NF} =
     VectorField(SF[m[i, j] for j in 1:NC])
-size(::MatrixField{DT,N,SF,NR,NC}) where {DT,N,SF,NR,NC} = (NR, NC)
+size(::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF} = (NR, NC)
 length(m::MatrixField) = length(m.data)
 iterate(m::MatrixField, state...) = iterate(m.data, state...)
 
@@ -126,23 +126,23 @@ end
 
 
 
-function +(a::MatrixField{DT,N,SF,NR,NC}, b::MatrixField{DT,N,SF,NR,NC}) where {DT,N,SF,NR,NC}
+function +(a::MatrixField{DT,N,SF,NR,NC,NF}, b::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF}
     return MatrixField(reshape(SF[a[i,j] + b[i,j] for i in 1:NR for j in 1:NC], NR, NC))
 end
 
-function -(a::MatrixField{DT,N,SF,NR,NC}, b::MatrixField{DT,N,SF,NR,NC}) where {DT,N,SF,NR,NC}
+function -(a::MatrixField{DT,N,SF,NR,NC,NF}, b::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF}
     return MatrixField(reshape(SF[a[i,j] - b[i,j] for i in 1:NR for j in 1:NC], NR, NC))
 end
 
-function *(a::Number, b::MatrixField{DT,N,SF,NR,NC}) where {DT,N,SF,NR,NC}
+function *(a::Number, b::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF}
     return MatrixField(reshape(SF[a * b[i,j] for i in 1:NR for j in 1:NC], NR, NC))
 end
 
-function *(a::MatrixField{DT,N,SF,NR,NC}, b::Number) where {DT,N,SF,NR,NC}
+function *(a::MatrixField{DT,N,SF,NR,NC,NF}, b::Number) where {DT,N,SF,NR,NC,NF}
     return MatrixField(reshape(SF[a[i,j] * b for i in 1:NR for j in 1:NC], NR, NC))
 end
 
-function *(m::MatrixField{DT,N,SF,NR,NC}, v::VectorField{DT,N,SF,NC}) where {DT,N,SF,NR,NC}
+function *(m::MatrixField{DT,N,SF,NR,NC,NF}, v::VectorField{DT,N,SF,NC}) where {DT,N,SF,NR,NC,NF}
     result = SF[sum(m[i,j] * v[j] for j in 1:NC) for i in 1:NR]
     return VectorField(result)
 end
