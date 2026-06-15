@@ -28,7 +28,7 @@ f = bslLD.Distribution(grid, 0.0001);
 function step!(f, grid, simTime)
     bslLD.advectX!(f, grid, simTime)
     rho = bslLD.compute_density(f, grid)
-    sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.AdiabaticFieldSolver())
+    sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.AdiabaticSolver())
     bslLD.advectV!(f, grid, simTime, sol.E)
 
 end

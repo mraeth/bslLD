@@ -29,7 +29,7 @@ grid = bslLD.Grid([0.0, -4.0, -4.0],[20.0, 4.0, 4.0],[32,32,32],1, 1.0, 3)
 function stepLie!(f, grid, simTime)
     bslLD.advectX!(f, grid, simTime)
     rho = bslLD.compute_density(f, grid)
-    sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.AdiabaticFieldSolver())
+    sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.AdiabaticSolver())
     bslLD.advectV!(f, grid, simTime, sol.E)
 end
 
@@ -38,7 +38,7 @@ function stepStrang!(f, grid, simTime)
     Ω = simTime.gyro_frequency
 
     # V half-step at phase(t)
-    sol = bslLD.solve_fields(bslLD.Moments(bslLD.compute_density(f, grid)), grid, bslLD.AdiabaticFieldSolver())
+    sol = bslLD.solve_fields(bslLD.Moments(bslLD.compute_density(f, grid)), grid, bslLD.AdiabaticSolver())
     simTime.fraction_dt = 0.5
     bslLD.advectV!(f, grid, simTime, sol.E)
 
@@ -49,7 +49,7 @@ function stepStrang!(f, grid, simTime)
 
     # V half-step at phase(t + dt)
     simTime.phase = phase_start + Ω * simTime.dt
-    sol = bslLD.solve_fields(bslLD.Moments(bslLD.compute_density(f, grid)), grid, bslLD.AdiabaticFieldSolver())
+    sol = bslLD.solve_fields(bslLD.Moments(bslLD.compute_density(f, grid)), grid, bslLD.AdiabaticSolver())
     simTime.fraction_dt = 0.5
     bslLD.advectV!(f, grid, simTime, sol.E)
     simTime.fraction_dt = 1.0

@@ -9,76 +9,11 @@ function VacuumMaxwellParams(; c::Real=1.0, ϵ0::Real=1.0, μ0::Real=1.0)
     return VacuumMaxwellParams{T}(T(c), T(ϵ0), T(μ0))
 end
 
-spatial_fft_dims(grid::Grid) = Tuple(1:spatial_ndims(grid))
-
-function fft_spatial(data::AbstractArray, grid::Grid)
-    return fft(data, spatial_fft_dims(grid))
+struct EMSolverVacuum{T<:AbstractFloat} <: AbstractFieldSolver
+    params::VacuumMaxwellParams{T}
 end
-
-function ifft_spatial(data::AbstractArray, grid::Grid)
-    return ifft(data, spatial_fft_dims(grid))
-end
-
-function spectral_wavenumber_views(field::ScalarField, grid::Grid)
-    ndims_x = spatial_ndims(grid)
-    ndims_data = ndims(field.data)
-    return ntuple(ndims_x) do dir
-        reshape(
-            spectral_wavenumbers(field.data, grid, dir),
-            ntuple(d -> d == dir ? size(field.data, dir) : 1, ndims_data),
-        )
-    end
-end
-
-function spectral_wave_number_squared(field::ScalarField, grid::Grid)
-    kviews = spectral_wavenumber_views(field, grid)
-    k2 = bslLD.backend_array(zeros(Float64, size(field.data)))
-    for kview in kviews
-        k2 .+= kview .^ 2
-    end
-    return k2
-end
-
-function spectral_curl_hat(fieldhat::Vector, kviews, ndims_x::Int)
-    ncomp = length(fieldhat)
-
-    if ndims_x == 1
-        kx = kviews[1]
-        if ncomp == 2
-            return [
-                -im .* kx .* fieldhat[2],
-                im .* kx .* fieldhat[1],
-            ]
-        elseif ncomp == 3
-            zero_component = zero.(fieldhat[1])
-            return [
-                zero_component,
-                -im .* kx .* fieldhat[3],
-                im .* kx .* fieldhat[2],
-            ]
-        end
-    elseif ndims_x == 2
-        kx, ky = kviews
-        if ncomp == 3
-            return [
-                im .* ky .* fieldhat[3],
-                -im .* kx .* fieldhat[3],
-                im .* kx .* fieldhat[2] .- im .* ky .* fieldhat[1],
-            ]
-        end
-    elseif ndims_x == 3
-        kx, ky, kz = kviews
-        if ncomp == 3
-            return [
-                im .* ky .* fieldhat[3] .- im .* kz .* fieldhat[2],
-                im .* kz .* fieldhat[1] .- im .* kx .* fieldhat[3],
-                im .* kx .* fieldhat[2] .- im .* ky .* fieldhat[1],
-            ]
-        end
-    end
-
-    throw(ArgumentError("unsupported Maxwell curl layout for $ndims_x spatial dimensions and $ncomp components"))
-end
+EMSolverVacuum(; c::Real=1.0, ϵ0::Real=1.0, μ0::Real=1.0) =
+    EMSolverVacuum(VacuumMaxwellParams(; c, ϵ0, μ0))
 
 function maxwell_supported_layout(field::VectorField, grid::Grid)
     ndims_x = spatial_ndims(grid)
@@ -86,7 +21,7 @@ function maxwell_supported_layout(field::VectorField, grid::Grid)
     return (ndims_x, ncomp) in ((1, 2), (1, 3), (2, 3), (3, 3))
 end
 
-function step_maxwell_cn!(
+function _step_maxwell_cn!(
     E::VectorField,
     B::VectorField,
     grid::Grid;
@@ -124,6 +59,18 @@ function step_maxwell_cn!(
     return nothing
 end
 
+function solve_fields!(
+    sol     :: FieldSolution,
+    ::Moments,
+    grid    :: Grid,
+    solver  :: EMSolverVacuum,
+    dt      :: Real,
+)
+    copyto!(sol.Enew, sol.E)
+    _step_maxwell_cn!(sol.Enew, sol.B, grid; dt=dt, params=solver.params)
+    return sol
+end
+
 function electromagnetic_energy(E::VectorField, B::VectorField; params::VacuumMaxwellParams=VacuumMaxwellParams())
     ncomponents(E) == ncomponents(B) || throw(ArgumentError("E and B must have the same number of components"))
 
@@ -141,4 +88,3 @@ end
 function maxwell_constraints(E::VectorField, B::VectorField, grid::Grid)
     return div(E, grid), div(B, grid)
 end
-

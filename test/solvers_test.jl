@@ -35,18 +35,18 @@ end
         grid = bslLD.Grid([0.0], [2pi], [32], 1, 2.5, 2)
         x = grid.xaxes[1]
         rho = bslLD.ScalarField(-sin.(x))
-        solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonFieldSolver())
+        solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonSolver())
+        B0 = bslLD.background_field(grid)
 
         @test length(solution.E) == 3
         @test length(solution.B) == 3
-        @test length(solution.B0) == 3
         @test maximum(abs.(solution.E[1].data .+ cos.(x))) < 1e-10
         @test maximum(abs.(solution.E[2].data)) < 1e-10
         @test maximum(abs.(solution.E[3].data)) < 1e-10
         @test all(component -> maximum(abs.(component.data)) < 1e-12, solution.B)
-        @test maximum(abs.(solution.B0[1].data)) < 1e-12
-        @test maximum(abs.(solution.B0[2].data .- fill(2.5, length(x)))) < 1e-12
-        @test maximum(abs.(solution.B0[3].data)) < 1e-12
+        @test maximum(abs.(B0[1].data)) < 1e-12
+        @test maximum(abs.(B0[2].data .- fill(2.5, length(x)))) < 1e-12
+        @test maximum(abs.(B0[3].data)) < 1e-12
     end
 
     @testset "Poisson 2D" begin
@@ -54,7 +54,8 @@ end
         x = grid.xaxes[1]
         y = grid.xaxes[2]
         rho = bslLD.ScalarField([-sin(xi) + cos(yi) for xi in x, yi in y])
-        solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonFieldSolver())
+        solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonSolver())
+        B0 = bslLD.background_field(grid)
 
         expected_ex = [-cos(xi) for xi in x, yi in y]
         expected_ey = [-sin(yi) for xi in x, yi in y]
@@ -62,9 +63,9 @@ end
         @test maximum(abs.(solution.E[2].data .- expected_ey)) < 1e-10
         @test maximum(abs.(solution.E[3].data)) < 1e-10
         @test all(component -> maximum(abs.(component.data)) < 1e-12, solution.B)
-        @test maximum(abs.(solution.B0[1].data)) < 1e-12
-        @test maximum(abs.(solution.B0[2].data)) < 1e-12
-        @test maximum(abs.(solution.B0[3].data .- fill(1.25, length(x), length(y)))) < 1e-12
+        @test maximum(abs.(B0[1].data)) < 1e-12
+        @test maximum(abs.(B0[2].data)) < 1e-12
+        @test maximum(abs.(B0[3].data .- fill(1.25, length(x), length(y)))) < 1e-12
     end
 
     @testset "Poisson 3D" begin
@@ -75,7 +76,7 @@ end
         rho = bslLD.ScalarField([
             -sin(xi) + cos(yi) - sin(zi) for xi in x, yi in y, zi in z
         ])
-        solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonFieldSolver())
+        solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonSolver())
 
         expected_ex = [-cos(xi) for xi in x, yi in y, zi in z]
         expected_ey = [-sin(yi) for xi in x, yi in y, zi in z]
@@ -92,7 +93,8 @@ end
         y = grid.xaxes[2]
         rho = bslLD.ScalarField([sin(xi) + cos(2yi) for xi in x, yi in y])
         current = zero_current_field(grid)
-        solution = bslLD.solve_fields(bslLD.Moments(rho, current), grid, bslLD.AdiabaticFieldSolver())
+        solution = bslLD.solve_fields(bslLD.Moments(rho, current), grid, bslLD.AdiabaticSolver())
+        B0 = bslLD.background_field(grid)
 
         expected_ex = [-cos(xi) for xi in x, yi in y]
         expected_ey = [2sin(2yi) for xi in x, yi in y]
@@ -100,18 +102,18 @@ end
         @test maximum(abs.(solution.E[2].data .- expected_ey)) < 1e-10
         @test maximum(abs.(solution.E[3].data)) < 1e-10
         @test all(component -> maximum(abs.(component.data)) < 1e-12, solution.B)
-        @test maximum(abs.(solution.B0[1].data .- fill(0.75, length(x), length(y)))) < 1e-12
-        @test maximum(abs.(solution.B0[2].data)) < 1e-12
-        @test maximum(abs.(solution.B0[3].data)) < 1e-12
+        @test maximum(abs.(B0[1].data .- fill(0.75, length(x), length(y)))) < 1e-12
+        @test maximum(abs.(B0[2].data)) < 1e-12
+        @test maximum(abs.(B0[3].data)) < 1e-12
     end
 end
 
-@testset "SemiImplicitEMSolver" begin
+@testset "EMSolverDKPol" begin
     bslLD.set_execution_space!(exec=bslLD.backend())
     beta_i = 0.5
     mu     = 4.0
     dt     = 0.1
-    solver = bslLD.SemiImplicitEMSolver(beta_i, mu)
+    solver = bslLD.EMSolverDKPol(beta_i, mu)
 
     @testset "Faraday step (2D)" begin
         Nx, Ny = 16, 14
@@ -127,7 +129,7 @@ end
         J_zero = bslLD.zero_vectorfield3(grid)
         Pi_zero = bslLD.zero_vectorfield3(grid)
         moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_zero, Pi_zero)
-        sol = bslLD.FieldSolution(E, B, bslLD.background_field(grid))
+        sol = bslLD.FieldSolution(E, B)
 
         bslLD.solve_fields!(sol, moments, grid, solver, dt)
 
@@ -136,10 +138,10 @@ end
         # E_x = sin(x): dEx/dy = 0; E_y = cos(y): dEy/dx = 0 → curl_z = 0
         # curl(E)_x = dEz/dy - dEy/dz = 0 - 0 = 0 (no z-dim)
         # curl(E)_y = dEx/dz - dEz/dx = 0 - 0 = 0 (no z-dim)
-        # sol.Bhalf = 0 - dt*curl(E^n) = all zeros here (curl(E)=0 for this E)
-        @test maximum(abs.(sol.Bhalf[1].data)) < 1e-10
-        @test maximum(abs.(sol.Bhalf[2].data)) < 1e-10
-        @test maximum(abs.(sol.Bhalf[3].data)) < 1e-10
+        # sol.B = 0 - dt*curl(E^n) = all zeros here (curl(E)=0 for this E)
+        @test maximum(abs.(sol.B[1].data)) < 1e-10
+        @test maximum(abs.(sol.B[2].data)) < 1e-10
+        @test maximum(abs.(sol.B[3].data)) < 1e-10
     end
 
     @testset "E_perp 2x2 solve (2D)" begin
@@ -160,7 +162,7 @@ end
         ])
         Pi_zero = bslLD.zero_vectorfield3(grid)
         moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_zero)
-        sol = bslLD.FieldSolution(E, B, bslLD.background_field(grid))
+        sol = bslLD.FieldSolution(E, B)
 
         bslLD.solve_fields!(sol, moments, grid, solver, dt)
 
@@ -200,7 +202,7 @@ end
 
         E = bslLD.zero_vectorfield3(grid)
         B = bslLD.zero_vectorfield3(grid)
-        sol = bslLD.FieldSolution(E, B, bslLD.background_field(grid))
+        sol = bslLD.FieldSolution(E, B)
 
         bslLD.solve_fields!(sol, moments, grid, solver, dt)
 
@@ -211,7 +213,7 @@ end
         grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [8, 8], 2, 1.0, 3)
         E = bslLD.zero_vectorfield3(grid)
         B = bslLD.zero_vectorfield3(grid)
-        sol = bslLD.FieldSolution(E, B, bslLD.background_field(grid))
+        sol = bslLD.FieldSolution(E, B)
         rho = bslLD.empty_scalarfield(grid)
         J = bslLD.zero_vectorfield3(grid)
         Pi = bslLD.zero_vectorfield3(grid)
@@ -221,18 +223,17 @@ end
 
         grid_wrong_bdir = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [8, 8], 2, 1.0, 1)
         sol2 = bslLD.FieldSolution(bslLD.zero_vectorfield3(grid_wrong_bdir),
-                                   bslLD.zero_vectorfield3(grid_wrong_bdir),
-                                   bslLD.background_field(grid_wrong_bdir))
+                                   bslLD.zero_vectorfield3(grid_wrong_bdir))
         @test_throws ArgumentError bslLD.solve_fields!(sol2, bslLD.Moments(rho, J, Pi), grid_wrong_bdir, solver, dt)
     end
 end
 
-@testset "FullyImplicitEMSolver" begin
+@testset "EMSolverDKNoPol" begin
     bslLD.set_execution_space!(exec=bslLD.backend())
     beta_i = 0.5
     mu     = 4.0
     dt     = 0.1
-    solver = bslLD.FullyImplicitEMSolver(beta_i, mu)
+    solver = bslLD.EMSolverDKNoPol(beta_i, mu)
 
     @testset "E_perp from constant J (2D)" begin
         Nx, Ny = 16, 14
@@ -249,7 +250,7 @@ end
         moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_zero)
         E = bslLD.zero_vectorfield3(grid)
         B = bslLD.zero_vectorfield3(grid)
-        sol = bslLD.FieldSolution(E, B, bslLD.background_field(grid))
+        sol = bslLD.FieldSolution(E, B)
 
         bslLD.solve_fields!(sol, moments, grid, solver, dt)
 
@@ -275,7 +276,7 @@ end
         moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_zero, Pi_diff)
         E = bslLD.zero_vectorfield3(grid)
         B = bslLD.zero_vectorfield3(grid)
-        sol = bslLD.FieldSolution(E, B, bslLD.background_field(grid))
+        sol = bslLD.FieldSolution(E, B)
 
         bslLD.solve_fields!(sol, moments, grid, solver, dt)
 
@@ -289,16 +290,16 @@ end
         # Faraday: curl(E)_y = -∂_x E_z = -coeff cos(x)
         # B_y^{n+1} = 0 - dt * (-coeff cos(x)) = dt*coeff*cos(x)
         expected_By = [dt * coeff * cos(xi) for xi in x, yi in y]
-        @test maximum(abs.(sol.Bhalf[1].data)) < 1e-10
-        @test maximum(abs.(sol.Bhalf[2].data .- expected_By)) < 1e-10
-        @test maximum(abs.(sol.Bhalf[3].data)) < 1e-10
+        @test maximum(abs.(sol.B[1].data)) < 1e-10
+        @test maximum(abs.(sol.B[2].data .- expected_By)) < 1e-10
+        @test maximum(abs.(sol.B[3].data)) < 1e-10
     end
 
     @testset "Argument validation" begin
         grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [8, 8], 2, 1.0, 3)
         E = bslLD.zero_vectorfield3(grid)
         B = bslLD.zero_vectorfield3(grid)
-        sol = bslLD.FieldSolution(E, B, bslLD.background_field(grid))
+        sol = bslLD.FieldSolution(E, B)
         rho = bslLD.empty_scalarfield(grid)
         J = bslLD.zero_vectorfield3(grid)
         Pi = bslLD.zero_vectorfield3(grid)

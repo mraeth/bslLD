@@ -51,7 +51,11 @@ using bslLD
     E_expected = [real(ifft(component, (1,))) for component in Ehat_expected]
     B_expected = [real(ifft(component, (1,))) for component in Bhat_expected]
 
-    bslLD.step_maxwell_cn!(E, B, grid; dt=dt, params=params)
+    solver = bslLD.EMSolverVacuum(; c=params.c, ϵ0=params.ϵ0, μ0=params.μ0)
+    moments = bslLD.Moments(bslLD.ScalarField(zeros(length(x))))
+    sol = bslLD.FieldSolution(E, B)
+    bslLD.solve_fields!(sol, moments, grid, solver, dt)
+    sol.E .= sol.Enew
 
     for d in 1:3
         @test maximum(abs.(E[d].data .- E_expected[d])) < 1e-10
