@@ -197,3 +197,26 @@ function empty_scalarfield(grid::Grid)
     data = bslLD.allocate(zeros(Float64, dims))
     return ScalarField(data)
 end
+
+function zero_vectorfield_like(vf::VectorField)
+    return VectorField([ScalarField(zero.(c.data)) for c in vf])
+end
+
+function Base.copyto!(dst::VectorField, src::VectorField)
+    for d in 1:ncomponents(dst)
+        dst[d].data .= src[d].data
+    end
+    return dst
+end
+
+function Base.copyto!(dst::VectorField, src::AbstractVector{<:ScalarField})
+    for d in 1:ncomponents(dst)
+        dst[d].data .= src[d].data
+    end
+    return dst
+end
+
+function Base.materialize!(dst::VectorField, bc::Base.Broadcast.Broadcasted)
+    copyto!(dst, Base.materialize(bc))
+    return dst
+end

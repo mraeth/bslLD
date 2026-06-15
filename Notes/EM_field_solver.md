@@ -826,3 +826,674 @@ E_z^{n+1}
 \nabla_\perp\cdot\mathbf E_\perp^{n+1}
 \right).
 $$
+
+
+
+
+## Step-by-step implementation plan
+
+1. Add staggered magnetic field storage.
+
+   Store $E^n$ and $B^{n-1/2}$.
+
+   Recommended fields in `FieldSolution`:
+
+   ```julia
+   sol.E        # E^n, overwritten by E^{n+1}
+   sol.Eold     # buffer for E^n
+   sol.Ecenter  # E^{n+1/2}
+   sol.Bhalf    # B^{n-1/2}, overwritten by B^{n+1/2}
+   ```
+
+2. Initialize `Bhalf`.
+
+   If the code currently has $B^0$, initialize
+
+   $$
+   B^{-1/2}
+   =
+   B^0
+   +
+   \frac{\Delta t}{2}
+   \nabla\times E^0 .
+   $$
+
+   In code:
+
+   ```julia
+   curlE = curl(sol.E, grid)
+   for d in 1:ncomponents(sol.Bhalf)
+       sol.Bhalf[d].data .= sol.B[d].data .+ 0.5 * dt .* curlE[d].data
+   end
+   ```
+
+3. Modify the semi-implicit field solver.
+
+   The solver should use:
+
+   ```julia
+   sol.E      # input E^n, output E^{n+1}
+   sol.Bhalf  # input B^{n-1/2}, output B^{n+1/2}
+   ```
+
+   Replace all use of `sol.B` inside the semi-implicit EM solver by `sol.Bhalf`.
+
+4. Implement explicit staggered Faraday update.
+
+   Update
+
+   $$
+   B^{n+1/2}
+   =
+   B^{n-1/2}
+   -
+   \Delta t
+   \nabla\times E^n .
+   $$
+
+   In code:
+
+   ```julia
+   curlE = curl(E, grid)
+   for d in 1:ncomponents(Bhalf)
+       Bhalf[d].data .-= dt .* curlE[d].data
+   end
+   ```
+
+5. Implement the perpendicular implicit electric-field update.
+
+   After the Faraday step, compute
+
+   $$
+   \nabla\times B^{n+1/2}.
+   $$
+
+   Then solve
+
+   $$
+   \left[
+   I
+   -
+   \frac{\Delta t}{\mu}
+   R
+   \right]
+   E_\perp^{n+1}
+   =
+   E_\perp^n
+   +
+   \frac{\Delta t}{\mu}
+   \left[
+   \frac{2}{\beta_i}
+   \left(
+   \nabla\times B^{n+1/2}
+   \right)_\perp
+   -
+   J_{i,\perp}^n
+   \right].
+   $$
+
+   With $R(a_1,a_2)=(a_2,-a_1)$, the local solve is
+
+   ```julia
+   α = dt / solver.mu
+   c = 2 / solver.beta_i
+
+   rhs1 = E[d1].data .+ α .* (c .* curlB[d1].data .- J_i_perp[d1].data)
+   rhs2 = E[d2].data .+ α .* (c .* curlB[d2].data .- J_i_perp[d2].data)
+
+   denom = 1 + α^2
+
+   E[d1].data .= (rhs1 .+ α .* rhs2) ./ denom
+   E[d2].data .= (rhs2 .- α .* rhs1) ./ denom
+   ```
+
+6. Implement the parallel Helmholtz solve.
+
+   Use the updated $E_\perp^{n+1}$ and solve
+
+   $$
+   \left[
+   \nabla_\perp^2
+   -
+   \frac{\beta_i}{2}
+   \left(
+   1+\frac{1}{\mu}
+   \right)
+   \right]
+   E_z^{n+1}
+   =
+   \frac{\beta_i}{2}
+   \nabla\cdot
+   \left(
+   \Pi_{e,z}^n
+   -
+   \Pi_{i,z}^n
+   \right)
+   +
+   \partial_z
+   \left(
+   \nabla_\perp\cdot E_\perp^{n+1}
+   \right).
+   $$
+
+   This part can mostly stay as in your current implementation.
+
+7. Add centered electric field construction.
+
+   Before the field update, store $E^n$:
+
+   ```julia
+   copy!(sol.Eold, sol.E)
+   ```
+
+   After the field update, construct
+
+   $$
+   E^{n+1/2}
+   =
+   \frac12
+   \left(
+   E^n+E^{n+1}
+   \right).
+   $$
+
+   In code:
+
+   ```julia
+   for d in 1:ncomponents(sol.E)
+       sol.Ecenter[d].data .= 0.5 .* (sol.Eold[d].data .+ sol.E[d].data)
+   end
+   ```
+
+8. Change the full timestep order.
+
+   Each timestep should be:
+
+   ```text
+   given f_i^n, E^n, B^{n-1/2}
+
+   1. compute moments from f_i^n
+   2. save E^n into Eold
+   3. update B^{n-1/2} -> B^{n+1/2}
+   4. update E^n -> E^{n+1}
+   5. build E^{n+1/2}
+   6. advance particles f_i^n -> f_i^{n+1}
+      using frozen E^{n+1/2}, B^{n+1/2}
+   7. exit with E^{n+1}, B^{n+1/2}
+   ```
+
+9. Implement the Strang step.
+
+   ```julia
+   function stepStrangSemiImplicitEM!(f_i, sol, grid, solver, simTime)
+
+       phase_start = simTime.phase
+       Ω  = simTime.gyro_frequency
+       dt = simTime.dt
+
+       # ------------------------------------------------------------
+       # Input state:
+       #   f_i       = f_i^n
+       #   sol.E     = E^n
+       #   sol.Bhalf = B^{n-1/2}
+       # ------------------------------------------------------------
+
+       # moments from f_i^n
+       n_i       = bslLD.compute_density(f_i, grid)
+       J_i_perp  = compute_J_perp(f_i, grid, simTime)
+       Pi_diff_z = compute_Pi_diff_z(f_i, grid, simTime)
+
+       moments = bslLD.Moments(n_i, J_i_perp, Pi_diff_z)
+
+       # save E^n
+       copy!(sol.Eold, sol.E)
+
+       # field update:
+       #   B^{n-1/2} -> B^{n+1/2}
+       #   E^n       -> E^{n+1}
+       bslLD.solve_fields!(sol, moments, grid, solver, dt)
+
+       # centered electric field
+       for d in 1:ncomponents(sol.E)
+           sol.Ecenter[d].data .= 0.5 .* (sol.Eold[d].data .+ sol.E[d].data)
+       end
+
+       # V half-step with E^{n+1/2}, B^{n+1/2}
+       simTime.phase = phase_start
+       simTime.fraction_dt = 0.5
+       bslLD.advectV!(f_i, grid, simTime, sol.Ecenter, sol.Bhalf)
+
+       # X full-step
+       simTime.phase = phase_start + 0.5 * Ω * dt
+       simTime.fraction_dt = 1.0
+       bslLD.advectX!(f_i, grid, simTime)
+
+       # V half-step with same frozen fields
+       simTime.phase = phase_start + Ω * dt
+       simTime.fraction_dt = 0.5
+       bslLD.advectV!(f_i, grid, simTime, sol.Ecenter, sol.Bhalf)
+
+       # restore bookkeeping
+       simTime.phase = phase_start
+       simTime.fraction_dt = 1.0
+
+       # ------------------------------------------------------------
+       # Output state:
+       #   f_i       = f_i^{n+1}
+       #   sol.E     = E^{n+1}
+       #   sol.Bhalf = B^{n+1/2}
+       # ------------------------------------------------------------
+
+       return nothing
+   end
+   ```
+
+10. Modify `solve_fields!`.
+
+   ```julia
+   function solve_fields!(
+       sol::FieldSolution,
+       moments::Moments,
+       grid::Grid,
+       solver::SemiImplicitEMSolver,
+       dt::Real,
+   )
+       moments.J !== nothing ||
+           throw(ArgumentError("moments.J is required"))
+
+       moments.Pi_diff_z !== nothing ||
+           throw(ArgumentError("moments.Pi_diff_z is required"))
+
+       grid.Bdir == 3 ||
+           throw(ArgumentError("SemiImplicitEMSolver requires grid.Bdir == 3"))
+
+       _step_semi_implicit_em!(
+           sol.E,
+           sol.Bhalf,
+           moments.J,
+           moments.Pi_diff_z,
+           grid,
+           solver,
+           dt,
+       )
+
+       return sol
+   end
+   ```
+
+11. Rename the internal field-step arguments.
+
+   Prefer
+
+   ```julia
+   function _step_semi_implicit_em!(
+       E::VectorField,
+       Bhalf::VectorField,
+       J_i_perp::VectorField,
+       Pi_diff_z::VectorField,
+       grid::Grid,
+       solver,
+       dt::Real,
+   )
+   ```
+
+   instead of calling the magnetic field simply `B`.
+
+12. Check the time-level consistency.
+
+   At timestep entry:
+
+   ```text
+   sol.E     = E^n
+   sol.Bhalf = B^{n-1/2}
+   f_i       = f_i^n
+   ```
+
+   After field solve:
+
+   ```text
+   sol.E     = E^{n+1}
+   sol.Bhalf = B^{n+1/2}
+   ```
+
+   During particle push:
+
+   ```text
+   use sol.Ecenter = E^{n+1/2}
+   use sol.Bhalf   = B^{n+1/2}
+   ```
+
+   At timestep exit:
+
+   ```text
+   sol.E     = E^{n+1}
+   sol.Bhalf = B^{n+1/2}
+   f_i       = f_i^{n+1}
+   ```
+
+13. Add basic tests.
+
+   Test at least:
+
+   - zero-field equilibrium
+   - uniform-field case
+   - single Fourier mode
+   - timestep refinement
+
+   For timestep refinement, check whether the error behaves approximately like
+
+   $$
+   \mathcal O(\Delta t^2)
+   $$
+
+   for the full Strang-coupled scheme.
+
+14. Important note.
+
+   Do not update moments again inside the same timestep before the particle push.
+   The field update uses explicit moments from $f_i^n$, and the particle step then advances with frozen centered fields.
+
+
+
+
+   # Model without electron polarization drift
+
+Define $\mu=m_e/m_i$, hence $m_i/m_e=1/\mu$. The only change is
+$$\mathbf J_{e,p}=0.$$
+
+## Derivation
+
+The electron current is
+$$\mathbf J_e=-n_e\mathbf E\times\hat{\mathbf z}-n_eu_{e,z}\hat{\mathbf z}.$$
+
+Thus Ampère's law is
+$$\nabla\times\mathbf B=\frac{\beta_i}{2}\left[\mathbf J_i-n_e\mathbf E\times\hat{\mathbf z}-n_eu_{e,z}\hat{\mathbf z}\right].$$
+
+The perpendicular part gives
+$$\left(\nabla\times\mathbf B\right)_\perp=\frac{\beta_i}{2}\left[\mathbf J_{i,\perp}-n_e\mathbf E_\perp\times\hat{\mathbf z}\right].$$
+
+Solving for $\mathbf E_\perp$,
+$$\boxed{\mathbf E_\perp=\frac{1}{n_e}\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B\right)_\perp-\mathbf J_{i,\perp}\right]\times\hat{\mathbf z}}.$$
+
+The parallel part is unchanged:
+$$\left(\nabla\times\mathbf B\right)_z=\frac{\beta_i}{2}\left(J_{i,z}-n_eu_{e,z}\right).$$
+
+Using Faraday's law,
+$$\partial_t\mathbf B=-\nabla\times\mathbf E,$$
+one obtains
+$$\nabla_\perp^2E_z=\frac{\beta_i}{2}\partial_t\left(J_{i,z}-J_{e,z}\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp\right).$$
+
+The parallel momentum moments give
+$$\partial_t\left(J_{i,z}-J_{e,z}\right)=\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}-\boldsymbol{\Pi}_{i,z}\right)+\left(n_i+\frac{1}{\mu}n_e\right)E_z.$$
+
+Therefore
+$$\boxed{\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(n_i+\frac{1}{\mu}n_e\right)\right]E_z=\frac{\beta_i}{2}\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}-\boldsymbol{\Pi}_{i,z}\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp\right)}.$$
+
+For $n_i=n_e=1$,
+$$\boxed{\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right)\right]E_z=\frac{\beta_i}{2}\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}-\boldsymbol{\Pi}_{i,z}\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp\right)}.$$
+
+## Summary
+
+With electron polarization drift neglected:
+
+- $\mathbf E_\perp$ is no longer evolved by an implicit polarization equation.
+- $\mathbf E_\perp$ is obtained algebraically from perpendicular Ampère's law.
+- $E_z$ is still obtained from the same Helmholtz equation.
+- Faraday's law still updates $\mathbf B$.
+
+The field closure is
+$$\mathbf E_\perp=\frac{1}{n_e}\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B\right)_\perp-\mathbf J_{i,\perp}\right]\times\hat{\mathbf z},$$
+$$\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(n_i+\frac{1}{\mu}n_e\right)\right]E_z=\frac{\beta_i}{2}\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}-\boldsymbol{\Pi}_{i,z}\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp\right).$$
+
+## Linearization
+
+Linearize around
+$$n_i=n_e=1,\qquad \mathbf E=0,\qquad \mathbf J_i=0,\qquad \mathbf B=\hat{\mathbf z}+\delta\mathbf B.$$
+
+Then
+$$\boxed{\delta\mathbf E_\perp=\left[\frac{2}{\beta_i}\left(\nabla\times\delta\mathbf B\right)_\perp-\delta\mathbf J_{i,\perp}\right]\times\hat{\mathbf z}}.$$
+
+The linearized parallel equation is
+$$\boxed{\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right)\right]\delta E_z=\frac{\beta_i}{2}\nabla\cdot\left(\delta\boldsymbol{\Pi}_{e,z}-\delta\boldsymbol{\Pi}_{i,z}\right)+\partial_z\left(\nabla_\perp\cdot\delta\mathbf E_\perp\right)}.$$
+
+For a Fourier mode $\sim e^{i\mathbf k\cdot\mathbf x}$,
+$$\delta\mathbf E_{\perp,\mathbf k}=\left[\frac{2i}{\beta_i}\left(\mathbf k\times\delta\mathbf B_{\mathbf k}\right)_\perp-\delta\mathbf J_{i,\perp,\mathbf k}\right]\times\hat{\mathbf z},$$
+$$\left[-k_\perp^2-\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right)\right]\delta E_{z,\mathbf k}=\frac{i\beta_i}{2}\mathbf k\cdot\left(\delta\boldsymbol{\Pi}_{e,z,\mathbf k}-\delta\boldsymbol{\Pi}_{i,z,\mathbf k}\right)-k_z\mathbf k_\perp\cdot\delta\mathbf E_{\perp,\mathbf k}.$$
+
+## Time discretization
+
+### Fully implicit field update
+
+Unknowns:
+$$\mathbf E_\perp^{n+1},\qquad E_z^{n+1},\qquad \mathbf B^{n+1}.$$
+
+Explicit moments:
+$$\mathbf J_{i,\perp}^n,\qquad \boldsymbol{\Pi}_{i,z}^n,\qquad \boldsymbol{\Pi}_{e,z}^n.$$
+
+Perpendicular Ampère is algebraic:
+$$\boxed{\mathbf E_\perp^{n+1}=\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B^{n+1}\right)_\perp-\mathbf J_{i,\perp}^n\right]\times\hat{\mathbf z}}.$$
+
+Faraday:
+$$\frac{\mathbf B^{n+1}-\mathbf B^n}{\Delta t}=-\nabla\times\left(\mathbf E_\perp^{n+1}+E_z^{n+1}\hat{\mathbf z}\right).$$
+
+Parallel Helmholtz solve:
+$$\boxed{\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right)\right]E_z^{n+1}=\frac{\beta_i}{2}\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}^n-\boldsymbol{\Pi}_{i,z}^n\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp^{n+1}\right)}.$$
+
+Eliminating $\mathbf B^{n+1}$,
+$$\mathbf B^{n+1}=\mathbf B^n-\Delta t\nabla\times\left(\mathbf E_\perp^{n+1}+E_z^{n+1}\hat{\mathbf z}\right),$$
+so
+$$\boxed{\mathbf E_\perp^{n+1}=\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B^n-\Delta t\nabla\times\nabla\times\mathbf E^{n+1}\right)_\perp-\mathbf J_{i,\perp}^n\right]\times\hat{\mathbf z}}.$$
+
+### Semi-implicit field update with explicit Faraday law
+
+Particle moments are explicit:
+$$\mathbf J_{i,\perp}^n,\qquad \boldsymbol{\Pi}_{i,z}^n,\qquad \boldsymbol{\Pi}_{e,z}^n.$$
+
+Explicit Faraday:
+$$\mathbf B^{n+1}=\mathbf B^n-\Delta t\nabla\times\left(\mathbf E_\perp^n+E_z^n\hat{\mathbf z}\right).$$
+
+Then update $\mathbf E_\perp$ algebraically:
+$$\boxed{\mathbf E_\perp^{n+1}=\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B^{n+1}\right)_\perp-\mathbf J_{i,\perp}^n\right]\times\hat{\mathbf z}}.$$
+
+Equivalently, with $R\mathbf a=\mathbf a\times\hat{\mathbf z}$,
+$$\mathbf E_\perp^{n+1}=R\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B^{n+1}\right)_\perp-\mathbf J_{i,\perp}^n\right].$$
+
+Then solve
+$$\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right)\right]E_z^{n+1}=\frac{\beta_i}{2}\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}^n-\boldsymbol{\Pi}_{i,z}^n\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp^{n+1}\right).$$
+
+### Staggered version
+
+Store $E^n$ and $B^{n-1/2}$. Faraday becomes
+$$B^{n+1/2}=B^{n-1/2}-\Delta t\nabla\times E^n.$$
+
+Then
+$$\boxed{\mathbf E_\perp^{n+1}=\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B^{n+1/2}\right)_\perp-\mathbf J_{i,\perp}^n\right]\times\hat{\mathbf z}}.$$
+
+Finally solve
+$$\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right)\right]E_z^{n+1}=\frac{\beta_i}{2}\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}^n-\boldsymbol{\Pi}_{i,z}^n\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp^{n+1}\right).$$
+
+## Implementation plan
+
+1. Store staggered fields:
+   - `sol.E = E^n`
+   - `sol.Eold = E^n` buffer
+   - `sol.Ecenter = E^{n+1/2}`
+   - `sol.Bhalf = B^{n-1/2}`
+
+2. Initialize `Bhalf` from $B^0$:
+$$B^{-1/2}=B^0+\frac{\Delta t}{2}\nabla\times E^0.$$
+
+3. At each timestep, compute explicit moments from $f_i^n$:
+$$\mathbf J_{i,\perp}^n,\qquad \boldsymbol{\Pi}_{e,z}^n-\boldsymbol{\Pi}_{i,z}^n.$$
+
+4. Save old electric field:
+    copy!(sol.Eold, sol.E)
+
+5. Update magnetic field explicitly:
+$$B^{n+1/2}=B^{n-1/2}-\Delta t\nabla\times E^n.$$
+
+6. Compute $\nabla\times B^{n+1/2}$.
+
+7. Replace the old implicit perpendicular solve by the algebraic update:
+$$\mathbf E_\perp^{n+1}=\left[\frac{2}{\beta_i}\left(\nabla\times\mathbf B^{n+1/2}\right)_\perp-\mathbf J_{i,\perp}^n\right]\times\hat{\mathbf z}.$$
+
+In code, if $R(a_1,a_2)=(a_2,-a_1)$:
+
+    c = 2 / solver.beta_i
+    rhs1 = c .* curlB[d1].data .- J_i_perp[d1].data
+    rhs2 = c .* curlB[d2].data .- J_i_perp[d2].data
+    E[d1].data .= rhs2
+    E[d2].data .= -rhs1
+
+8. Solve the parallel Helmholtz equation for $E_z^{n+1}$:
+$$\left[\nabla_\perp^2-\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right)\right]E_z^{n+1}=\frac{\beta_i}{2}\nabla\cdot\left(\boldsymbol{\Pi}_{e,z}^n-\boldsymbol{\Pi}_{i,z}^n\right)+\partial_z\left(\nabla_\perp\cdot\mathbf E_\perp^{n+1}\right).$$
+
+9. Build centered electric field:
+$$E^{n+1/2}=\frac{1}{2}\left(E^n+E^{n+1}\right).$$
+
+10. Push particles with frozen fields:
+$$E=E^{n+1/2},\qquad B=B^{n+1/2}.$$
+
+11. Timestep order:
+    given f_i^n, E^n, B^{n-1/2}
+    1. compute moments from f_i^n
+    2. save E^n
+    3. update B^{n-1/2} -> B^{n+1/2}
+    4. compute E_perp^{n+1} algebraically
+    5. solve E_z^{n+1}
+    6. build E^{n+1/2}
+    7. push particles f_i^n -> f_i^{n+1}
+    8. exit with f_i^{n+1}, E^{n+1}, B^{n+1/2}
+
+12. Important difference from the polarization model:
+$$\left[I-\frac{\Delta t}{\mu}R\right]\mathbf E_\perp^{n+1}=\cdots$$
+is removed completely. The perpendicular electric field is now obtained directly from Ampère's law.
+
+
+
+
+## Fully implicit Fourier implementation strategy
+
+Assume a periodic domain and constant densities
+$$n_i=n_e=1.$$
+
+Define
+$$c=\frac{2}{\beta_i},\qquad \lambda=\frac{\beta_i}{2}\left(1+\frac{1}{\mu}\right).$$
+
+At timestep $n$, known quantities are
+$$\mathbf E^n,\qquad \mathbf B^n,\qquad \mathbf J_{i,\perp}^n,\qquad \boldsymbol{\Pi}_{e,z}^n-\boldsymbol{\Pi}_{i,z}^n.$$
+
+Unknowns are
+$$E_x^{n+1},\qquad E_y^{n+1},\qquad E_z^{n+1}.$$
+
+After solving for $\mathbf E^{n+1}$, update
+$$\mathbf B^{n+1}=\mathbf B^n-\Delta t\nabla\times\mathbf E^{n+1}.$$
+
+### 1. Transform known fields to Fourier space
+
+For each Fourier mode $\mathbf k=(k_x,k_y,k_z)$, compute
+$$\widehat{\mathbf B}^n_{\mathbf k},\qquad \widehat{\mathbf J}_{i,\perp,\mathbf k}^n,\qquad \widehat{\mathbf Q}_{z,\mathbf k}^n,$$
+where
+$$\mathbf Q_z^n=\boldsymbol{\Pi}_{e,z}^n-\boldsymbol{\Pi}_{i,z}^n.$$
+
+### 2. Build the right-hand side
+
+The perpendicular RHS is
+$$\mathbf b_{\perp,\mathbf k}=R\left[c\left(i\mathbf k\times\widehat{\mathbf B}^n_{\mathbf k}\right)_\perp-\widehat{\mathbf J}_{i,\perp,\mathbf k}^n\right],$$
+where
+$$R(a_x,a_y)=(a_y,-a_x).$$
+
+The parallel RHS is
+$$b_{z,\mathbf k}=\frac{i\beta_i}{2}\mathbf k\cdot\widehat{\mathbf Q}_{z,\mathbf k}^n.$$
+
+Thus
+$$\mathbf b_{\mathbf k}=\begin{pmatrix}b_{x,\mathbf k}\\b_{y,\mathbf k}\\b_{z,\mathbf k}\end{pmatrix}.$$
+
+### 3. Build the $3\times3$ Fourier operator
+
+Use
+$$\nabla\times\nabla\times\mathbf E\to k^2\mathbf E-\mathbf k(\mathbf k\cdot\mathbf E),$$
+with
+$$k^2=k_x^2+k_y^2+k_z^2,\qquad k_\perp^2=k_x^2+k_y^2.$$
+
+Define
+$$\mathbf C_\perp=\left(k^2\mathbf E-\mathbf k(\mathbf k\cdot\mathbf E)\right)_\perp.$$
+
+The perpendicular equations are
+$$\mathbf E_\perp+c\Delta t\,R\mathbf C_\perp=\mathbf b_\perp.$$
+
+The parallel equation is
+$$(-k_\perp^2-\lambda)E_z+k_z(k_xE_x+k_yE_y)=b_z.$$
+
+Therefore solve
+$$A(\mathbf k)\widehat{\mathbf E}_{\mathbf k}^{n+1}=\mathbf b_{\mathbf k}.$$
+
+The matrix entries are
+
+$$A_{11}=1+c\Delta t\,(-k_xk_y),$$
+$$A_{12}=c\Delta t\,(k^2-k_y^2),$$
+$$A_{13}=c\Delta t\,(-k_yk_z),$$
+
+$$A_{21}=-c\Delta t\,(k^2-k_x^2),$$
+$$A_{22}=1+c\Delta t\,(k_xk_y),$$
+$$A_{23}=c\Delta t\,(k_xk_z),$$
+
+$$A_{31}=k_zk_x,$$
+$$A_{32}=k_zk_y,$$
+$$A_{33}=-k_\perp^2-\lambda.$$
+
+### 4. Solve each Fourier mode independently
+
+For every $\mathbf k$, solve
+$$\widehat{\mathbf E}_{\mathbf k}^{n+1}=A(\mathbf k)^{-1}\mathbf b_{\mathbf k}.$$
+
+In code this is just a local $3\times3$ complex linear solve per mode.
+
+### 5. Update magnetic field in Fourier space
+
+After $\widehat{\mathbf E}^{n+1}_{\mathbf k}$ is known, update
+$$\widehat{\mathbf B}^{n+1}_{\mathbf k}=\widehat{\mathbf B}^n_{\mathbf k}-\Delta t\,i\mathbf k\times\widehat{\mathbf E}^{n+1}_{\mathbf k}.$$
+
+### 6. Transform back to real space
+
+Apply inverse FFT:
+$$\mathbf E^{n+1}=\mathcal F^{-1}\left[\widehat{\mathbf E}^{n+1}\right],\qquad \mathbf B^{n+1}=\mathcal F^{-1}\left[\widehat{\mathbf B}^{n+1}\right].$$
+
+### 7. Timestep order
+
+```text
+given f_i^n, E^n, B^n
+
+1. compute explicit moments from f_i^n:
+   J_i_perp^n, Pi_diff_z^n
+
+2. FFT B^n, J_i_perp^n, Pi_diff_z^n
+
+3. for each Fourier mode k:
+   a. build RHS b_k
+   b. build 3x3 matrix A(k)
+   c. solve A(k) E_k^{n+1} = b_k
+   d. update B_k^{n+1} = B_k^n - dt i k x E_k^{n+1}
+
+4. inverse FFT E^{n+1}, B^{n+1}
+
+5. construct centered field:
+   E^{n+1/2} = 0.5(E^n + E^{n+1})
+
+6. push particles with frozen fields:
+   E^{n+1/2}, B^{n+1}
+
+7. exit with f_i^{n+1}, E^{n+1}, B^{n+1}
+```
+
+### 8. Important restrictions
+
+This Fourier diagonalization works only if:
+
+- the domain is periodic,
+- the coefficients are constant,
+- typically $n_i=n_e=1$,
+- the guide field direction is fixed,
+- moments are treated explicitly.
+
+If $n_i$ or $n_e$ vary spatially, Fourier modes couple and this becomes a global variable-coefficient solve.
