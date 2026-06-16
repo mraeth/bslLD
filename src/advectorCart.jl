@@ -15,56 +15,6 @@ function R(id::Int, phi::Real)
     end
 end
 
-# Convert N-dimensional indices (1-based, column-major) to 1D index
-function index_nd_to_1d(indices::NTuple{N, Int}, sizes::NTuple{N, Int}) where {N}
-    i0 = 0
-    stride = 1
-    for k in 1:N
-        i0 += (indices[k] - 1) * stride
-        stride *= sizes[k]
-    end
-    return i0 + 1
-end
-
-@inline function _index_1d_to_nd(i0::Int, sizes::NTuple{0, Int})
-    return ()
-end
-
-@inline function _index_1d_to_nd(i0::Int, sizes::NTuple{N, Int}) where {N}
-    idx = i0 % sizes[1] + 1
-    return (idx, _index_1d_to_nd(i0 ÷ sizes[1], Base.tail(sizes))...)
-end
-
-# Convert 1D index (1-based) to N-dimensional indices (column-major)
-@inline function index_1d_to_nd(i::Int, sizes::NTuple{N, Int}) where {N}
-    return _index_1d_to_nd(i - 1, sizes)
-end
-
-# Convert combined indices (X + Y) to 1D index
-function index_combined_to_1d(
-    indicesX::NTuple{M, Int},
-    indicesY::NTuple{N, Int},
-    sizesX::NTuple{M, Int},
-    sizesY::NTuple{N, Int},
-) where {M, N}
-    iX = index_nd_to_1d(indicesX, sizesX)
-    strideX = prod(sizesX)
-    iY = index_nd_to_1d(indicesY, sizesY)
-    return iX + (iY - 1) * strideX
-end
-
-# Convert 1D index back to (X, Y) indices
-@inline function index_1d_to_combined(
-    i::Int,
-    sizesX::NTuple{M, Int},
-    sizesY::NTuple{N, Int},
-) where {M, N}
-    strideX = prod(sizesX)
-    iX = (i - 1) % strideX + 1
-    iY = (i - 1) ÷ strideX + 1
-    return (index_1d_to_nd(iX, sizesX), index_1d_to_nd(iY, sizesY))
-end
-
 backend_vector(values) = bslLD.backend_array(collect(values))
 
 @inline _effective_dt(simTime::SimulationTime) = simTime.dt * simTime.fraction_dt
@@ -100,14 +50,14 @@ Adapt.@adapt_structure XShiftContext
 Adapt.@adapt_structure VShiftContext
 
 @inline function (ctx::XShiftContext)(index::Int)
-    return compute_x_phase(ctx, index)
+    return compute_x_multiplier(ctx, index)
 end
 
 @inline function (ctx::VShiftContext)(index::Int)
-    return compute_v_phase(ctx, index)
+    return compute_v_multiplier(ctx, index)
 end
 
-@inline function compute_x_phase(ctx::XShiftContext, index::Int)
+@inline function compute_x_multiplier(ctx::XShiftContext, index::Int)
     ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
 
     xdisp = zero(eltype(ctx.k))
@@ -116,10 +66,10 @@ end
         xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
     end
 
-    return (ctx.dt / ctx.grid.delta[ctx.dir]) * ctx.k[ixs[ctx.dir]] * ctx.vth * xdisp
+    return cis(-ctx.dt * ctx.k[ixs[ctx.dir]] * ctx.vth * xdisp)
 end
 
-@inline function compute_v_phase(ctx::VShiftContext, index::Int)
+@inline function compute_v_multiplier(ctx::VShiftContext, index::Int)
     ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
 
     delta_v = zero(eltype(ctx.k))
@@ -128,16 +78,7 @@ end
         delta_v += ctx.e_components[field_dir][ixs[1]] * rotation[ctx.dir, field_dir]
     end
 
-    return (ctx.dt / ctx.grid.delta[length(ctx.sizes_x) + ctx.dir]) * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * delta_v
-end
-
-@kernel function distribution_kernel!(ff, phase_context)
-    i = @index(Global)
-
-    if i <= length(ff)
-        phase = phase_context(i)
-        @inbounds ff[i] *= cis(-phase)
-    end
+    return cis(-ctx.dt * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * delta_v)
 end
 
 # --- AdvectionPlan: pre-allocated buffers and cached data for zero-allocation advection ---
@@ -161,13 +102,15 @@ function AdvectionPlan(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartG
     fwd_v  = ntuple(d -> plan_fft!(ff_buf, NX + d), Val(NV))
     inv_v  = ntuple(d -> plan_ifft!(ff_buf, NX + d), Val(NV))
     kx     = ntuple(Val(NX)) do d
-        k = similar(f.data, Float64, size(f.data, d))
-        copyto!(k, collect(2pi .* fftfreq(size(f.data, d))))
+        n = size(f.data, d)
+        k = similar(f.data, Float64, n)
+        copyto!(k, collect((2pi / (n * grid.delta[d])) .* fftfreq(n, n)))
         k
     end
     kv     = ntuple(Val(NV)) do d
-        k = similar(f.data, Float64, size(f.data, NX + d))
-        copyto!(k, collect(2pi .* fftfreq(size(f.data, NX + d))))
+        n = size(f.data, NX + d)
+        k = similar(f.data, Float64, n)
+        copyto!(k, collect((2pi / (n * grid.delta[NX + d])) .* fftfreq(n, n)))
         k
     end
     vaxes  = map(backend_vector, grid.vaxes)
@@ -201,7 +144,7 @@ function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
 end
 
 function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
-    kernel! = distribution_kernel!(exec)
+    kernel! = spectral_multiply_kernel!(exec)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     phi = simTime.phase
     dt = _effective_dt(simTime)
@@ -220,7 +163,7 @@ function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, 
 end
 
 function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
-    kernel! = distribution_kernel!(exec)
+    kernel! = spectral_multiply_kernel!(exec)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     e_components = ntuple(i -> e[i].data, Val(NV))
     phi = simTime.phase

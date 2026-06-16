@@ -15,14 +15,6 @@ end
     return im * ctx.k[idxs[ctx.dir]]
 end
 
-@kernel function differentiate_kernel!(fhat, ctx)
-    i = @index(Global)
-
-    if i <= length(fhat)
-        @inbounds fhat[i] *= ctx(i)
-    end
-end
-
 function spectral_wavenumbers(field_data::AbstractArray, grid::Grid, dir::Int)
     1 <= dir <= length(grid.xaxes) || throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
     n = size(field_data, dir)
@@ -40,7 +32,7 @@ function differentiate(field::ScalarField{T, N}, grid::Grid, dir::Int) where {T,
 end
 
 function _differentiate_impl(field::ScalarField{T, N}, grid::Grid, dir::Int, exec) where {T, N}
-    kernel! = differentiate_kernel!(exec)
+    kernel! = spectral_multiply_kernel!(exec)
     fhat = fft(field.data, dir)
     k = spectral_wavenumbers(field.data, grid, dir)
     ctx = DifferentiateContext(k, size(fhat), dir)
