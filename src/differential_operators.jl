@@ -19,8 +19,12 @@ function spectral_wavenumbers(field_data::AbstractArray, grid::Grid, dir::Int)
     1 <= dir <= length(grid.xaxes) || throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
     n = size(field_data, dir)
     axis_length = n * grid.delta[dir]
+    kvec = collect((2pi / axis_length) .* fftfreq(n, n))
+    if iseven(n)
+        kvec[n ÷ 2 + 1] = 0.0
+    end
     k = similar(field_data, Float64, n)
-    copyto!(k, collect((2pi / axis_length) .* fftfreq(n, n)))
+    copyto!(k, kvec)
     return k
 end
 

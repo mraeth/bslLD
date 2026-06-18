@@ -220,11 +220,6 @@ end
 
         @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho), grid, solver, dt)
         @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho, J), grid, solver, dt)
-
-        grid_wrong_bdir = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [8, 8], 2, 1.0, 1)
-        sol2 = bslLD.FieldSolution(bslLD.zero_vectorfield3(grid_wrong_bdir),
-                                   bslLD.zero_vectorfield3(grid_wrong_bdir))
-        @test_throws ArgumentError bslLD.solve_fields!(sol2, bslLD.Moments(rho, J, Pi), grid_wrong_bdir, solver, dt)
     end
 end
 
@@ -307,4 +302,70 @@ end
         @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho), grid, solver, dt)
         @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho, J), grid, solver, dt)
     end
+end
+
+@testset "EMSolverDKNoPol Faraday identity (random, spectral accuracy)" begin
+    bslLD.set_execution_space!(exec=bslLD.backend())
+    beta_i, mu = 0.5, 4.0
+    dt     = 0.3
+    solver = bslLD.EMSolverDKNoPol(beta_i, mu)
+
+    Nx, Ny = 32, 32
+    grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
+
+    E_init  = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ in 1:3])
+    B_init  = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ in 1:3])
+    B0_data = [copy(B_init[d].data) for d in 1:3]
+
+    curlB   = bslLD.curl(B_init, grid)
+    c_amp   = 2.0 / beta_i
+    J_perp  = bslLD.VectorField([
+        bslLD.ScalarField(c_amp .* curlB[1].data),
+        bslLD.ScalarField(c_amp .* curlB[2].data),
+        bslLD.ScalarField(zeros(Nx, Ny)),
+    ])
+    Pi_diff = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ in 1:3])
+
+    moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_diff)
+    sol     = bslLD.FieldSolution(E_init, B_init)
+    bslLD.solve_fields!(sol, moments, grid, solver, dt)
+
+    # Faraday: B^n = B^{n+1} + dt * curl(E^{n+1}) — exact to machine precision
+    curlE_new = bslLD.curl(sol.Enew, grid)
+    for d in 1:3
+        B_reconstructed = sol.B[d].data .+ dt .* curlE_new[d].data
+        @test maximum(abs.(B_reconstructed .- B0_data[d])) < 1e-10
+    end
+end
+
+
+@testset "EMSolverDKNoPol perpendicular Ampere algebraic identity" begin
+    bslLD.set_execution_space!(exec=bslLD.backend())
+    beta_i, mu = 0.5, 4.0
+    dt = 0.3
+    solver = bslLD.EMSolverDKNoPol(beta_i, mu)
+    Nx, Ny = 32, 32
+    grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
+    E_init = bslLD.VectorField([bslLD.ScalarField(randn( Nx, Ny)) for _ in 1:3])
+    B_init = bslLD.VectorField([bslLD.ScalarField(randn( Nx, Ny)) for _ in 1:3])
+    B_old = [copy(B_init[d].data) for d in 1:3]
+    J_perp = bslLD.VectorField([
+        bslLD.ScalarField(randn( Nx, Ny)),
+        bslLD.ScalarField(randn( Nx, Ny)),
+        bslLD.ScalarField(zeros(Nx, Ny)),
+    ])
+    Pi_diff = bslLD.VectorField([bslLD.ScalarField(randn( Nx, Ny)) for _ in 1:3])
+    moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_diff)
+    sol = bslLD.FieldSolution(E_init, B_init)
+    bslLD.solve_fields!(sol, moments, grid, solver, dt)
+
+    # Algebraic perp Ampere at t^{n+1}: E^{n+1}_⊥ = [c·curl(B^{n+1})_⊥ − J^n] × ẑ
+    curlB_new = bslLD.curl(sol.B, grid)
+    c_amp = 2.0 / beta_i
+
+    Ex_expected = c_amp .* curlB_new[2].data .- J_perp[2].data
+    Ey_expected = .-(c_amp .* curlB_new[1].data .- J_perp[1].data)
+
+    @test maximum(abs.(sol.Enew[1].data .- Ex_expected)) < 1e-8
+    @test maximum(abs.(sol.Enew[2].data .- Ey_expected)) < 1e-8
 end

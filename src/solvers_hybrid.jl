@@ -122,10 +122,9 @@ function _step_dk_no_pol!(
 
     c = 2 / solver.beta_i
     λ = (solver.beta_i / 2) * (1 + 1 / solver.mu)
-    α = c * dt / 2   # CN: half-step coupling
+    α = c * dt   # full-step implicit coupling (matches notes derivation)
 
     Bhat   = [fft_spatial(B[d].data, grid) for d in 1:3]
-    Ehat_n = [fft_spatial(E[d].data, grid) for d in 1:3]
     J_hat  = [fft_spatial(J_i_perp[d].data, grid) for d in 1:2]
     Pi_hat = [fft_spatial(Pi_diff[d].data, grid) for d in 1:ndims_x]
 
@@ -168,20 +167,19 @@ function _step_dk_no_pol!(
     Ehat_d2 = (a11 .* (b2 .* a33 .- a23 .* b3) .- b1 .* m12 .+ a13 .* (a21 .* b3 .- b2 .* a31)) ./ detA
     Ehat_pz = (a11 .* (a22 .* b3 .- b2 .* a32) .- a12 .* (a21 .* b3 .- b2 .* a31) .+ b1 .* m13) ./ detA
 
-    # Faraday: B^{n+1} = B^n − dt (ik × E^{n+1/2})
-    Ehalf_hat = similar(Bhat)
-    Ehalf_hat[d1] = Ehat_d1
-    Ehalf_hat[d2] = Ehat_d2
-    Ehalf_hat[pz] = Ehat_pz
-    curlEhalf_hat = spectral_curl_hat(Ehalf_hat, kviews, ndims_x)
+    # Faraday: B^{n+1} = B^n − dt (ik × E^{n+1})
+    Ehat_new = similar(Bhat)
+    Ehat_new[d1] = Ehat_d1
+    Ehat_new[d2] = Ehat_d2
+    Ehat_new[pz] = Ehat_pz
+    curlEnew_hat = spectral_curl_hat(Ehat_new, kviews, ndims_x)
     for d in 1:3
-        Bhat[d] .= Bhat[d] .- dt .* curlEhalf_hat[d]
+        Bhat[d] .= Bhat[d] .- dt .* curlEnew_hat[d]
     end
 
-    # Recover E^{n+1} = 2 E^{n+1/2} − E^n
-    E[d1].data .= real(ifft_spatial(2 .* Ehat_d1 .- Ehat_n[d1], grid))
-    E[d2].data .= real(ifft_spatial(2 .* Ehat_d2 .- Ehat_n[d2], grid))
-    E[pz].data .= real(ifft_spatial(2 .* Ehat_pz .- Ehat_n[pz], grid))
+    E[d1].data .= real(ifft_spatial(Ehat_d1, grid))
+    E[d2].data .= real(ifft_spatial(Ehat_d2, grid))
+    E[pz].data .= real(ifft_spatial(Ehat_pz, grid))
     for d in 1:3
         B[d].data .= real(ifft_spatial(Bhat[d], grid))
     end
