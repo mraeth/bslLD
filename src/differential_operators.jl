@@ -1,4 +1,4 @@
-struct DifferentiateContext{KT, ST}
+struct DifferentiateContext{KT,ST}
     k::KT
     sizes::ST
     dir::Int
@@ -15,36 +15,40 @@ end
     return im * ctx.k[idxs[ctx.dir]]
 end
 
-@kernel function differentiate_kernel!(fhat, ctx)
-    i = @index(Global)
-
-    if i <= length(fhat)
-        @inbounds fhat[i] *= ctx(i)
-    end
-end
-
 function spectral_wavenumbers(field_data::AbstractArray, grid::Grid, dir::Int)
-    1 <= dir <= length(grid.xaxes) || throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
+    1 <= dir <= length(grid.xaxes) ||
+        throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
     n = size(field_data, dir)
     axis_length = n * grid.delta[dir]
+    kvec = collect((2pi / axis_length) .* fftfreq(n, n))
+    if iseven(n)
+        kvec[n÷2+1] = 0.0
+    end
     k = similar(field_data, Float64, n)
-    copyto!(k, collect((2pi / axis_length) .* fftfreq(n, n)))
+    copyto!(k, kvec)
     return k
 end
 
-function differentiate(field::ScalarField{T, N}, grid::Grid, dir::Int) where {T, N}
-    1 <= N <= 3 || throw(ArgumentError("differentiate currently supports 1D, 2D, and 3D ScalarFields"))
+function differentiate(field::ScalarField{T,N}, grid::Grid, dir::Int) where {T,N}
+    1 <= N <= 3 ||
+        throw(ArgumentError("differentiate currently supports 1D, 2D, and 3D ScalarFields"))
     1 <= dir <= N || throw(ArgumentError("direction $dir is outside the field dimensions"))
-    dir <= length(grid.xaxes) || throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
+    dir <= length(grid.xaxes) ||
+        throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
     return _differentiate_impl(field, grid, dir, bslLD.backend())
 end
 
-function _differentiate_impl(field::ScalarField{T, N}, grid::Grid, dir::Int, exec) where {T, N}
-    kernel! = differentiate_kernel!(exec)
+function _differentiate_impl(
+    field::ScalarField{T,N},
+    grid::Grid,
+    dir::Int,
+    exec,
+) where {T,N}
+    kernel! = spectral_multiply_kernel!(exec)
     fhat = fft(field.data, dir)
     k = spectral_wavenumbers(field.data, grid, dir)
     ctx = DifferentiateContext(k, size(fhat), dir)
-    kernel!(fhat, ctx; ndrange=length(fhat))
+    kernel!(fhat, ctx; ndrange = length(fhat))
     KernelAbstractions.synchronize(exec)
     return ScalarField(real(ifft(fhat, dir)))
 end
@@ -52,24 +56,45 @@ end
 spatial_ndims(grid::Grid) = length(grid.xaxes)
 ncomponents(field::VectorField) = length(field)
 
-function grad(field::ScalarField{T, N}, grid::Grid) where {T, N}
+function grad(field::ScalarField{T,N}, grid::Grid) where {T,N}
     ndirs = spatial_ndims(grid)
     ndirs >= 1 || throw(ArgumentError("grad requires at least one spatial dimension"))
-    return VectorField([differentiate(field, grid, dir) for dir in 1:ndirs])
+    return VectorField([differentiate(field, grid, dir) for dir = 1:ndirs])
 end
 
-function div(field::VectorField{T, N}, grid::Grid) where {T, N}
+function div(field::VectorField{T,N}, grid::Grid) where {T,N}
     ndirs = spatial_ndims(grid)
     ncomp = ncomponents(field)
     ndirs >= 1 || throw(ArgumentError("div requires at least one spatial dimension"))
-    ncomp >= ndirs || throw(ArgumentError("div on a $ndirs-D grid requires at least $ndirs vector components"))
+    ncomp >= ndirs || throw(
+        ArgumentError("div on a $ndirs-D grid requires at least $ndirs vector components"),
+    )
 
     result = differentiate(field[1], grid, 1)
-    for dir in 2:ndirs
+    for dir = 2:ndirs
         result = result + differentiate(field[dir], grid, dir)
     end
 
     return result
+end
+
+function div(field::MatrixField{DT,N,SF,NR,NC,NF}, grid::Grid) where {DT,N,SF,NR,NC,NF}
+    ndirs = spatial_ndims(grid)
+    ndirs >= 1 || throw(ArgumentError("div requires at least one spatial dimension"))
+    NC >= ndirs || throw(
+        ArgumentError("div on a $ndirs-D grid requires at least $ndirs matrix columns"),
+    )
+
+    rows = Vector{SF}(undef, NR)
+    for i = 1:NR
+        row_result = differentiate(field[i, 1], grid, 1)
+        for dir = 2:ndirs
+            row_result = row_result + differentiate(field[i, dir], grid, dir)
+        end
+        rows[i] = row_result
+    end
+
+    return VectorField(rows)
 end
 
 function curl(field::VectorField, grid::Grid)
@@ -82,10 +107,7 @@ function curl(field::VectorField, grid::Grid)
         if ncomp == 2
             df1_dx = differentiate(field[1], grid, 1)
             df2_dx = differentiate(field[2], grid, 1)
-            return VectorField([
-                ScalarField(-df2_dx.data),
-                ScalarField(df1_dx.data),
-            ])
+            return VectorField([ScalarField(-df2_dx.data), ScalarField(df1_dx.data)])
         end
 
         df2_dx = differentiate(field[2], grid, 1)

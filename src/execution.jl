@@ -1,5 +1,5 @@
 function use_cpu!()
-    set_execution_space!(; alloc=identity, exec=KernelAbstractions.CPU())
+    set_execution_space!(; alloc = identity, exec = KernelAbstractions.CPU())
     return nothing
 end
 
@@ -20,7 +20,7 @@ function backend_copy(f::DistributionGrid)
     data = backend_copy(f.data)
     _, NX, NV, NXNV, ID = typeof(f).parameters[1:5]
     DT = eltype(data)
-    return DistributionGrid{DT, NX, NV, NXNV, ID, typeof(data)}(data)
+    return DistributionGrid{DT,NX,NV,NXNV,ID,typeof(data)}(data, DT(f.m), DT(f.q))
 end
 
 function backend_copy(e::VectorField)
@@ -29,6 +29,10 @@ end
 
 function backend_copy(e::ScalarField)
     return ScalarField(backend_copy(e.data))
+end
+
+function backend_copy(m::MatrixField{DT,N,SF,NR,NC,NF}) where {DT,N,SF,NR,NC,NF}
+    return MatrixField(reshape(SF[backend_copy(m[i, j]) for i = 1:NR for j = 1:NC], NR, NC))
 end
 
 

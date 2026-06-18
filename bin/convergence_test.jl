@@ -1,6 +1,6 @@
 using Pkg
 Pkg.activate(".")
-Pkg.develop(path="..")
+Pkg.develop(path = "..")
 
 isCuda = try
     success(`nvidia-smi`)
@@ -23,13 +23,13 @@ else
 end
 
 # 1D2V grid with 32x32x32 grid points
-grid = bslLD.Grid([0.0, -4.0, -4.0],[20.0, 4.0, 4.0],[32,32,32],1, 1.0, 3)
+grid = bslLD.Grid([0.0, -4.0, -4.0], [20.0, 4.0, 4.0], [32, 32, 32], 1, 1.0, 3)
 
 
 function stepLie!(f, grid, simTime)
     bslLD.advectX!(f, grid, simTime)
     rho = bslLD.compute_density(f, grid)
-    sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.AdiabaticFieldSolver())
+    sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.AdiabaticSolver())
     bslLD.advectV!(f, grid, simTime, sol.E)
 end
 
@@ -38,7 +38,11 @@ function stepStrang!(f, grid, simTime)
     Ω = simTime.gyro_frequency
 
     # V half-step at phase(t)
-    sol = bslLD.solve_fields(bslLD.Moments(bslLD.compute_density(f, grid)), grid, bslLD.AdiabaticFieldSolver())
+    sol = bslLD.solve_fields(
+        bslLD.Moments(bslLD.compute_density(f, grid)),
+        grid,
+        bslLD.AdiabaticSolver(),
+    )
     simTime.fraction_dt = 0.5
     bslLD.advectV!(f, grid, simTime, sol.E)
 
@@ -49,7 +53,11 @@ function stepStrang!(f, grid, simTime)
 
     # V half-step at phase(t + dt)
     simTime.phase = phase_start + Ω * simTime.dt
-    sol = bslLD.solve_fields(bslLD.Moments(bslLD.compute_density(f, grid)), grid, bslLD.AdiabaticFieldSolver())
+    sol = bslLD.solve_fields(
+        bslLD.Moments(bslLD.compute_density(f, grid)),
+        grid,
+        bslLD.AdiabaticSolver(),
+    )
     simTime.fraction_dt = 0.5
     bslLD.advectV!(f, grid, simTime, sol.E)
     simTime.fraction_dt = 1.0
@@ -61,7 +69,7 @@ end
 function run_test(dt, grid, stepFunc)
     println("Running test with dt = ", dt, " and step function ", stepFunc)
     nmax = round(Int, 1.0 / dt)
-    simTime = bslLD.SimulationTime(dt, 1.0; nmax=nmax, gyro_frequency=1.0)
+    simTime = bslLD.SimulationTime(dt, 1.0; nmax = nmax, gyro_frequency = 1.0)
     f = bslLD.Distribution(grid, 0.0001)
 
     while bslLD.continue_advection(simTime)
@@ -79,7 +87,7 @@ dt_ref = 0.001
 
 
 function l2norm(ds)
-    return sqrt(sum(@views ds.^2))
+    return sqrt(sum(@views ds .^ 2))
 end
 
 println("Lie splitting: computing reference solution with dt = ", dt_ref)
@@ -93,18 +101,34 @@ println("Strang splitting: computing test solutions...")
 error_Strang = [l2norm(run_test(dt, grid, stepStrang!) .- rho_ref_Strang) for dt in dts]
 
 println("\nConvergence rates:")
-rates_Lie    = [log(error_Lie[i] / error_Lie[i+1])    / log(dts[i] / dts[i+1]) for i in 1:length(dts)-1]
-rates_Strang = [log(error_Strang[i] / error_Strang[i+1]) / log(dts[i] / dts[i+1]) for i in 1:length(dts)-1]
+rates_Lie =
+    [log(error_Lie[i] / error_Lie[i+1]) / log(dts[i] / dts[i+1]) for i = 1:(length(dts)-1)]
+rates_Strang = [
+    log(error_Strang[i] / error_Strang[i+1]) / log(dts[i] / dts[i+1]) for
+    i = 1:(length(dts)-1)
+]
 
-println("Lie splitting:    ", round.(rates_Lie,    digits=3))
-println("Strang splitting: ", round.(rates_Strang, digits=3))
+println("Lie splitting:    ", round.(rates_Lie, digits = 3))
+println("Strang splitting: ", round.(rates_Strang, digits = 3))
 
 using Plots
 
-plot(dts, error_Lie, label="Lie", xscale=:log10, yscale=:log10, marker=:o)
-plot!(dts, error_Strang, label="Strang", xscale=:log10, yscale=:log10, marker=:o)
-plot!(dts, dts/maximum(dts) * maximum(error_Lie), label="O(dt)", linestyle=:dash, color=:black)
-plot!(dts, dts.^2/maximum(dts).^2 * maximum(error_Strang), label="O(dt^2)", linestyle=:dashdot, color=:black)
+plot(dts, error_Lie, label = "Lie", xscale = :log10, yscale = :log10, marker = :o)
+plot!(dts, error_Strang, label = "Strang", xscale = :log10, yscale = :log10, marker = :o)
+plot!(
+    dts,
+    dts/maximum(dts) * maximum(error_Lie),
+    label = "O(dt)",
+    linestyle = :dash,
+    color = :black,
+)
+plot!(
+    dts,
+    dts .^ 2/maximum(dts) .^ 2 * maximum(error_Strang),
+    label = "O(dt^2)",
+    linestyle = :dashdot,
+    color = :black,
+)
 xlabel!("Time step size (dt)")
 ylabel!("Error in density")
 title!("Convergence of Lie vs Strang Splitting")

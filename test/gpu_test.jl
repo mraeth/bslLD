@@ -18,7 +18,7 @@ end
 
 function gpu_constant_field(grid)
     dims = Tuple(length.(grid.xaxes))
-    return [fill(0.15, dims) for _ in 1:length(grid.vaxes)]
+    return [fill(0.15, dims) for _ = 1:length(grid.vaxes)]
 end
 
 @testset "GPU Regression" begin
