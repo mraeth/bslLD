@@ -21,7 +21,7 @@
 
     @testset "Round trips" begin
         sizes = (2, 3, 4)
-        for index in 1:prod(sizes)
+        for index = 1:prod(sizes)
             nd = bslLD.index_1d_to_nd(index, sizes)
             @test bslLD.index_nd_to_1d(nd, sizes) == index
         end

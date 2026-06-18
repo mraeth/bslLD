@@ -34,17 +34,10 @@ function spectral_curl_hat(fieldhat::Vector, kviews, ndims_x::Int)
     if ndims_x == 1
         kx = kviews[1]
         if ncomp == 2
-            return [
-                -im .* kx .* fieldhat[2],
-                im .* kx .* fieldhat[1],
-            ]
+            return [-im .* kx .* fieldhat[2], im .* kx .* fieldhat[1]]
         elseif ncomp == 3
             zero_component = zero.(fieldhat[1])
-            return [
-                zero_component,
-                -im .* kx .* fieldhat[3],
-                im .* kx .* fieldhat[2],
-            ]
+            return [zero_component, -im .* kx .* fieldhat[3], im .* kx .* fieldhat[2]]
         end
     elseif ndims_x == 2
         kx, ky = kviews
@@ -66,5 +59,9 @@ function spectral_curl_hat(fieldhat::Vector, kviews, ndims_x::Int)
         end
     end
 
-    throw(ArgumentError("unsupported spectral curl layout for $ndims_x spatial dimensions and $ncomp components"))
+    throw(
+        ArgumentError(
+            "unsupported spectral curl layout for $ndims_x spatial dimensions and $ncomp components",
+        ),
+    )
 end

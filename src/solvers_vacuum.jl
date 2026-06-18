@@ -4,7 +4,7 @@ struct VacuumMaxwellParams{T}
     μ0::T
 end
 
-function VacuumMaxwellParams(; c::Real=1.0, ϵ0::Real=1.0, μ0::Real=1.0)
+function VacuumMaxwellParams(; c::Real = 1.0, ϵ0::Real = 1.0, μ0::Real = 1.0)
     T = promote_type(typeof(c), typeof(ϵ0), typeof(μ0))
     return VacuumMaxwellParams{T}(T(c), T(ϵ0), T(μ0))
 end
@@ -12,7 +12,7 @@ end
 struct EMSolverVacuum{T<:AbstractFloat} <: AbstractFieldSolver
     params::VacuumMaxwellParams{T}
 end
-EMSolverVacuum(; c::Real=1.0, ϵ0::Real=1.0, μ0::Real=1.0) =
+EMSolverVacuum(; c::Real = 1.0, ϵ0::Real = 1.0, μ0::Real = 1.0) =
     EMSolverVacuum(VacuumMaxwellParams(; c, ϵ0, μ0))
 
 function maxwell_supported_layout(field::VectorField, grid::Grid)
@@ -25,12 +25,15 @@ function _step_maxwell_cn!(
     E::VectorField,
     B::VectorField,
     grid::Grid;
-    dt::Real=grid.dt,
-    params::VacuumMaxwellParams=VacuumMaxwellParams(),
+    dt::Real = grid.dt,
+    params::VacuumMaxwellParams = VacuumMaxwellParams(),
 )
-    ncomponents(E) == ncomponents(B) || throw(ArgumentError("E and B must have the same number of components"))
-    maxwell_supported_layout(E, grid) || throw(ArgumentError("unsupported E layout for Maxwell step"))
-    maxwell_supported_layout(B, grid) || throw(ArgumentError("unsupported B layout for Maxwell step"))
+    ncomponents(E) == ncomponents(B) ||
+        throw(ArgumentError("E and B must have the same number of components"))
+    maxwell_supported_layout(E, grid) ||
+        throw(ArgumentError("unsupported E layout for Maxwell step"))
+    maxwell_supported_layout(B, grid) ||
+        throw(ArgumentError("unsupported B layout for Maxwell step"))
 
     ndims_x = spatial_ndims(grid)
     ncomp = ncomponents(E)
@@ -48,7 +51,7 @@ function _step_maxwell_cn!(
     curlEhat = spectral_curl_hat(Ehat, kviews, ndims_x)
     curlBhat = spectral_curl_hat(Bhat, kviews, ndims_x)
 
-    for d in 1:ncomp
+    for d = 1:ncomp
         Ehat_new = prefac .* (diagonal .* Ehat[d] .+ c^2 * dt .* curlBhat[d])
         Bhat_new = prefac .* (diagonal .* Bhat[d] .- dt .* curlEhat[d])
 
@@ -60,24 +63,29 @@ function _step_maxwell_cn!(
 end
 
 function solve_fields!(
-    sol     :: FieldSolution,
+    sol::FieldSolution,
     ::Moments,
-    grid    :: Grid,
-    solver  :: EMSolverVacuum,
-    dt      :: Real,
+    grid::Grid,
+    solver::EMSolverVacuum,
+    dt::Real,
 )
     copyto!(sol.Enew, sol.E)
-    _step_maxwell_cn!(sol.Enew, sol.B, grid; dt=dt, params=solver.params)
+    _step_maxwell_cn!(sol.Enew, sol.B, grid; dt = dt, params = solver.params)
     return sol
 end
 
-function electromagnetic_energy(E::VectorField, B::VectorField; params::VacuumMaxwellParams=VacuumMaxwellParams())
-    ncomponents(E) == ncomponents(B) || throw(ArgumentError("E and B must have the same number of components"))
+function electromagnetic_energy(
+    E::VectorField,
+    B::VectorField;
+    params::VacuumMaxwellParams = VacuumMaxwellParams(),
+)
+    ncomponents(E) == ncomponents(B) ||
+        throw(ArgumentError("E and B must have the same number of components"))
 
     energy_e = zero(eltype(E[1].data))
     energy_b = zero(eltype(B[1].data))
 
-    for d in 1:ncomponents(E)
+    for d = 1:ncomponents(E)
         energy_e += sum(abs2, E[d].data)
         energy_b += sum(abs2, B[d].data)
     end

@@ -14,7 +14,7 @@ function cuda_available_hook()
 end
 
 function set_cuda_execution_space_hook()
-    bslLD.set_execution_space!(; alloc=x -> CUDA.CuArray(x), exec=CUDA.CUDABackend())
+    bslLD.set_execution_space!(; alloc = x -> CUDA.CuArray(x), exec = CUDA.CUDABackend())
     return nothing
 end
 

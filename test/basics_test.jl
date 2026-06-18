@@ -1,11 +1,11 @@
 using Adapt
 
 @testset "Basics" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
 
     @testset "Grid" begin
         grid = bslLD.Grid([0.0, -6.0], [10.0, 6.0], [4, 8], 1)
-        simTime = bslLD.SimulationTime(0.05, 5.0; nmax=100)
+        simTime = bslLD.SimulationTime(0.05, 5.0; nmax = 100)
 
         @test simTime.dt == 0.05
         @test simTime.final_T == 5.0
@@ -46,12 +46,12 @@ using Adapt
         @test f.m == 1.0
         @test f.q == 1.0
 
-        ion = bslLD.Distribution(grid, 0.01; m=4.0, q=2.0)
+        ion = bslLD.Distribution(grid, 0.01; m = 4.0, q = 2.0)
         @test ion.m == 4.0
         @test ion.q == 2.0
         @test bslLD.thermal_velocity(ion) == 0.5
         @test bslLD.electric_acceleration_scale(ion) == 1.0
-        @test_throws ArgumentError bslLD.Distribution(grid, 0.01; m=0.0)
+        @test_throws ArgumentError bslLD.Distribution(grid, 0.01; m = 0.0)
     end
 
     @testset "Fields" begin

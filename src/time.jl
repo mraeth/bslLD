@@ -10,7 +10,7 @@ mutable struct SimulationTime{T<:AbstractFloat}
     nmax::Int
     gyro_frequency::T
     wall_start_ns::UInt64
-    _progress::Union{Progress, Nothing}
+    _progress::Union{Progress,Nothing}
 end
 
 
@@ -24,8 +24,11 @@ function SimulationTime(
     phase = zero(T),
 ) where {T<:AbstractFloat}
 
-    gyro_frequency >= 0 || throw(ArgumentError(
-        "gyro_frequency must be non-negative; charge sign is handled by electric_acceleration_scale"))
+    gyro_frequency >= 0 || throw(
+        ArgumentError(
+            "gyro_frequency must be non-negative; charge sign is handled by electric_acceleration_scale",
+        ),
+    )
     return SimulationTime{T}(
         dt,
         1.0,
@@ -36,7 +39,7 @@ function SimulationTime(
         Int(nmax),
         T(gyro_frequency),
         time_ns(),
-        nothing
+        nothing,
     )
 end
 
@@ -62,8 +65,14 @@ function advance!(t::SimulationTime{T}; wrap_phase::Bool = true) where {T<:Abstr
 end
 function continue_advection(t::SimulationTime, show_progress::Bool = false)
     if show_progress
-        isnothing(t._progress) && (t._progress = Progress(round(Int, t.final_T / t.dt); desc="Simulating: ", showspeed=true))
-        next!(t._progress; showvalues=[(:step, t.step), (:time, t.current_T)])
+        isnothing(t._progress) && (
+            t._progress = Progress(
+                round(Int, t.final_T / t.dt);
+                desc = "Simulating: ",
+                showspeed = true,
+            )
+        )
+        next!(t._progress; showvalues = [(:step, t.step), (:time, t.current_T)])
     end
     return t.current_T < t.final_T && t.step < t.nmax
 end
@@ -78,7 +87,10 @@ function reset_timer!(t::SimulationTime)
 end
 
 Base.eltype(::Type{<:SimulationTime{T}}) where {T} = T
-Base.length(t::SimulationTime) = min(floor(Int, t.final_T / t.dt) + 1, t.nmax == typemax(Int) ? typemax(Int) : t.nmax + 1)
+Base.length(t::SimulationTime) = min(
+    floor(Int, t.final_T / t.dt) + 1,
+    t.nmax == typemax(Int) ? typemax(Int) : t.nmax + 1,
+)
 
 function Base.iterate(t::SimulationTime, state::Int = 0)
     (state > t.nmax || t.dt * state > t.final_T) && return nothing

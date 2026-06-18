@@ -1,4 +1,4 @@
-struct Grid{T, XT, VT, MT, ID}
+struct Grid{T,XT,VT,MT,ID}
     xaxes::XT
     vaxes::VT
     max::MT
@@ -11,10 +11,10 @@ end
 abstract type Cart end
 abstract type Polar end
 
-const CartGrid = Grid{T, XT, VT, MT, Cart} where {T, XT, VT, MT}
-const PolarGrid = Grid{T, XT, VT, MT, Polar} where {T, XT, VT, MT}
+const CartGrid = Grid{T,XT,VT,MT,Cart} where {T,XT,VT,MT}
+const PolarGrid = Grid{T,XT,VT,MT,Polar} where {T,XT,VT,MT}
 
-function Adapt.adapt_structure(to, grid::Grid{T, XT, VT, MT, ID}) where {T, XT, VT, MT, ID}
+function Adapt.adapt_structure(to, grid::Grid{T,XT,VT,MT,ID}) where {T,XT,VT,MT,ID}
     xaxes = Adapt.adapt(to, grid.xaxes)
     vaxes = Adapt.adapt(to, grid.vaxes)
     maxv = Adapt.adapt(to, grid.max)
@@ -22,7 +22,7 @@ function Adapt.adapt_structure(to, grid::Grid{T, XT, VT, MT, ID}) where {T, XT, 
     delta = Adapt.adapt(to, grid.delta)
     b0 = Adapt.adapt(to, grid.b0)
 
-    return Grid{typeof(b0), typeof(xaxes), typeof(vaxes), typeof(maxv), ID}(
+    return Grid{typeof(b0),typeof(xaxes),typeof(vaxes),typeof(maxv),ID}(
         xaxes,
         vaxes,
         maxv,
@@ -34,21 +34,24 @@ function Adapt.adapt_structure(to, grid::Grid{T, XT, VT, MT, ID}) where {T, XT, 
 end
 
 _axis_tuple(axes::Vector) = Tuple(axes)
-_meta_vector(values::AbstractVector{T}) where {T} = SVector{length(values), T}(values)
+_meta_vector(values::AbstractVector{T}) where {T} = SVector{length(values),T}(values)
 
 function Grid(
     etaMin::Vector{Float64},
     etaMax::Vector{Float64},
     N::Vector{Int64},
     nx::Int64,
-    b0=1.0::Float64,
-    Bdir=3::Int;
-    type=Cart,
+    b0 = 1.0::Float64,
+    Bdir = 3::Int;
+    type = Cart,
 )
     if type == Cart
         delta = (etaMax .- etaMin) ./ N
-        xaxes = [range(etaMin[i], step=delta[i], length=N[i]) for i in 1:nx]
-        vaxes = [range(etaMin[i], step=delta[i], length=N[i] + 1) for i in (nx + 1):length(etaMin)]
+        xaxes = [range(etaMin[i], step = delta[i], length = N[i]) for i = 1:nx]
+        vaxes = [
+            range(etaMin[i], step = delta[i], length = N[i] + 1) for
+            i = (nx+1):length(etaMin)
+        ]
 
         return Grid{
             typeof(b0),
@@ -66,20 +69,17 @@ function Grid(
             Bdir,
         )
     else
-        vpmax = etaMax[nx + 1]
-        deltavp = vpmax / N[nx + 1]
-        deltaphi = 2pi / N[nx + 2]
+        vpmax = etaMax[nx+1]
+        deltavp = vpmax / N[nx+1]
+        deltaphi = 2pi / N[nx+2]
 
-        delta = vcat(
-            (etaMax[1:nx] .- etaMin[1:nx]) ./ N[1:nx],
-            [deltavp, deltaphi],
-        )
+        delta = vcat((etaMax[1:nx] .- etaMin[1:nx]) ./ N[1:nx], [deltavp, deltaphi])
 
-        xaxes = [range(etaMin[i], step=delta[i], length=N[i]) for i in 1:nx]
+        xaxes = [range(etaMin[i], step = delta[i], length = N[i]) for i = 1:nx]
 
         vaxes = (
-            range(deltavp, step=deltavp, length=N[nx + 1]),
-            range(0.0, step=deltaphi, length=N[nx + 2]),
+            range(deltavp, step = deltavp, length = N[nx+1]),
+            range(0.0, step = deltaphi, length = N[nx+2]),
         )
 
         return Grid{
@@ -100,7 +100,5 @@ function Grid(
     end
 end
 
-outer_product(vs) = .*([
-    reshape(vs[d], (ntuple(Returns(1), d - 1)..., :))
-    for d in 1:length(vs)
-]...)
+outer_product(vs) =
+    .*([reshape(vs[d], (ntuple(Returns(1), d - 1)..., :)) for d = 1:length(vs)]...)

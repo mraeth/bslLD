@@ -3,7 +3,7 @@ using bslLD
 
 function zero_current_field(grid)
     dims = Tuple(length.(grid.xaxes))
-    return bslLD.VectorField([zeros(dims) for _ in 1:3])
+    return bslLD.VectorField([zeros(dims) for _ = 1:3])
 end
 
 @testset "Moments" begin
@@ -19,7 +19,7 @@ end
     @test moments_full.rho === rho
     @test moments_full.J === current
 
-    bad_current = bslLD.VectorField([zeros(8) for _ in 1:3])
+    bad_current = bslLD.VectorField([zeros(8) for _ = 1:3])
     @test_throws DimensionMismatch bslLD.Moments(rho, bad_current)
 
     pi_diff = zero_current_field(grid)
@@ -29,7 +29,7 @@ end
 end
 
 @testset "Field Solvers" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
 
     @testset "Poisson 1D" begin
         grid = bslLD.Grid([0.0], [2pi], [32], 1, 2.5, 2)
@@ -73,9 +73,8 @@ end
         x = grid.xaxes[1]
         y = grid.xaxes[2]
         z = grid.xaxes[3]
-        rho = bslLD.ScalarField([
-            -sin(xi) + cos(yi) - sin(zi) for xi in x, yi in y, zi in z
-        ])
+        rho =
+            bslLD.ScalarField([-sin(xi) + cos(yi) - sin(zi) for xi in x, yi in y, zi in z])
         solution = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonSolver())
 
         expected_ex = [-cos(xi) for xi in x, yi in y, zi in z]
@@ -93,7 +92,8 @@ end
         y = grid.xaxes[2]
         rho = bslLD.ScalarField([sin(xi) + cos(2yi) for xi in x, yi in y])
         current = zero_current_field(grid)
-        solution = bslLD.solve_fields(bslLD.Moments(rho, current), grid, bslLD.AdiabaticSolver())
+        solution =
+            bslLD.solve_fields(bslLD.Moments(rho, current), grid, bslLD.AdiabaticSolver())
         B0 = bslLD.background_field(grid)
 
         expected_ex = [-cos(xi) for xi in x, yi in y]
@@ -109,10 +109,10 @@ end
 end
 
 @testset "EMSolverDKPol" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
     beta_i = 0.5
-    mu     = 4.0
-    dt     = 0.1
+    mu = 4.0
+    dt = 0.1
     solver = bslLD.EMSolverDKPol(beta_i, mu)
 
     @testset "Faraday step (2D)" begin
@@ -218,16 +218,28 @@ end
         J = bslLD.zero_vectorfield3(grid)
         Pi = bslLD.zero_vectorfield3(grid)
 
-        @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho), grid, solver, dt)
-        @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho, J), grid, solver, dt)
+        @test_throws ArgumentError bslLD.solve_fields!(
+            sol,
+            bslLD.Moments(rho),
+            grid,
+            solver,
+            dt,
+        )
+        @test_throws ArgumentError bslLD.solve_fields!(
+            sol,
+            bslLD.Moments(rho, J),
+            grid,
+            solver,
+            dt,
+        )
     end
 end
 
 @testset "EMSolverDKNoPol" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
     beta_i = 0.5
-    mu     = 4.0
-    dt     = 0.1
+    mu = 4.0
+    dt = 0.1
     solver = bslLD.EMSolverDKNoPol(beta_i, mu)
 
     @testset "E_perp from constant J (2D)" begin
@@ -252,8 +264,8 @@ end
         # At k=0 with B=0: A = diag(1,1,-λ), b = R(-J1,-J2) = (-J2, J1, 0)
         # → E_x = -J2, E_y = J1, E_z = 0
         @test maximum(abs.(sol.Enew[1].data .- (-J2_val))) < 1e-12
-        @test maximum(abs.(sol.Enew[2].data .- J1_val))    < 1e-12
-        @test maximum(abs.(sol.Enew[3].data))               < 1e-12
+        @test maximum(abs.(sol.Enew[2].data .- J1_val)) < 1e-12
+        @test maximum(abs.(sol.Enew[3].data)) < 1e-12
     end
 
     @testset "E_z and B from Pi_diff (2D)" begin
@@ -299,40 +311,52 @@ end
         J = bslLD.zero_vectorfield3(grid)
         Pi = bslLD.zero_vectorfield3(grid)
 
-        @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho), grid, solver, dt)
-        @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho, J), grid, solver, dt)
+        @test_throws ArgumentError bslLD.solve_fields!(
+            sol,
+            bslLD.Moments(rho),
+            grid,
+            solver,
+            dt,
+        )
+        @test_throws ArgumentError bslLD.solve_fields!(
+            sol,
+            bslLD.Moments(rho, J),
+            grid,
+            solver,
+            dt,
+        )
     end
 end
 
 @testset "EMSolverDKNoPol Faraday identity (random, spectral accuracy)" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
     beta_i, mu = 0.5, 4.0
-    dt     = 0.3
+    dt = 0.3
     solver = bslLD.EMSolverDKNoPol(beta_i, mu)
 
     Nx, Ny = 32, 32
     grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
 
-    E_init  = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ in 1:3])
-    B_init  = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ in 1:3])
-    B0_data = [copy(B_init[d].data) for d in 1:3]
+    E_init = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ = 1:3])
+    B_init = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ = 1:3])
+    B0_data = [copy(B_init[d].data) for d = 1:3]
 
-    curlB   = bslLD.curl(B_init, grid)
-    c_amp   = 2.0 / beta_i
-    J_perp  = bslLD.VectorField([
+    curlB = bslLD.curl(B_init, grid)
+    c_amp = 2.0 / beta_i
+    J_perp = bslLD.VectorField([
         bslLD.ScalarField(c_amp .* curlB[1].data),
         bslLD.ScalarField(c_amp .* curlB[2].data),
         bslLD.ScalarField(zeros(Nx, Ny)),
     ])
-    Pi_diff = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ in 1:3])
+    Pi_diff = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ = 1:3])
 
     moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_diff)
-    sol     = bslLD.FieldSolution(E_init, B_init)
+    sol = bslLD.FieldSolution(E_init, B_init)
     bslLD.solve_fields!(sol, moments, grid, solver, dt)
 
     # Faraday: B^n = B^{n+1} + dt * curl(E^{n+1}) — exact to machine precision
     curlE_new = bslLD.curl(sol.Enew, grid)
-    for d in 1:3
+    for d = 1:3
         B_reconstructed = sol.B[d].data .+ dt .* curlE_new[d].data
         @test maximum(abs.(B_reconstructed .- B0_data[d])) < 1e-10
     end
@@ -340,21 +364,21 @@ end
 
 
 @testset "EMSolverDKNoPol perpendicular Ampere algebraic identity" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
     beta_i, mu = 0.5, 4.0
     dt = 0.3
     solver = bslLD.EMSolverDKNoPol(beta_i, mu)
     Nx, Ny = 32, 32
     grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
-    E_init = bslLD.VectorField([bslLD.ScalarField(randn( Nx, Ny)) for _ in 1:3])
-    B_init = bslLD.VectorField([bslLD.ScalarField(randn( Nx, Ny)) for _ in 1:3])
-    B_old = [copy(B_init[d].data) for d in 1:3]
+    E_init = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ = 1:3])
+    B_init = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ = 1:3])
+    B_old = [copy(B_init[d].data) for d = 1:3]
     J_perp = bslLD.VectorField([
-        bslLD.ScalarField(randn( Nx, Ny)),
-        bslLD.ScalarField(randn( Nx, Ny)),
+        bslLD.ScalarField(randn(Nx, Ny)),
+        bslLD.ScalarField(randn(Nx, Ny)),
         bslLD.ScalarField(zeros(Nx, Ny)),
     ])
-    Pi_diff = bslLD.VectorField([bslLD.ScalarField(randn( Nx, Ny)) for _ in 1:3])
+    Pi_diff = bslLD.VectorField([bslLD.ScalarField(randn(Nx, Ny)) for _ = 1:3])
     moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_diff)
     sol = bslLD.FieldSolution(E_init, B_init)
     bslLD.solve_fields!(sol, moments, grid, solver, dt)

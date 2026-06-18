@@ -2,7 +2,7 @@ using Test
 using bslLD
 
 @testset "Differentiate" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
 
     grid1 = bslLD.Grid([0.0], [2pi], [32], 1)
     x1 = grid1.xaxes[1]
@@ -31,7 +31,7 @@ using bslLD
 end
 
 @testset "Grad Div Curl" begin
-    bslLD.set_execution_space!(exec=bslLD.backend())
+    bslLD.set_execution_space!(exec = bslLD.backend())
 
     grid1 = bslLD.Grid([0.0], [2pi], [32], 1)
     x1 = grid1.xaxes[1]
@@ -40,10 +40,7 @@ end
     @test length(grad1) == 1
     @test maximum(abs.(grad1[1].data .- cos.(x1))) < 1e-10
 
-    vec1_2 = bslLD.VectorField([
-        sin.(x1),
-        cos.(x1),
-    ])
+    vec1_2 = bslLD.VectorField([sin.(x1), cos.(x1)])
     div1_2 = bslLD.div(vec1_2, grid1)
     curl1_2 = bslLD.curl(vec1_2, grid1)
     @test maximum(abs.(div1_2.data .- cos.(x1))) < 1e-10
@@ -51,11 +48,7 @@ end
     @test maximum(abs.(curl1_2[1].data .- sin.(x1))) < 1e-10
     @test maximum(abs.(curl1_2[2].data .- cos.(x1))) < 1e-10
 
-    vec1_3 = bslLD.VectorField([
-        zeros(length(x1)),
-        sin.(x1),
-        cos.(x1),
-    ])
+    vec1_3 = bslLD.VectorField([zeros(length(x1)), sin.(x1), cos.(x1)])
     div1_3 = bslLD.div(vec1_3, grid1)
     curl1_3 = bslLD.curl(vec1_3, grid1)
     @test maximum(abs.(div1_3.data)) < 1e-10
@@ -74,10 +67,8 @@ end
     @test maximum(abs.(grad2[1].data .- [cos(x) for x in x2, y in y2])) < 1e-10
     @test maximum(abs.(grad2[2].data .- [-2sin(2y) for x in x2, y in y2])) < 1e-10
 
-    vec2 = bslLD.VectorField([
-        [sin(x) for x in x2, y in y2],
-        [cos(2y) for x in x2, y in y2],
-    ])
+    vec2 =
+        bslLD.VectorField([[sin(x) for x in x2, y in y2], [cos(2y) for x in x2, y in y2]])
     div2 = bslLD.div(vec2, grid2)
     curl2 = bslLD.curl(vec2, grid2)
     @test maximum(abs.(div2.data .- [cos(x) - 2sin(2y) for x in x2, y in y2])) < 1e-10

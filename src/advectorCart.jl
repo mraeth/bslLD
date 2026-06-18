@@ -19,9 +19,10 @@ backend_vector(values) = bslLD.backend_array(collect(values))
 
 @inline _effective_dt(simTime::SimulationTime) = simTime.dt * simTime.fraction_dt
 
-@inline _cartesian_axis_sizes(grid::CartGrid) = (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
+@inline _cartesian_axis_sizes(grid::CartGrid) =
+    (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
 
-struct XShiftContext{GT, KT, VAT, SXT, SVT, PT, VTT, EST}
+struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST}
     grid::GT
     k::KT
     vaxes::VAT
@@ -34,7 +35,7 @@ struct XShiftContext{GT, KT, VAT, SXT, SVT, PT, VTT, EST}
     electric_scale::EST
 end
 
-struct VShiftContext{GT, ET, KT, SXT, SVT, PT, EST}
+struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
     grid::GT
     e_components::ET
     k::KT
@@ -62,7 +63,7 @@ end
 
     xdisp = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, -ctx.electric_scale*ctx.phi)
-    for dv in 1:length(ivs)
+    for dv = 1:length(ivs)
         xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
     end
 
@@ -74,7 +75,7 @@ end
 
     delta_v = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, ctx.electric_scale*ctx.phi)
-    for field_dir in 1:length(ctx.e_components)
+    for field_dir = 1:length(ctx.e_components)
         delta_v += ctx.e_components[field_dir][ixs[1]] * rotation[ctx.dir, field_dir]
     end
 
@@ -83,67 +84,84 @@ end
 
 # --- AdvectionPlan: pre-allocated buffers and cached data for zero-allocation advection ---
 
-struct AdvectionPlan{FB, PXF, PXI, PVF, PVI, KXT, KVT, VAT, BK}
-    ff_buf  :: FB   # Complex{Float64} work buffer, same shape as f.data
-    fwd_x   :: PXF  # ntuple of in-place forward FFT plans, one per x-dim
-    inv_x   :: PXI  # ntuple of in-place inverse FFT plans, one per x-dim
-    fwd_v   :: PVF  # ntuple of in-place forward FFT plans, one per v-dim
-    inv_v   :: PVI  # ntuple of in-place inverse FFT plans, one per v-dim
-    kx      :: KXT  # ntuple of wavenumber arrays for x-dims (on backend)
-    kv      :: KVT  # ntuple of wavenumber arrays for v-dims (on backend)
-    vaxes   :: VAT  # ntuple of velocity axes already copied to backend
-    backend :: BK
+struct AdvectionPlan{FB,PXF,PXI,PVF,PVI,KXT,KVT,VAT,BK}
+    ff_buf::FB   # Complex{Float64} work buffer, same shape as f.data
+    fwd_x::PXF  # ntuple of in-place forward FFT plans, one per x-dim
+    inv_x::PXI  # ntuple of in-place inverse FFT plans, one per x-dim
+    fwd_v::PVF  # ntuple of in-place forward FFT plans, one per v-dim
+    inv_v::PVI  # ntuple of in-place inverse FFT plans, one per v-dim
+    kx::KXT  # ntuple of wavenumber arrays for x-dims (on backend)
+    kv::KVT  # ntuple of wavenumber arrays for v-dims (on backend)
+    vaxes::VAT  # ntuple of velocity axes already copied to backend
+    backend::BK
 end
 
-function AdvectionPlan(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX,NV,NXNV}
+function AdvectionPlan(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+) where {NX,NV,NXNV}
     ff_buf = similar(f.data, Complex{Float64})
-    fwd_x  = ntuple(d -> plan_fft!(ff_buf, d), Val(NX))
-    inv_x  = ntuple(d -> plan_ifft!(ff_buf, d), Val(NX))
-    fwd_v  = ntuple(d -> plan_fft!(ff_buf, NX + d), Val(NV))
-    inv_v  = ntuple(d -> plan_ifft!(ff_buf, NX + d), Val(NV))
-    kx     = ntuple(Val(NX)) do d
+    fwd_x = ntuple(d -> plan_fft!(ff_buf, d), Val(NX))
+    inv_x = ntuple(d -> plan_ifft!(ff_buf, d), Val(NX))
+    fwd_v = ntuple(d -> plan_fft!(ff_buf, NX + d), Val(NV))
+    inv_v = ntuple(d -> plan_ifft!(ff_buf, NX + d), Val(NV))
+    kx = ntuple(Val(NX)) do d
         n = size(f.data, d)
         k = similar(f.data, Float64, n)
         copyto!(k, collect((2pi / (n * grid.delta[d])) .* fftfreq(n, n)))
         k
     end
-    kv     = ntuple(Val(NV)) do d
+    kv = ntuple(Val(NV)) do d
         n = size(f.data, NX + d)
         k = similar(f.data, Float64, n)
-        copyto!(k, collect((2pi / (n * grid.delta[NX + d])) .* fftfreq(n, n)))
+        copyto!(k, collect((2pi / (n * grid.delta[NX+d])) .* fftfreq(n, n)))
         k
     end
-    vaxes  = map(backend_vector, grid.vaxes)
+    vaxes = map(backend_vector, grid.vaxes)
     return AdvectionPlan(ff_buf, fwd_x, inv_x, fwd_v, inv_v, kx, kv, vaxes, bslLD.backend())
 end
 
-const _plan_cache = IdDict{Any, Dict{Any, AdvectionPlan}}()
+const _plan_cache = IdDict{Any,Dict{Any,AdvectionPlan}}()
 const _plan_cache_lock = ReentrantLock()
 
 @inline _plan_cache_key(grid::CartGrid) = (grid.xaxes, grid.vaxes, grid.delta, grid.Bdir)
 
-function _get_plan(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid) where {NX,NV,NXNV}
+function _get_plan(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+) where {NX,NV,NXNV}
     lock(_plan_cache_lock) do
-        plans_for_data = get!(() -> Dict{Any, AdvectionPlan}(), _plan_cache, f.data)
+        plans_for_data = get!(() -> Dict{Any,AdvectionPlan}(), _plan_cache, f.data)
         get!(() -> AdvectionPlan(f, grid), plans_for_data, _plan_cache_key(grid))
     end
 end
 
-function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, plan::AdvectionPlan) where {NX,NV,NXNV}
+function advectX!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+    plan::AdvectionPlan,
+) where {NX,NV,NXNV}
     return _advect_x_planned!(f, grid, simTime, plan, plan.backend)
 end
 
 function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
     @. ff_buf = f.data
     fwd_plan * ff_buf
-    kernel!(ff_buf, ctx; ndrange=length(ff_buf))
+    kernel!(ff_buf, ctx; ndrange = length(ff_buf))
     KernelAbstractions.synchronize(exec)
     inv_plan * ff_buf
     @. f.data = real(ff_buf)
     return nothing
 end
 
-function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
+function _advect_x_planned!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+    plan::AdvectionPlan,
+    exec,
+) where {NX,NV,NXNV}
     kernel! = spectral_multiply_kernel!(exec)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     phi = simTime.phase
@@ -151,35 +169,94 @@ function _advect_x_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::
     vth = thermal_velocity(f)
     electric_scale = electric_acceleration_scale(f)
 
-    for dir in 1:NX
-        ctx = XShiftContext(grid, plan.kx[dir], plan.vaxes, sizes_x, sizes_v, dir, phi, dt, vth,electric_scale )
-        _apply_phase_shift!(f, plan.ff_buf, plan.fwd_x[dir], plan.inv_x[dir], kernel!, ctx, exec)
+    for dir = 1:NX
+        ctx = XShiftContext(
+            grid,
+            plan.kx[dir],
+            plan.vaxes,
+            sizes_x,
+            sizes_v,
+            dir,
+            phi,
+            dt,
+            vth,
+            electric_scale,
+        )
+        _apply_phase_shift!(
+            f,
+            plan.ff_buf,
+            plan.fwd_x[dir],
+            plan.inv_x[dir],
+            kernel!,
+            ctx,
+            exec,
+        )
     end
     return nothing
 end
 
-function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField, plan::AdvectionPlan) where {NX,NV,NXNV}
+function advectV!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+    e::VectorField,
+    plan::AdvectionPlan,
+) where {NX,NV,NXNV}
     return _advect_v_planned!(f, grid, simTime, e, plan, plan.backend)
 end
 
-function _advect_v_planned!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField, plan::AdvectionPlan, exec) where {NX,NV,NXNV}
+function _advect_v_planned!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+    e::VectorField,
+    plan::AdvectionPlan,
+    exec,
+) where {NX,NV,NXNV}
     kernel! = spectral_multiply_kernel!(exec)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     e_components = ntuple(i -> e[i].data, Val(NV))
     phi = simTime.phase
     dt = _effective_dt(simTime)
     electric_scale = electric_acceleration_scale(f)
-    for dir in 1:NV
-        ctx = VShiftContext(grid, e_components, plan.kv[dir], sizes_x, sizes_v, dir, phi, dt, electric_scale)
-        _apply_phase_shift!(f, plan.ff_buf, plan.fwd_v[dir], plan.inv_v[dir], kernel!, ctx, exec)
+    for dir = 1:NV
+        ctx = VShiftContext(
+            grid,
+            e_components,
+            plan.kv[dir],
+            sizes_x,
+            sizes_v,
+            dir,
+            phi,
+            dt,
+            electric_scale,
+        )
+        _apply_phase_shift!(
+            f,
+            plan.ff_buf,
+            plan.fwd_v[dir],
+            plan.inv_v[dir],
+            kernel!,
+            ctx,
+            exec,
+        )
     end
     return nothing
 end
 
-function advectX!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime) where {NX,NV,NXNV}
+function advectX!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+) where {NX,NV,NXNV}
     advectX!(f, grid, simTime, _get_plan(f, grid))
 end
 
-function advectV!(f::DistributionGrid{Float64,NX,NV,NXNV,Cart}, grid::CartGrid, simTime::SimulationTime, e::VectorField) where {NX,NV,NXNV}
+function advectV!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+    e::VectorField,
+) where {NX,NV,NXNV}
     advectV!(f, grid, simTime, e, _get_plan(f, grid))
 end

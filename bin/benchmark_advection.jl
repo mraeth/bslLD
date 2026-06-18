@@ -1,8 +1,8 @@
 #!/usr/bin/env julia
 
 using Pkg
-Pkg.activate(joinpath(@__DIR__, "."); io=devnull)
-Pkg.develop(path=joinpath(@__DIR__, ".."); io=devnull)
+Pkg.activate(joinpath(@__DIR__, "."); io = devnull)
+Pkg.develop(path = joinpath(@__DIR__, ".."); io = devnull)
 
 
 using Statistics
@@ -10,20 +10,13 @@ using CUDA
 using bslLD
 using KernelAbstractions
 
-const DEFAULTS = (
-    nx = 1024,
-    nv = 1024,
-    samples = 50,
-    warmup = 5,
-    dt = 0.05,
-    epsilon = 0.01,
-)
+const DEFAULTS = (nx = 1024, nv = 1024, samples = 50, warmup = 5, dt = 0.05, epsilon = 0.01)
 
 const ROUTINES = (
-    ("advectX!      ", (f, grid, _, _plan)      -> bslLD.advectX!(f, grid)),
-    ("advectV!      ", (f, grid, e, _plan)       -> bslLD.advectV!(f, grid, e)),
-    ("advectX!(plan)", (f, grid, _, plan)        -> bslLD.advectX!(f, grid, plan)),
-    ("advectV!(plan)", (f, grid, e, plan)        -> bslLD.advectV!(f, grid, e, plan)),
+    ("advectX!      ", (f, grid, _, _plan) -> bslLD.advectX!(f, grid)),
+    ("advectV!      ", (f, grid, e, _plan) -> bslLD.advectV!(f, grid, e)),
+    ("advectX!(plan)", (f, grid, _, plan) -> bslLD.advectX!(f, grid, plan)),
+    ("advectV!(plan)", (f, grid, e, plan) -> bslLD.advectV!(f, grid, e, plan)),
 )
 
 function parse_args(args)
@@ -35,7 +28,7 @@ function parse_args(args)
         key = arg[3:end]
         haskey(opts, key) || error("Unknown option --$key")
         i == length(args) && error("Missing value for --$key")
-        value = args[i + 1]
+        value = args[i+1]
         opts[key] = opts[key] isa Int ? parse(Int, value) : parse(Float64, value)
         i += 2
     end
@@ -56,29 +49,43 @@ function clone_inputs(f, e)
 end
 
 function summarize(times)
-    return (
-        minimum = minimum(times),
-        median = median(times),
-        mean = mean(times),
-    )
+    return (minimum = minimum(times), median = median(times), mean = mean(times))
 end
 
 function print_summary(device, routine, stats)
-    println(rpad(device, 8), rpad(routine, 18),
-        "min=", round(stats.minimum * 1e3; digits=3), " ms  ",
-        "median=", round(stats.median * 1e3; digits=3), " ms  ",
-        "mean=", round(stats.mean * 1e3; digits=3), " ms")
+    println(
+        rpad(device, 8),
+        rpad(routine, 18),
+        "min=",
+        round(stats.minimum * 1e3; digits = 3),
+        " ms  ",
+        "median=",
+        round(stats.median * 1e3; digits = 3),
+        " ms  ",
+        "mean=",
+        round(stats.mean * 1e3; digits = 3),
+        " ms",
+    )
 end
 
-function benchmark_routine!(routine!, f_template, grid, e_template, plan, samples, warmup; sync! = (() -> nothing))
-    for _ in 1:warmup
+function benchmark_routine!(
+    routine!,
+    f_template,
+    grid,
+    e_template,
+    plan,
+    samples,
+    warmup;
+    sync! = (() -> nothing),
+)
+    for _ = 1:warmup
         f, e = clone_inputs(f_template, e_template)
         routine!(f, grid, e, plan)
         sync!()
     end
 
     times = Float64[]
-    for _ in 1:samples
+    for _ = 1:samples
         f, e = clone_inputs(f_template, e_template)
         elapsed = @elapsed begin
             routine!(f, grid, e, plan)
@@ -95,8 +102,16 @@ function bench(device, use_backend!, make_inputs, samples, warmup; sync! = (() -
 
     println(device, " benchmarks")
     stats = Dict(
-        label => benchmark_routine!(routine!, f_template, grid, e_template, plan, samples, warmup; sync!)
-        for (label, routine!) in ROUTINES
+        label => benchmark_routine!(
+            routine!,
+            f_template,
+            grid,
+            e_template,
+            plan,
+            samples,
+            warmup;
+            sync!,
+        ) for (label, routine!) in ROUTINES
     )
     for (label, _) in ROUTINES
         print_summary(device, label, stats[label])
@@ -108,7 +123,7 @@ function print_speedups(cpu_stats, gpu_stats)
     println("\nGPU speedup vs CPU (median runtime)")
     for (label, _) in ROUTINES
         speedup = cpu_stats[label].median / gpu_stats[label].median
-        println(rpad(label, 18), round(speedup; digits=2), "x")
+        println(rpad(label, 18), round(speedup; digits = 2), "x")
     end
 end
 
@@ -117,13 +132,22 @@ function main(args)
     make_case() = make_inputs(opts["nx"], opts["nv"], opts["dt"], opts["epsilon"])
 
     println("Advection benchmark configuration")
-    println("nx=$(opts["nx"]) nv=$(opts["nv"]) dt=$(opts["dt"]) epsilon=$(opts["epsilon"]) samples=$(opts["samples"]) warmup=$(opts["warmup"])")
+    println(
+        "nx=$(opts["nx"]) nv=$(opts["nv"]) dt=$(opts["dt"]) epsilon=$(opts["epsilon"]) samples=$(opts["samples"]) warmup=$(opts["warmup"])",
+    )
 
     cpu_stats = bench("CPU", bslLD.use_cpu!, make_case, opts["samples"], opts["warmup"])
 
     if bslLD.cuda_available()
         println()
-        gpu_stats = bench("GPU", bslLD.use_cuda!, make_case, opts["samples"], opts["warmup"]; sync! = bslLD.backend_synchronize!)
+        gpu_stats = bench(
+            "GPU",
+            bslLD.use_cuda!,
+            make_case,
+            opts["samples"],
+            opts["warmup"];
+            sync! = bslLD.backend_synchronize!,
+        )
         print_speedups(cpu_stats, gpu_stats)
     else
         println("\nGPU benchmarks skipped.")
