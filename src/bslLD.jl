@@ -70,6 +70,7 @@ include("field_solver.jl")
 include("solvers_electrostatic.jl")
 include("solvers_vacuum.jl")
 include("solvers_hybrid.jl")
+include("cold_plasma.jl")
 include("advectorPolar.jl")
 include("execution.jl")
 

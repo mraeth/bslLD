@@ -23,7 +23,7 @@ pE(w, mu) = -1/(mu*w^2)
 # generic Darwin model
 function K2Darwin(w, θ, mu, betai, sE, dE)
     N2 = rootsSDP(sI(w) + sE(w, mu), dI(w) + dE(w, mu), pI(w) + pE(w, mu), θ)
-    betai*w^2 .* N2
+    (betai/2) * w^2 .* N2
 end
 
 # three Darwin closures
