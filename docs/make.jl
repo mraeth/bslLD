@@ -66,6 +66,7 @@ open(joinpath(@__DIR__, "src", "index.md"), "a") do io
     println(io, "|----------|-------------|")
     for nb in notebooks
         name = splitext(basename(nb))[1]
+        isfile(joinpath(notebooks_src, name * ".html")) || continue
         label = replace(name, "_" => " ")
         desc = first_description(nb)
         # Link is relative from build/index.html → build/notebooks/X.html
