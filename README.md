@@ -123,24 +123,27 @@ Diagnostic helpers: `bslLD.electromagnetic_energy(E, B; params)` and `bslLD.maxw
 ```
 bslLD/
 ├── src/
-│   ├── bslLD.jl                 # module entry point, backend management
-│   ├── grid.jl                  # Grid, PolarGrid, SimulationTime
-│   ├── distribution.jl          # Distribution, compute_density/current/momentum_tensor
-│   ├── fields.jl                # ScalarField, VectorField, FieldSolution, Moments
-│   ├── field_solver.jl          # AbstractFieldSolver, shared helpers
-│   ├── solvers_electrostatic.jl # PoissonSolver, AdiabaticSolver
-│   ├── solvers_hybrid.jl        # EMSolverDKPol, EMSolverDKNoPol, ColdIonFluid
-│   ├── solvers_vacuum.jl        # EMSolverVacuum, VacuumMaxwellParams
-│   ├── advectorCart.jl          # BSL advection (Cartesian, KernelAbstractions)
-│   ├── advectorPolar.jl         # BSL advection (polar coordinates)
-│   ├── spectral.jl              # FFT helpers, curl, divergence (spectral)
-│   ├── differential_operators.jl# finite-difference curl, div, grad
-│   ├── cold_plasma.jl           # ColdIonFluid for linear EM benchmarks
-│   ├── indexing.jl              # multi-dim index helpers
-│   ├── time.jl                  # SimulationTime, advance!, continue_advection
-│   └── execution.jl             # use_cpu!, use_cuda!, backend switching
-├── examples/                    # Jupyter notebooks (landau_damping, ibw, em_cases, …)
-└── test/                        # Unit tests
+│   ├── bslLD.jl                       # module entry point, backend management
+│   ├── core/
+│   │   ├── grid.jl                    # Grid (Cart/Polar), axes
+│   │   ├── time.jl                    # SimulationTime, advance!, continue_advection
+│   │   ├── indexing.jl                # multi-dim index helpers
+│   │   └── fields.jl                  # ScalarField, VectorField, MatrixField
+│   ├── kinetics/
+│   │   ├── distribution.jl            # DistributionGrid, compute_density/current/Pi
+│   │   ├── advectorCart.jl            # BSL advection (Cartesian, KernelAbstractions)
+│   │   └── advectorPolar.jl           # BSL advection (polar coordinates)
+│   ├── maxwell/
+│   │   ├── differential_operators.jl  # spectral grad, curl, div
+│   │   ├── spectral.jl                # FFT helpers, wavenumbers
+│   │   ├── field_solver.jl            # AbstractFieldSolver, Moments, FieldSolution
+│   │   ├── solvers_electrostatic.jl   # PoissonSolver, AdiabaticSolver
+│   │   ├── solvers_vacuum.jl          # EMSolverVacuum, VacuumMaxwellParams
+│   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol
+│   │   └── cold_plasma.jl             # ColdIonFluid for linear EM benchmarks
+│   └── execution.jl                   # use_cpu!, use_cuda!, backend switching
+├── examples/                          # Jupyter notebooks (landau_damping, ibw, em_cases, …)
+└── test/                              # Unit tests
 ```
 
 ## Dependencies
