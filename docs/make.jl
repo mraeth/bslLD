@@ -54,18 +54,20 @@ function first_description(nb_path)
 end
 
 # ── 4. README + examples table → index.md (single source of truth) ───────────
-cp(joinpath(@__DIR__, "..", "README.md"),
-   joinpath(@__DIR__, "src", "index.md"),
-   force = true)
+cp(
+    joinpath(@__DIR__, "..", "README.md"),
+    joinpath(@__DIR__, "src", "index.md"),
+    force = true,
+)
 
 open(joinpath(@__DIR__, "src", "index.md"), "a") do io
     println(io, "\n---\n\n## Examples\n")
     println(io, "| Notebook | Description |")
     println(io, "|----------|-------------|")
     for nb in notebooks
-        name  = splitext(basename(nb))[1]
+        name = splitext(basename(nb))[1]
         label = replace(name, "_" => " ")
-        desc  = first_description(nb)
+        desc = first_description(nb)
         # Link is relative from build/index.html → build/notebooks/X.html
         println(io, "| [$(label)](notebooks/$(name).html) | $(desc) |")
     end
@@ -74,18 +76,14 @@ end
 # ── 5. makedocs ───────────────────────────────────────────────────────────────
 makedocs(
     sitename = "bslLD",
-    authors  = "Mario Raeth",
-    pages    = ["Home" => "index.md"],
-    format   = Documenter.HTML(
+    authors = "Mario Raeth",
+    pages = ["Home" => "index.md"],
+    format = Documenter.HTML(
         prettyurls = true,
-        canonical  = "https://mraeth.github.io/bslLD",
+        canonical = "https://mraeth.github.io/bslLD",
     ),
-    doctest  = false,
+    doctest = false,
 )
 
 # ── 6. Deploy ─────────────────────────────────────────────────────────────────
-deploydocs(
-    repo      = "github.com/mraeth/bslLD.git",
-    devbranch = "main",
-    push_preview = false,
-)
+deploydocs(repo = "github.com/mraeth/bslLD.git", devbranch = "main", push_preview = false)
