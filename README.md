@@ -192,4 +192,4 @@ The CUDA extension is loaded automatically by Julia's extension mechanism when `
 
 ## Author
 
-Mario Raeth (mario.raeth@ipp.mpg.de)
+Mario Raeth
