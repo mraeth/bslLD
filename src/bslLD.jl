@@ -72,6 +72,7 @@ include("solvers_vacuum.jl")
 include("solvers_hybrid.jl")
 include("advectorPolar.jl")
 include("execution.jl")
+include("sources.jl")
 
 greet() = print("Hello World!")
 
