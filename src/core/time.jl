@@ -1,6 +1,6 @@
 import RecipesBase
 
-mutable struct SimulationTime{T<:AbstractFloat}
+mutable struct SimulationTime{T<:AbstractFloat} <: AbstractVector{T}
     dt::T
     fraction_dt::T
     current_T::T
@@ -36,7 +36,7 @@ function SimulationTime(
         final_T,
         Int(step),
         T(phase),
-        Int(nmax),
+        Int(round(Int, final_T/dt)),
         T(gyro_frequency),
         time_ns(),
         nothing,
@@ -44,8 +44,9 @@ function SimulationTime(
 end
 
 # Aux function to indexing SimulationTime with [n] to get n*dt
-Base.getindex(t::SimulationTime, i::Int) = t.dt * i
-
+Base.size(t::SimulationTime) = (t.nmax,)
+Base.getindex(t::SimulationTime, i::Int) = t.dt * (i - 1)
+Base.IndexStyle(::Type{<:SimulationTime}) = IndexLinear()
 
 function SimulationTime(dt::Real, final_T::Real; kwargs...)
     T = promote_type(typeof(float(dt)), typeof(float(final_T)))
