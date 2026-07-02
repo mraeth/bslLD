@@ -52,7 +52,7 @@ function _make_em_vacuum_workspace(arr::AbstractArray, grid::Grid, ncomp::Int)
         ndims_x,
     )
     k2 = fill!(similar(arr, Float64), 0.0)
-    for d in 1:ndims_x
+    for d = 1:ndims_x
         k2 .+= kviews[d] .^ 2
     end
 
@@ -62,8 +62,17 @@ function _make_em_vacuum_workspace(arr::AbstractArray, grid::Grid, ncomp::Int)
     scratch_c = similar(arr, Complex{Float64})
 
     return EMVacuumWorkspace(
-        sw, Ehat, Bhat, curlEhat, curlBhat, kviews,
-        k2, alpha2, prefac_buf, diagonal_buf, scratch_c,
+        sw,
+        Ehat,
+        Bhat,
+        curlEhat,
+        curlBhat,
+        kviews,
+        k2,
+        alpha2,
+        prefac_buf,
+        diagonal_buf,
+        scratch_c,
     )
 end
 
@@ -71,10 +80,13 @@ function _get_em_vacuum_workspace(sol::FieldSolution, grid::Grid)
     arr = sol.E[1].data
     ndims_x = spatial_ndims(grid)
     ncomp = ncomponents(sol.E)
-    key = (:em_vacuum, size(arr), eltype(arr), ndims_x, ncomp,
-           Tuple(grid.delta[1:ndims_x]))
+    key = (:em_vacuum, size(arr), eltype(arr), ndims_x, ncomp, Tuple(grid.delta[1:ndims_x]))
     lock(_solver_workspace_cache_lock) do
-        get!(() -> _make_em_vacuum_workspace(arr, grid, ncomp), _solver_workspace_cache, key)
+        get!(
+            () -> _make_em_vacuum_workspace(arr, grid, ncomp),
+            _solver_workspace_cache,
+            key,
+        )
     end
 end
 
@@ -94,15 +106,15 @@ function _step_maxwell_cn!(
     sw = ws.sw
 
     # Forward FFT all components into Ehat, Bhat
-    for d in 1:ncomp
+    for d = 1:ncomp
         @. sw.fft_buf = E[d].data
-        for dim in 1:ndims_x
+        for dim = 1:ndims_x
             sw.fwd_plans[dim] * sw.fft_buf
         end
         ws.Ehat[d] .= sw.fft_buf
 
         @. sw.fft_buf = B[d].data
-        for dim in 1:ndims_x
+        for dim = 1:ndims_x
             sw.fwd_plans[dim] * sw.fft_buf
         end
         ws.Bhat[d] .= sw.fft_buf
@@ -115,22 +127,23 @@ function _step_maxwell_cn!(
     _spectral_curl_hat!(ws.curlEhat, ws.Ehat, ws.kviews, ndims_x)
     _spectral_curl_hat!(ws.curlBhat, ws.Bhat, ws.kviews, ndims_x)
 
-    for d in 1:ncomp
-        @. ws.scratch_c = ws.prefac_buf * (ws.diagonal_buf * ws.Ehat[d] + c^2 * dt * ws.curlBhat[d])
+    for d = 1:ncomp
+        @. ws.scratch_c =
+            ws.prefac_buf * (ws.diagonal_buf * ws.Ehat[d] + c^2 * dt * ws.curlBhat[d])
         @. ws.Bhat[d] = ws.prefac_buf * (ws.diagonal_buf * ws.Bhat[d] - dt * ws.curlEhat[d])
         ws.Ehat[d] .= ws.scratch_c
     end
 
     # Inverse FFT back to real space
-    for d in 1:ncomp
+    for d = 1:ncomp
         @. sw.fft_buf = ws.Ehat[d]
-        for dim in 1:ndims_x
+        for dim = 1:ndims_x
             sw.inv_plans[dim] * sw.fft_buf
         end
         @. E[d].data = real(sw.fft_buf)
 
         @. sw.fft_buf = ws.Bhat[d]
-        for dim in 1:ndims_x
+        for dim = 1:ndims_x
             sw.inv_plans[dim] * sw.fft_buf
         end
         @. B[d].data = real(sw.fft_buf)

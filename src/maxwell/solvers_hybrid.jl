@@ -26,7 +26,12 @@ struct EMDKPolWorkspace{SW,FA}
     spatial_perp_dirs::Vector{Int}
 end
 
-function _make_em_dk_pol_workspace(arr::AbstractArray, grid::Grid, ncomp::Int, solver::EMSolverDKPol)
+function _make_em_dk_pol_workspace(
+    arr::AbstractArray,
+    grid::Grid,
+    ncomp::Int,
+    solver::EMSolverDKPol,
+)
     ndims_x = spatial_ndims(grid)
     ndims_data = ndims(arr)
     perp_dirs = [d for d = 1:ncomp if d != grid.Bdir]
@@ -51,8 +56,18 @@ function _make_em_dk_pol_workspace(arr::AbstractArray, grid::Grid, ncomp::Int, s
     @. helmholtz = -kperp2 - lambda
 
     return EMDKPolWorkspace(
-        sw, curl_buf, temp1, temp2, temp3, helmholtz,
-        ndims_x, d1, d2, pz, grid.Bdir <= ndims_x, spatial_perp_dirs,
+        sw,
+        curl_buf,
+        temp1,
+        temp2,
+        temp3,
+        helmholtz,
+        ndims_x,
+        d1,
+        d2,
+        pz,
+        grid.Bdir <= ndims_x,
+        spatial_perp_dirs,
     )
 end
 
@@ -60,10 +75,23 @@ function _get_em_dk_pol_workspace(sol::FieldSolution, grid::Grid, solver::EMSolv
     arr = sol.E[1].data
     ndims_x = spatial_ndims(grid)
     ncomp = ncomponents(sol.E)
-    key = (:em_dk_pol, size(arr), eltype(arr), ndims_x, ncomp, grid.Bdir,
-           Tuple(grid.delta[1:ndims_x]), solver.beta_i, solver.mu)
+    key = (
+        :em_dk_pol,
+        size(arr),
+        eltype(arr),
+        ndims_x,
+        ncomp,
+        grid.Bdir,
+        Tuple(grid.delta[1:ndims_x]),
+        solver.beta_i,
+        solver.mu,
+    )
     lock(_solver_workspace_cache_lock) do
-        get!(() -> _make_em_dk_pol_workspace(arr, grid, ncomp, solver), _solver_workspace_cache, key)
+        get!(
+            () -> _make_em_dk_pol_workspace(arr, grid, ncomp, solver),
+            _solver_workspace_cache,
+            key,
+        )
     end
 end
 
@@ -106,8 +134,13 @@ function _step_dk_pol!(
     if isempty(ws.spatial_perp_dirs)
         fill!(ws.temp2, 0)
     else
-        _differentiate_impl!(ws.temp2, E[ws.spatial_perp_dirs[1]], ws.sw,
-                             ws.spatial_perp_dirs[1], false)
+        _differentiate_impl!(
+            ws.temp2,
+            E[ws.spatial_perp_dirs[1]],
+            ws.sw,
+            ws.spatial_perp_dirs[1],
+            false,
+        )
         for d in ws.spatial_perp_dirs[2:end]
             _differentiate_impl!(ws.temp3, E[d], ws.sw, d, false)
             ws.temp2 .+= ws.temp3
@@ -126,11 +159,11 @@ function _step_dk_pol!(
 
     # Forward FFT rhs_data into fft_buf, divide by helmholtz, inverse FFT
     @. ws.sw.fft_buf = ws.temp1
-    for d in 1:ws.ndims_x
+    for d = 1:ws.ndims_x
         ws.sw.fwd_plans[d] * ws.sw.fft_buf
     end
     @. ws.sw.fft_buf /= ws.helmholtz
-    for d in 1:ws.ndims_x
+    for d = 1:ws.ndims_x
         ws.sw.inv_plans[d] * ws.sw.fft_buf
     end
     @. E[pz].data = real(ws.sw.fft_buf)
@@ -207,7 +240,13 @@ struct EMDKNoPolWorkspace{SW,CA,FA,K1V,K2V,KZV,KV}
     pz::Int
 end
 
-function _make_kview_or_zero(sw::SpectralWorkspace, d::Int, ndims_x::Int, ndims_data::Int, arr::AbstractArray)
+function _make_kview_or_zero(
+    sw::SpectralWorkspace,
+    d::Int,
+    ndims_x::Int,
+    ndims_data::Int,
+    arr::AbstractArray,
+)
     if d <= ndims_x
         return reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data))
     else
@@ -215,7 +254,12 @@ function _make_kview_or_zero(sw::SpectralWorkspace, d::Int, ndims_x::Int, ndims_
     end
 end
 
-function _make_em_dk_no_pol_workspace(arr::AbstractArray, grid::Grid, ncomp::Int, solver::EMSolverDKNoPol)
+function _make_em_dk_no_pol_workspace(
+    arr::AbstractArray,
+    grid::Grid,
+    ncomp::Int,
+    solver::EMSolverDKNoPol,
+)
     ndims_x = spatial_ndims(grid)
     ndims_data = ndims(arr)
     perp_dirs = [d for d = 1:ncomp if d != grid.Bdir]
@@ -246,29 +290,73 @@ function _make_em_dk_no_pol_workspace(arr::AbstractArray, grid::Grid, ncomp::Int
     k2_tot = f_arr()
     @. k2_tot = k2_perp + kz_view^2
 
-    a31_pre = f_arr(); @. a31_pre = kz_view * k1_view
-    a32_pre = f_arr(); @. a32_pre = kz_view * k2_view
+    a31_pre = f_arr();
+    @. a31_pre = kz_view * k1_view
+    a32_pre = f_arr();
+    @. a32_pre = kz_view * k2_view
     lambda = (solver.beta_i / 2) * (1 + 1 / solver.mu)
-    a33_pre = f_arr(); @. a33_pre = -k2_perp - lambda
+    a33_pre = f_arr();
+    @. a33_pre = -k2_perp - lambda
 
     return EMDKNoPolWorkspace(
-        sw, kviews, k1_view, k2_view, kz_view,
-        Bhat, Jhat, Pihat_buf, curlBhat, div_Pi_hat, Ehat,
-        k2_perp, k2_tot, a31_pre, a32_pre, a33_pre,
-        f_arr(), f_arr(), f_arr(), f_arr(), f_arr(), f_arr(),
-        f_arr(), f_arr(), f_arr(), f_arr(),
-        ndims_x, d1, d2, pz,
+        sw,
+        kviews,
+        k1_view,
+        k2_view,
+        kz_view,
+        Bhat,
+        Jhat,
+        Pihat_buf,
+        curlBhat,
+        div_Pi_hat,
+        Ehat,
+        k2_perp,
+        k2_tot,
+        a31_pre,
+        a32_pre,
+        a33_pre,
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        f_arr(),
+        ndims_x,
+        d1,
+        d2,
+        pz,
     )
 end
 
-function _get_em_dk_no_pol_workspace(sol::FieldSolution, grid::Grid, solver::EMSolverDKNoPol)
+function _get_em_dk_no_pol_workspace(
+    sol::FieldSolution,
+    grid::Grid,
+    solver::EMSolverDKNoPol,
+)
     arr = sol.E[1].data
     ndims_x = spatial_ndims(grid)
     ncomp = ncomponents(sol.E)
-    key = (:em_dk_no_pol, size(arr), eltype(arr), ndims_x, ncomp, grid.Bdir,
-           Tuple(grid.delta[1:ndims_x]), solver.beta_i, solver.mu)
+    key = (
+        :em_dk_no_pol,
+        size(arr),
+        eltype(arr),
+        ndims_x,
+        ncomp,
+        grid.Bdir,
+        Tuple(grid.delta[1:ndims_x]),
+        solver.beta_i,
+        solver.mu,
+    )
     lock(_solver_workspace_cache_lock) do
-        get!(() -> _make_em_dk_no_pol_workspace(arr, grid, ncomp, solver), _solver_workspace_cache, key)
+        get!(
+            () -> _make_em_dk_no_pol_workspace(arr, grid, ncomp, solver),
+            _solver_workspace_cache,
+            key,
+        )
     end
 end
 
@@ -290,13 +378,13 @@ function _step_dk_no_pol!(
     sw = ws.sw
 
     # Forward FFT inputs
-    for d in 1:3
+    for d = 1:3
         _fwd_fft_to!(sw, B[d].data, ws.Bhat[d], ndims_x)
     end
-    for d in 1:2
+    for d = 1:2
         _fwd_fft_to!(sw, J_i_perp[d].data, ws.Jhat[d], ndims_x)
     end
-    for d in 1:ndims_x
+    for d = 1:ndims_x
         _fwd_fft_to!(sw, Pi_diff[d].data, ws.Pihat_buf[d], ndims_x)
     end
 
@@ -305,7 +393,7 @@ function _step_dk_no_pol!(
 
     # div_Pi_hat
     fill!(ws.div_Pi_hat, 0)
-    for d in 1:ndims_x
+    for d = 1:ndims_x
         @. ws.div_Pi_hat += im * ws.kviews[d] * ws.Pihat_buf[d]
     end
 
@@ -334,21 +422,31 @@ function _step_dk_no_pol!(
     w1 = ws.curlBhat[d1]
     w2 = ws.curlBhat[d2]
     b3 = ws.div_Pi_hat
-    @. ws.Ehat[d1] = (w2 * ws.m11 + ws.a12 * (w1 * ws.a33_pre + ws.a23 * b3) +
-                      ws.a13 * (-w1 * ws.a32_pre - ws.a22 * b3)) / ws.detA
-    @. ws.Ehat[d2] = (ws.a11 * (-w1 * ws.a33_pre - ws.a23 * b3) - w2 * ws.m12 +
-                      ws.a13 * (ws.a21 * b3 + w1 * ws.a31_pre)) / ws.detA
-    @. ws.Ehat[pz] = (ws.a11 * (ws.a22 * b3 + w1 * ws.a32_pre) -
-                      ws.a12 * (ws.a21 * b3 + w1 * ws.a31_pre) + w2 * ws.m13) / ws.detA
+    @. ws.Ehat[d1] =
+        (
+            w2 * ws.m11 +
+            ws.a12 * (w1 * ws.a33_pre + ws.a23 * b3) +
+            ws.a13 * (-w1 * ws.a32_pre - ws.a22 * b3)
+        ) / ws.detA
+    @. ws.Ehat[d2] =
+        (
+            ws.a11 * (-w1 * ws.a33_pre - ws.a23 * b3) - w2 * ws.m12 +
+            ws.a13 * (ws.a21 * b3 + w1 * ws.a31_pre)
+        ) / ws.detA
+    @. ws.Ehat[pz] =
+        (
+            ws.a11 * (ws.a22 * b3 + w1 * ws.a32_pre) -
+            ws.a12 * (ws.a21 * b3 + w1 * ws.a31_pre) + w2 * ws.m13
+        ) / ws.detA
 
     # Faraday: Bhat -= dt * curl(Ehat)  — reuse curlBhat buffers
     _spectral_curl_hat!(ws.curlBhat, ws.Ehat, ws.kviews, ndims_x)
-    for d in 1:3
+    for d = 1:3
         @. ws.Bhat[d] -= dt * ws.curlBhat[d]
     end
 
     # Inverse FFT
-    for d in 1:3
+    for d = 1:3
         _inv_fft_from!(sw, ws.Ehat[d], E[d].data, ndims_x)
         _inv_fft_from!(sw, ws.Bhat[d], B[d].data, ndims_x)
     end

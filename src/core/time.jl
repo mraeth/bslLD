@@ -44,8 +44,8 @@ function SimulationTime(
 end
 
 # Aux function to indexing SimulationTime with [n] to get n*dt
-Base.size(t::SimulationTime)              = (t.nmax,)
-Base.getindex(t::SimulationTime, i::Int)  = t.dt * (i - 1)
+Base.size(t::SimulationTime) = (t.nmax,)
+Base.getindex(t::SimulationTime, i::Int) = t.dt * (i - 1)
 Base.IndexStyle(::Type{<:SimulationTime}) = IndexLinear()
 
 function SimulationTime(dt::Real, final_T::Real; kwargs...)

@@ -107,15 +107,27 @@ function _differentiate_impl!(
     negate::Bool = false,
 )
     _differentiate_impl!(
-        out, field, ws.fft_buf, ws.fwd_plans[dir], ws.inv_plans[dir],
-        ws.k[dir], dir, ws.backend, negate,
+        out,
+        field,
+        ws.fft_buf,
+        ws.fwd_plans[dir],
+        ws.inv_plans[dir],
+        ws.k[dir],
+        dir,
+        ws.backend,
+        negate,
     )
 end
 
 # Copy src → fft_buf, apply all fwd_plans in-place, copy result → dst.
-function _fwd_fft_to!(sw::SpectralWorkspace, src::AbstractArray, dst::AbstractArray, ndims_x::Int)
+function _fwd_fft_to!(
+    sw::SpectralWorkspace,
+    src::AbstractArray,
+    dst::AbstractArray,
+    ndims_x::Int,
+)
     @. sw.fft_buf = src
-    for d in 1:ndims_x
+    for d = 1:ndims_x
         sw.fwd_plans[d] * sw.fft_buf
     end
     dst .= sw.fft_buf
@@ -123,9 +135,14 @@ function _fwd_fft_to!(sw::SpectralWorkspace, src::AbstractArray, dst::AbstractAr
 end
 
 # Copy src → fft_buf, apply all inv_plans in-place, write real part → dst.
-function _inv_fft_from!(sw::SpectralWorkspace, src::AbstractArray, dst::AbstractArray, ndims_x::Int)
+function _inv_fft_from!(
+    sw::SpectralWorkspace,
+    src::AbstractArray,
+    dst::AbstractArray,
+    ndims_x::Int,
+)
     @. sw.fft_buf = src
-    for d in 1:ndims_x
+    for d = 1:ndims_x
         sw.inv_plans[d] * sw.fft_buf
     end
     @. dst = real(sw.fft_buf)
@@ -143,7 +160,7 @@ function _apply_div!(
 )
     ndims_x = spatial_ndims(grid)
     _differentiate_impl!(out, field[1], ws, 1, false)
-    for d in 2:ndims_x
+    for d = 2:ndims_x
         _differentiate_impl!(temp, field[d], ws, d, false)
         out .+= temp
     end
@@ -204,7 +221,7 @@ function differentiate(field::ScalarField{T,N}, grid::Grid, dir::Int) where {T,N
     1 <= dir <= N || throw(ArgumentError("direction $dir is outside the field dimensions"))
     dir <= length(grid.xaxes) ||
         throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
-    ws  = _get_spectral_workspace(field.data, grid)
+    ws = _get_spectral_workspace(field.data, grid)
     out = similar(field.data, Float64)
     _differentiate_impl!(out, field, ws, dir)
     return ScalarField(out)
@@ -214,11 +231,13 @@ function grad(field::ScalarField{T,N}, grid::Grid) where {T,N}
     ndirs = spatial_ndims(grid)
     ndirs >= 1 || throw(ArgumentError("grad requires at least one spatial dimension"))
     ws = _get_spectral_workspace(field.data, grid)
-    return VectorField([begin
-        out = similar(field.data, Float64)
-        _differentiate_impl!(out, field, ws, d)
-        ScalarField(out)
-    end for d in 1:ndirs])
+    return VectorField([
+        begin
+            out = similar(field.data, Float64)
+            _differentiate_impl!(out, field, ws, d)
+            ScalarField(out)
+        end for d = 1:ndirs
+    ])
 end
 
 function div(field::VectorField{T,N}, grid::Grid) where {T,N}
@@ -228,8 +247,8 @@ function div(field::VectorField{T,N}, grid::Grid) where {T,N}
     ncomp >= ndirs || throw(
         ArgumentError("div on a $ndirs-D grid requires at least $ndirs vector components"),
     )
-    ws   = _get_spectral_workspace(field[1].data, grid)
-    out  = similar(field[1].data, Float64)
+    ws = _get_spectral_workspace(field[1].data, grid)
+    out = similar(field[1].data, Float64)
     temp = similar(out)
     _apply_div!(out, field, temp, ws, grid)
     return ScalarField(out)
@@ -241,12 +260,12 @@ function div(field::MatrixField{DT,N,SF,NR,NC,NF}, grid::Grid) where {DT,N,SF,NR
     NC >= ndirs || throw(
         ArgumentError("div on a $ndirs-D grid requires at least $ndirs matrix columns"),
     )
-    ws   = _get_spectral_workspace(field[1,1].data, grid)
-    out  = similar(field[1,1].data, Float64)
+    ws = _get_spectral_workspace(field[1, 1].data, grid)
+    out = similar(field[1, 1].data, Float64)
     temp = similar(out)
     rows = Vector{SF}(undef, NR)
-    for i in 1:NR
-        row = VectorField([field[i, d] for d in 1:ndirs])
+    for i = 1:NR
+        row = VectorField([field[i, d] for d = 1:ndirs])
         _apply_div!(out, row, temp, ws, grid)
         rows[i] = ScalarField(copy(out))
     end
@@ -255,13 +274,14 @@ end
 
 function curl(field::VectorField, grid::Grid)
     ndims_x = spatial_ndims(grid)
-    ncomp   = ncomponents(field)
-    ws   = _get_spectral_workspace(field[1].data, grid)
+    ncomp = ncomponents(field)
+    ws = _get_spectral_workspace(field[1].data, grid)
     temp = similar(field[1].data, Float64)
 
     # 2D 2-component returns a ScalarField; _apply_curl! doesn't handle this case
     if ndims_x == 2 && ncomp == 2
-        dv = similar(temp); du = similar(temp)
+        dv = similar(temp);
+        du = similar(temp)
         _differentiate_impl!(dv, field[2], ws, 1)
         _differentiate_impl!(du, field[1], ws, 2)
         return ScalarField(dv .- du)
@@ -348,13 +368,15 @@ function _spectral_curl_hat!(out, fieldhat, kviews, ndims_x::Int)
             return out
         end
     end
-    throw(ArgumentError(
-        "unsupported spectral curl layout for $ndims_x spatial dimensions and $ncomp components",
-    ))
+    throw(
+        ArgumentError(
+            "unsupported spectral curl layout for $ndims_x spatial dimensions and $ncomp components",
+        ),
+    )
 end
 
 function spectral_curl_hat(fieldhat::Vector, kviews, ndims_x::Int)
-    out = [similar(fieldhat[1]) for _ in 1:length(fieldhat)]
+    out = [similar(fieldhat[1]) for _ = 1:length(fieldhat)]
     _spectral_curl_hat!(out, fieldhat, kviews, ndims_x)
     return out
 end
