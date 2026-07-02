@@ -84,7 +84,7 @@ function poisson_potential(
     coefficient::T,
 ) where {T<:AbstractFloat}
     rhohat = fft_spatial(rho.data, grid)
-    k2 = spectral_wave_number_squared(rho, grid) .* coefficient
+    k2 = spectral_wavenumber_squared(rho, grid) .* coefficient
     phihat = -rhohat
     zero_mode = k2 .== 0
     phihat[.!zero_mode] ./= k2[.!zero_mode]
@@ -100,7 +100,7 @@ end
 
 function fourier_filter(field::ScalarField, grid::Grid, cutoff_fraction::Real)
     fieldhat = fft_spatial(field.data, grid)
-    k2 = spectral_wave_number_squared(field, grid)
+    k2 = spectral_wavenumber_squared(field, grid)
     kmax2 = maximum(k2) * cutoff_fraction^2
     fieldhat[k2 .> kmax2] .= 0
     return ScalarField(real(ifft_spatial(fieldhat, grid)))

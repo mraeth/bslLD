@@ -191,6 +191,13 @@ function _apply_curl!(
         else
             throw(ArgumentError("1D curl requires 2 or 3 field components"))
         end
+    elseif ndims_x == 2 && ncomp == 2
+        # 2-component 2D curl: scalar result stored in out[1]; out[2], out[3] zeroed
+        _differentiate_impl!(out[1], field[2], ws, 1, false)   # d/dx f[2]
+        _differentiate_impl!(temp, field[1], ws, 2, false)     # d/dy f[1]
+        out[1] .-= temp
+        fill!(out[2], 0)
+        fill!(out[3], 0)
     elseif ndims_x == 2
         ncomp == 3 || throw(ArgumentError("2D curl requires 3 field components"))
         _differentiate_impl!(out[1], field[3], ws, 2, false)   # d/dy f[3]
@@ -277,30 +284,12 @@ function curl(field::VectorField, grid::Grid)
     ncomp = ncomponents(field)
     ws = _get_spectral_workspace(field[1].data, grid)
     temp = similar(field[1].data, Float64)
-
-    # 2D 2-component returns a ScalarField; _apply_curl! doesn't handle this case
-    if ndims_x == 2 && ncomp == 2
-        dv = similar(temp);
-        du = similar(temp)
-        _differentiate_impl!(dv, field[2], ws, 1)
-        _differentiate_impl!(du, field[1], ws, 2)
-        return ScalarField(dv .- du)
-    end
-
-    if ndims_x == 1
-        ncomp in (2, 3) || throw(ArgumentError("1D curl requires 2 or 3 vector components"))
-    elseif ndims_x == 2
-        ncomp == 3 || throw(ArgumentError("2D curl requires 3 field components"))
-    elseif ndims_x == 3
-        ncomp == 3 || throw(ArgumentError("3D curl requires exactly 3 vector components"))
-    else
-        throw(ArgumentError("curl currently supports 1D, 2D, and 3D grids"))
-    end
-
     out = ntuple(_ -> similar(field[1].data, Float64), 3)
     _apply_curl!(out, field, temp, ws, grid)
 
-    if ndims_x == 1 && ncomp == 2
+    if ndims_x == 2 && ncomp == 2
+        return ScalarField(out[1])
+    elseif ndims_x == 1 && ncomp == 2
         return VectorField([ScalarField(out[1]), ScalarField(out[2])])
     else
         return VectorField([ScalarField(out[1]), ScalarField(out[2]), ScalarField(out[3])])
@@ -328,7 +317,7 @@ function spectral_wavenumber_views(field::ScalarField, grid::Grid)
     end
 end
 
-function spectral_wave_number_squared(field::ScalarField, grid::Grid)
+function spectral_wavenumber_squared(field::ScalarField, grid::Grid)
     kviews = spectral_wavenumber_views(field, grid)
     k2 = bslLD.backend_array(zeros(Float64, size(field.data)))
     for kview in kviews
@@ -375,8 +364,3 @@ function _spectral_curl_hat!(out, fieldhat, kviews, ndims_x::Int)
     )
 end
 
-function spectral_curl_hat(fieldhat::Vector, kviews, ndims_x::Int)
-    out = [similar(fieldhat[1]) for _ = 1:length(fieldhat)]
-    _spectral_curl_hat!(out, fieldhat, kviews, ndims_x)
-    return out
-end
