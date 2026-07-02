@@ -53,6 +53,34 @@ function _differentiate_impl(
     return ScalarField(real(ifft(fhat, dir)))
 end
 
+# Allocation-free variant: writes into pre-allocated `out` using cached buffers and plans.
+# Set negate=true to compute -d(field)/dx_dir (for E = -∇φ).
+function _differentiate_impl!(
+    out::AbstractArray,
+    field::ScalarField,
+    fhat_buf::AbstractArray,
+    fwd_plan,
+    inv_plan,
+    k::AbstractArray,
+    dir::Int,
+    exec,
+    negate::Bool = false,
+)
+    kernel! = spectral_multiply_kernel!(exec)
+    @. fhat_buf = field.data
+    fwd_plan * fhat_buf
+    ctx = DifferentiateContext(k, size(fhat_buf), dir)
+    kernel!(fhat_buf, ctx; ndrange = length(fhat_buf))
+    KernelAbstractions.synchronize(exec)
+    inv_plan * fhat_buf
+    if negate
+        @. out = -real(fhat_buf)
+    else
+        @. out = real(fhat_buf)
+    end
+    return out
+end
+
 spatial_ndims(grid::Grid) = length(grid.xaxes)
 ncomponents(field::VectorField) = length(field)
 

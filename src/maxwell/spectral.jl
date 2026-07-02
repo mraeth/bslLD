@@ -28,6 +28,42 @@ function spectral_wave_number_squared(field::ScalarField, grid::Grid)
     return k2
 end
 
+function _spectral_curl_hat!(out, fieldhat, kviews, ndims_x::Int)
+    ncomp = length(fieldhat)
+    if ndims_x == 1
+        kx = kviews[1]
+        if ncomp == 2
+            @. out[1] = -im * kx * fieldhat[2]
+            @. out[2] = im * kx * fieldhat[1]
+            return out
+        elseif ncomp == 3
+            fill!(out[1], 0)
+            @. out[2] = -im * kx * fieldhat[3]
+            @. out[3] = im * kx * fieldhat[2]
+            return out
+        end
+    elseif ndims_x == 2
+        kx, ky = kviews[1], kviews[2]
+        if ncomp == 3
+            @. out[1] = im * ky * fieldhat[3]
+            @. out[2] = -im * kx * fieldhat[3]
+            @. out[3] = im * kx * fieldhat[2] - im * ky * fieldhat[1]
+            return out
+        end
+    elseif ndims_x == 3
+        kx, ky, kz = kviews[1], kviews[2], kviews[3]
+        if ncomp == 3
+            @. out[1] = im * ky * fieldhat[3] - im * kz * fieldhat[2]
+            @. out[2] = im * kz * fieldhat[1] - im * kx * fieldhat[3]
+            @. out[3] = im * kx * fieldhat[2] - im * ky * fieldhat[1]
+            return out
+        end
+    end
+    throw(ArgumentError(
+        "unsupported spectral curl layout for $ndims_x spatial dimensions and $ncomp components",
+    ))
+end
+
 function spectral_curl_hat(fieldhat::Vector, kviews, ndims_x::Int)
     ncomp = length(fieldhat)
 

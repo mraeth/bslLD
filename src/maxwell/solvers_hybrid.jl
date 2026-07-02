@@ -9,6 +9,66 @@ function EMSolverDKPol(beta_i::Real, mu::Real)
     return EMSolverDKPol{T}(T(beta_i), T(mu), Ref(false))
 end
 
+# ── EMDKPolWorkspace ─────────────────────────────────────────────────────────
+
+struct EMDKPolWorkspace{SW,FA}
+    sw::SW
+    curl_buf::NTuple{3,FA}  # holds curlE then curlB (reused)
+    temp1::FA               # scratch: rhs1, div_Pi, rhs_data
+    temp2::FA               # scratch: rhs2, div_E_perp
+    temp3::FA               # scratch: dz_div_E_perp; 2nd term in curl/div
+    helmholtz::FA           # pre-computed: -kperp2 - (beta_i/2)*(1+1/mu)
+    ndims_x::Int
+    d1::Int                 # first perp direction index
+    d2::Int                 # second perp direction index
+    pz::Int                 # parallel (Bdir) index
+    have_z_curl::Bool       # grid.Bdir <= ndims_x
+    spatial_perp_dirs::Vector{Int}
+end
+
+function _make_em_dk_pol_workspace(arr::AbstractArray, grid::Grid, ncomp::Int, solver::EMSolverDKPol)
+    ndims_x = spatial_ndims(grid)
+    ndims_data = ndims(arr)
+    perp_dirs = [d for d = 1:ncomp if d != grid.Bdir]
+    d1, d2, pz = perp_dirs[1], perp_dirs[2], grid.Bdir
+    spatial_perp_dirs = [d for d in perp_dirs if d <= ndims_x]
+
+    sw = _get_spectral_workspace(arr, grid)
+
+    curl_buf = ntuple(_ -> fill!(similar(arr, Float64), 0.0), 3)
+    temp1 = fill!(similar(arr, Float64), 0.0)
+    temp2 = fill!(similar(arr, Float64), 0.0)
+    temp3 = fill!(similar(arr, Float64), 0.0)
+
+    # Pre-compute Helmholtz operator: -kperp2 - (beta_i/2)*(1+1/mu)
+    kperp2 = fill!(similar(arr, Float64), 0.0)
+    for d in spatial_perp_dirs
+        kv = reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data))
+        kperp2 .+= kv .^ 2
+    end
+    lambda = (solver.beta_i / 2) * (1 + 1 / solver.mu)
+    helmholtz = similar(arr, Float64)
+    @. helmholtz = -kperp2 - lambda
+
+    return EMDKPolWorkspace(
+        sw, curl_buf, temp1, temp2, temp3, helmholtz,
+        ndims_x, d1, d2, pz, grid.Bdir <= ndims_x, spatial_perp_dirs,
+    )
+end
+
+function _get_em_dk_pol_workspace(sol::FieldSolution, grid::Grid, solver::EMSolverDKPol)
+    arr = sol.E[1].data
+    ndims_x = spatial_ndims(grid)
+    ncomp = ncomponents(sol.E)
+    key = (:em_dk_pol, size(arr), eltype(arr), ndims_x, ncomp, grid.Bdir,
+           Tuple(grid.delta[1:ndims_x]), solver.beta_i, solver.mu)
+    lock(_solver_workspace_cache_lock) do
+        get!(() -> _make_em_dk_pol_workspace(arr, grid, ncomp, solver), _solver_workspace_cache, key)
+    end
+end
+
+# ── _step_dk_pol! with workspace ─────────────────────────────────────────────
+
 function _step_dk_pol!(
     E::VectorField,
     B::VectorField,
@@ -17,62 +77,63 @@ function _step_dk_pol!(
     grid::Grid,
     solver::EMSolverDKPol,
     dt::Real,
+    ws::EMDKPolWorkspace,
 )
-    ndims_x = spatial_ndims(grid)
-    ncomp_field = ncomponents(E)
-    perp_dirs = [d for d = 1:ncomp_field if d != grid.Bdir]
+    d1, d2, pz = ws.d1, ws.d2, ws.pz
 
     # Explicit Faraday: B^{n-1/2} -> B^{n+1/2}
-    curlE = curl(E, grid)
+    _apply_curl!(ws.curl_buf, E, ws.temp3, ws.sw, grid)
     for d = 1:ncomponents(B)
-        B[d].data .-= dt .* curlE[d].data
+        B[d].data .-= dt .* ws.curl_buf[d]
     end
 
     # Implicit E_⊥ update: [I - (dt/μ)R] E_⊥^{n+1} = RHS_⊥
-    curlB = curl(B, grid)
+    _apply_curl!(ws.curl_buf, B, ws.temp3, ws.sw, grid)
     α = dt / solver.mu
     c = 2 / solver.beta_i
-
-    d1, d2 = perp_dirs[1], perp_dirs[2]
-    # J_i_perp is velocity-space indexed ([1,2,...]) not field-space indexed ([d1,d2,...])
-    rhs1 = E[d1].data .+ α .* (c .* curlB[d1].data .- J_i_perp[1].data)
-    rhs2 = E[d2].data .+ α .* (c .* curlB[d2].data .- J_i_perp[2].data)
+    @. ws.temp1 = E[d1].data + α * (c * ws.curl_buf[d1] - J_i_perp[1].data)  # rhs1
+    @. ws.temp2 = E[d2].data + α * (c * ws.curl_buf[d2] - J_i_perp[2].data)  # rhs2
     denom = 1 + α^2
-    # sign of the Levi-Civita symbol ε_{d1,d2,Bdir}: +1 for cyclic, -1 for anti-cyclic
-    parity = (d2 % 3 + 1 == grid.Bdir) ? 1 : -1
-    E[d1].data .= (rhs1 .+ parity * α .* rhs2) ./ denom
-    E[d2].data .= (rhs2 .- parity * α .* rhs1) ./ denom
+    parity = (d2 % 3 + 1 == pz) ? 1 : -1
+    @. E[d1].data = (ws.temp1 + parity * α * ws.temp2) / denom
+    @. E[d2].data = (ws.temp2 - parity * α * ws.temp1) / denom
 
     # Helmholtz solve for E_z
-    div_Pi = div(Pi_diff, grid)
+    # div_Pi → temp1
+    _apply_div!(ws.temp1, Pi_diff, ws.temp3, ws.sw, grid)
 
-    spatial_perp_dirs = [d for d in perp_dirs if d <= ndims_x]
-    if isempty(spatial_perp_dirs)
-        div_E_perp = ScalarField(zero.(E[1].data))
+    # div_E_perp → temp2
+    if isempty(ws.spatial_perp_dirs)
+        fill!(ws.temp2, 0)
     else
-        div_E_perp = differentiate(E[spatial_perp_dirs[1]], grid, spatial_perp_dirs[1])
-        for d in spatial_perp_dirs[2:end]
-            div_E_perp = div_E_perp + differentiate(E[d], grid, d)
+        _differentiate_impl!(ws.temp2, E[ws.spatial_perp_dirs[1]], ws.sw,
+                             ws.spatial_perp_dirs[1], false)
+        for d in ws.spatial_perp_dirs[2:end]
+            _differentiate_impl!(ws.temp3, E[d], ws.sw, d, false)
+            ws.temp2 .+= ws.temp3
         end
     end
 
-    if grid.Bdir <= ndims_x
-        dz_div_E_perp = differentiate(div_E_perp, grid, grid.Bdir)
+    # dz_div_E_perp → temp3
+    if ws.have_z_curl
+        _differentiate_impl!(ws.temp3, ScalarField(ws.temp2), ws.sw, pz, false)
     else
-        dz_div_E_perp = ScalarField(zero.(div_E_perp.data))
+        fill!(ws.temp3, 0)
     end
 
-    rhs_data = (solver.beta_i / 2) .* div_Pi.data .+ dz_div_E_perp.data
-    rhs_hat = fft_spatial(rhs_data, grid)
+    # rhs_data = (beta_i/2)*div_Pi + dz_div_E_perp → temp1 (in-place)
+    @. ws.temp1 = (solver.beta_i / 2) * ws.temp1 + ws.temp3
 
-    kviews = spectral_wavenumber_views(E[1], grid)
-    kperp2 = bslLD.backend_array(zeros(Float64, size(E[1].data)))
-    for d in spatial_perp_dirs
-        kperp2 = kperp2 .+ kviews[d] .^ 2
+    # Forward FFT rhs_data into fft_buf, divide by helmholtz, inverse FFT
+    @. ws.sw.fft_buf = ws.temp1
+    for d in 1:ws.ndims_x
+        ws.sw.fwd_plans[d] * ws.sw.fft_buf
     end
-
-    helmholtz_op = .-kperp2 .- (solver.beta_i / 2) * (1 + 1 / solver.mu)
-    E[grid.Bdir].data .= real(ifft_spatial(rhs_hat ./ helmholtz_op, grid))
+    @. ws.sw.fft_buf /= ws.helmholtz
+    for d in 1:ws.ndims_x
+        ws.sw.inv_plans[d] * ws.sw.fft_buf
+    end
+    @. E[pz].data = real(ws.sw.fft_buf)
 
     return nothing
 end
@@ -92,7 +153,8 @@ function solve_fields!(
         solver.initialized[] = true
     end
     copyto!(sol.Enew, sol.E)
-    _step_dk_pol!(sol.Enew, sol.B, moments.J, moments.Pi_diff, grid, solver, dt)
+    ws = _get_em_dk_pol_workspace(sol, grid, solver)
+    _step_dk_pol!(sol.Enew, sol.B, moments.J, moments.Pi_diff, grid, solver, dt, ws)
     return sol
 end
 
@@ -107,88 +169,188 @@ function EMSolverDKNoPol(beta_i::Real, mu::Real)
     return EMSolverDKNoPol{T}(T(beta_i), T(mu))
 end
 
+# ── EMDKNoPolWorkspace ────────────────────────────────────────────────────────
+
+struct EMDKNoPolWorkspace{SW,CA,FA,K1V,K2V,KZV,KV}
+    sw::SW
+    kviews::KV       # NTuple{ndims_x} reshaped k views for _spectral_curl_hat!
+    k1_view::K1V     # reshaped k for d1 direction (or zero-filled)
+    k2_view::K2V     # reshaped k for d2 direction (or zero-filled)
+    kz_view::KZV     # reshaped k for pz direction (or zero-filled)
+    # complex per-call buffers:
+    Bhat::NTuple{3,CA}
+    Jhat::NTuple{2,CA}
+    Pihat_buf::NTuple{3,CA}
+    curlBhat::NTuple{3,CA}
+    div_Pi_hat::CA
+    Ehat::NTuple{3,CA}
+    # pre-computed float constants:
+    k2_perp::FA
+    k2_tot::FA
+    a31_pre::FA
+    a32_pre::FA
+    a33_pre::FA
+    # per-call float scratch (for a-matrix and cofactors):
+    a11::FA
+    a12::FA
+    a13::FA
+    a21::FA
+    a22::FA
+    a23::FA
+    m11::FA
+    m12::FA
+    m13::FA
+    detA::FA
+    ndims_x::Int
+    d1::Int
+    d2::Int
+    pz::Int
+end
+
+function _make_kview_or_zero(sw::SpectralWorkspace, d::Int, ndims_x::Int, ndims_data::Int, arr::AbstractArray)
+    if d <= ndims_x
+        return reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data))
+    else
+        return fill!(similar(arr, Float64, ntuple(_ -> 1, ndims_data)), 0.0)
+    end
+end
+
+function _make_em_dk_no_pol_workspace(arr::AbstractArray, grid::Grid, ncomp::Int, solver::EMSolverDKNoPol)
+    ndims_x = spatial_ndims(grid)
+    ndims_data = ndims(arr)
+    perp_dirs = [d for d = 1:ncomp if d != grid.Bdir]
+    d1, d2, pz = perp_dirs[1], perp_dirs[2], grid.Bdir
+
+    sw = _get_spectral_workspace(arr, grid)
+
+    kviews = ntuple(
+        d -> reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data)),
+        ndims_x,
+    )
+    k1_view = _make_kview_or_zero(sw, d1, ndims_x, ndims_data, arr)
+    k2_view = _make_kview_or_zero(sw, d2, ndims_x, ndims_data, arr)
+    kz_view = _make_kview_or_zero(sw, pz, ndims_x, ndims_data, arr)
+
+    c_arr() = similar(arr, Complex{Float64})
+    f_arr() = fill!(similar(arr, Float64), 0.0)
+
+    Bhat = ntuple(_ -> c_arr(), 3)
+    Jhat = ntuple(_ -> c_arr(), 2)
+    Pihat_buf = ntuple(_ -> c_arr(), 3)
+    curlBhat = ntuple(_ -> c_arr(), 3)
+    div_Pi_hat = c_arr()
+    Ehat = ntuple(_ -> c_arr(), 3)
+
+    k2_perp = f_arr()
+    @. k2_perp = k1_view^2 + k2_view^2
+    k2_tot = f_arr()
+    @. k2_tot = k2_perp + kz_view^2
+
+    a31_pre = f_arr(); @. a31_pre = kz_view * k1_view
+    a32_pre = f_arr(); @. a32_pre = kz_view * k2_view
+    lambda = (solver.beta_i / 2) * (1 + 1 / solver.mu)
+    a33_pre = f_arr(); @. a33_pre = -k2_perp - lambda
+
+    return EMDKNoPolWorkspace(
+        sw, kviews, k1_view, k2_view, kz_view,
+        Bhat, Jhat, Pihat_buf, curlBhat, div_Pi_hat, Ehat,
+        k2_perp, k2_tot, a31_pre, a32_pre, a33_pre,
+        f_arr(), f_arr(), f_arr(), f_arr(), f_arr(), f_arr(),
+        f_arr(), f_arr(), f_arr(), f_arr(),
+        ndims_x, d1, d2, pz,
+    )
+end
+
+function _get_em_dk_no_pol_workspace(sol::FieldSolution, grid::Grid, solver::EMSolverDKNoPol)
+    arr = sol.E[1].data
+    ndims_x = spatial_ndims(grid)
+    ncomp = ncomponents(sol.E)
+    key = (:em_dk_no_pol, size(arr), eltype(arr), ndims_x, ncomp, grid.Bdir,
+           Tuple(grid.delta[1:ndims_x]), solver.beta_i, solver.mu)
+    lock(_solver_workspace_cache_lock) do
+        get!(() -> _make_em_dk_no_pol_workspace(arr, grid, ncomp, solver), _solver_workspace_cache, key)
+    end
+end
+
+# ── _step_dk_no_pol! with workspace ──────────────────────────────────────────
+
 function _step_dk_no_pol!(
     E::VectorField,
     B::VectorField,
     J_i_perp::VectorField,
     Pi_diff::VectorField,
-    grid::Grid,
     solver::EMSolverDKNoPol,
     dt::Real,
+    ws::EMDKNoPolWorkspace,
 )
-    ndims_x = spatial_ndims(grid)
-    ncomp_field = ncomponents(E)
-    perp_dirs = [d for d = 1:ncomp_field if d != grid.Bdir]
-    d1, d2, pz = perp_dirs[1], perp_dirs[2], grid.Bdir
-
+    ndims_x = ws.ndims_x
+    d1, d2, pz = ws.d1, ws.d2, ws.pz
     c = 2 / solver.beta_i
-    λ = (solver.beta_i / 2) * (1 + 1 / solver.mu)
-    α = c * dt   # full-step implicit coupling (matches notes derivation)
+    α = c * dt
+    sw = ws.sw
 
-    Bhat = [fft_spatial(B[d].data, grid) for d = 1:3]
-    J_hat = [fft_spatial(J_i_perp[d].data, grid) for d = 1:2]
-    Pi_hat = [fft_spatial(Pi_diff[d].data, grid) for d = 1:ndims_x]
-
-    kviews = spectral_wavenumber_views(B[1], grid)
-    k1 = d1 <= ndims_x ? kviews[d1] : 0.0
-    k2 = d2 <= ndims_x ? kviews[d2] : 0.0
-    kz = pz <= ndims_x ? kviews[pz] : 0.0
-
-    k2_perp = k1 .^ 2 .+ k2 .^ 2
-    k2_tot = k2_perp .+ kz .^ 2
-
-    curlB_hat = spectral_curl_hat(Bhat, kviews, ndims_x)
-    div_Pi_hat = sum(im .* kviews[d] .* Pi_hat[d] for d = 1:ndims_x)
-
-    # RHS via rotation R(w1, w2) = (w2, −w1)
-    w1 = c .* curlB_hat[d1] .- J_hat[1]
-    w2 = c .* curlB_hat[d2] .- J_hat[2]
-    b1 = w2
-    b2 = .-w1
-    b3 = (solver.beta_i / 2) .* div_Pi_hat
-
-    # 3×3 matrix entries (all real, broadcast over all Fourier modes)
-    a11 = 1 .- α .* k1 .* k2
-    a12 = α .* (k2_tot .- k2 .^ 2)
-    a13 = .-α .* k2 .* kz
-    a21 = .-α .* (k2_tot .- k1 .^ 2)
-    a22 = 1 .+ α .* k1 .* k2
-    a23 = α .* k1 .* kz
-    a31 = kz .* k1
-    a32 = kz .* k2
-    a33 = .-k2_perp .- λ   # always < 0 since λ > 0
-
-    # Cramer's rule: first-row cofactors of A
-    m11 = a22 .* a33 .- a23 .* a32
-    m12 = a21 .* a33 .- a23 .* a31
-    m13 = a21 .* a32 .- a22 .* a31
-    detA = a11 .* m11 .- a12 .* m12 .+ a13 .* m13
-
-    Ehat_d1 =
-        (b1 .* m11 .- a12 .* (b2 .* a33 .- a23 .* b3) .+ a13 .* (b2 .* a32 .- a22 .* b3)) ./
-        detA
-    Ehat_d2 =
-        (a11 .* (b2 .* a33 .- a23 .* b3) .- b1 .* m12 .+ a13 .* (a21 .* b3 .- b2 .* a31)) ./
-        detA
-    Ehat_pz =
-        (a11 .* (a22 .* b3 .- b2 .* a32) .- a12 .* (a21 .* b3 .- b2 .* a31) .+ b1 .* m13) ./
-        detA
-
-    # Faraday: B^{n+1} = B^n − dt (ik × E^{n+1})
-    Ehat_new = similar(Bhat)
-    Ehat_new[d1] = Ehat_d1
-    Ehat_new[d2] = Ehat_d2
-    Ehat_new[pz] = Ehat_pz
-    curlEnew_hat = spectral_curl_hat(Ehat_new, kviews, ndims_x)
-    for d = 1:3
-        Bhat[d] .= Bhat[d] .- dt .* curlEnew_hat[d]
+    # Forward FFT inputs
+    for d in 1:3
+        _fwd_fft_to!(sw, B[d].data, ws.Bhat[d], ndims_x)
+    end
+    for d in 1:2
+        _fwd_fft_to!(sw, J_i_perp[d].data, ws.Jhat[d], ndims_x)
+    end
+    for d in 1:ndims_x
+        _fwd_fft_to!(sw, Pi_diff[d].data, ws.Pihat_buf[d], ndims_x)
     end
 
-    E[d1].data .= real(ifft_spatial(Ehat_d1, grid))
-    E[d2].data .= real(ifft_spatial(Ehat_d2, grid))
-    E[pz].data .= real(ifft_spatial(Ehat_pz, grid))
-    for d = 1:3
-        B[d].data .= real(ifft_spatial(Bhat[d], grid))
+    # curlBhat (in-place into ws.curlBhat)
+    _spectral_curl_hat!(ws.curlBhat, ws.Bhat, ws.kviews, ndims_x)
+
+    # div_Pi_hat
+    fill!(ws.div_Pi_hat, 0)
+    for d in 1:ndims_x
+        @. ws.div_Pi_hat += im * ws.kviews[d] * ws.Pihat_buf[d]
+    end
+
+    # w1 = c*curlBhat[d1] - J[1], w2 = c*curlBhat[d2] - J[2]  (in-place)
+    @. ws.curlBhat[d1] = c * ws.curlBhat[d1] - ws.Jhat[1]   # w1
+    @. ws.curlBhat[d2] = c * ws.curlBhat[d2] - ws.Jhat[2]   # w2
+    # b3 = (beta_i/2)*div_Pi_hat  (in-place overwrite)
+    @. ws.div_Pi_hat *= (solver.beta_i / 2)
+
+    # a-matrix entries (all real, per-call due to α = c*dt)
+    k1v, k2v, kzv = ws.k1_view, ws.k2_view, ws.kz_view
+    @. ws.a11 = 1 - α * k1v * k2v
+    @. ws.a12 = α * (ws.k2_tot - k2v^2)
+    @. ws.a13 = -α * k2v * kzv
+    @. ws.a21 = -α * (ws.k2_tot - k1v^2)
+    @. ws.a22 = 1 + α * k1v * k2v
+    @. ws.a23 = α * k1v * kzv
+
+    # Cofactors and determinant
+    @. ws.m11 = ws.a22 * ws.a33_pre - ws.a23 * ws.a32_pre
+    @. ws.m12 = ws.a21 * ws.a33_pre - ws.a23 * ws.a31_pre
+    @. ws.m13 = ws.a21 * ws.a32_pre - ws.a22 * ws.a31_pre
+    @. ws.detA = ws.a11 * ws.m11 - ws.a12 * ws.m12 + ws.a13 * ws.m13
+
+    # Cramer's rule: Ehat = A⁻¹ b  (b1=w2=curlBhat[d2], b2=-w1=-curlBhat[d1], b3=div_Pi_hat)
+    w1 = ws.curlBhat[d1]
+    w2 = ws.curlBhat[d2]
+    b3 = ws.div_Pi_hat
+    @. ws.Ehat[d1] = (w2 * ws.m11 + ws.a12 * (w1 * ws.a33_pre + ws.a23 * b3) +
+                      ws.a13 * (-w1 * ws.a32_pre - ws.a22 * b3)) / ws.detA
+    @. ws.Ehat[d2] = (ws.a11 * (-w1 * ws.a33_pre - ws.a23 * b3) - w2 * ws.m12 +
+                      ws.a13 * (ws.a21 * b3 + w1 * ws.a31_pre)) / ws.detA
+    @. ws.Ehat[pz] = (ws.a11 * (ws.a22 * b3 + w1 * ws.a32_pre) -
+                      ws.a12 * (ws.a21 * b3 + w1 * ws.a31_pre) + w2 * ws.m13) / ws.detA
+
+    # Faraday: Bhat -= dt * curl(Ehat)  — reuse curlBhat buffers
+    _spectral_curl_hat!(ws.curlBhat, ws.Ehat, ws.kviews, ndims_x)
+    for d in 1:3
+        @. ws.Bhat[d] -= dt * ws.curlBhat[d]
+    end
+
+    # Inverse FFT
+    for d in 1:3
+        _inv_fft_from!(sw, ws.Ehat[d], E[d].data, ndims_x)
+        _inv_fft_from!(sw, ws.Bhat[d], B[d].data, ndims_x)
     end
 
     return nothing
@@ -206,12 +368,13 @@ function solve_fields!(
     moments.Pi_diff !== nothing ||
         throw(ArgumentError("moments.Pi_diff is required for EMSolverDKNoPol"))
     copyto!(sol.Enew, sol.E)
-    _step_dk_no_pol!(sol.Enew, sol.B, moments.J, moments.Pi_diff, grid, solver, dt)
+    ws = _get_em_dk_no_pol_workspace(sol, grid, solver)
+    _step_dk_no_pol!(sol.Enew, sol.B, moments.J, moments.Pi_diff, solver, dt, ws)
     return sol
 end
 
 
-# Initialise B to the staggered B^{-1/2} from B^0 and E^0 before the time loop (EMSolverDKPol only).
+# Initialise B to the staggered B^{-1/2} from B^0 and E^0 (EMSolverDKPol only).
 function initialize_staggered_B!(sol::FieldSolution, grid::Grid, dt::Real)
     curlE = curl(sol.E, grid)
     for d = 1:ncomponents(sol.B)
