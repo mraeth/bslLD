@@ -5,7 +5,10 @@
 deps/deps.jl
 deps/build.log
 docs/build/
-
+docs/src/index.md
+docs/src/examples.md
+docs/src/notebooks/
+build/
 # Generated outputs
 *.gif
 *.mp4
