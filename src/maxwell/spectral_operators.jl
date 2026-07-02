@@ -71,21 +71,6 @@ function _get_spectral_workspace(arr::AbstractArray, grid::Grid)
     end
 end
 
-function _differentiate_impl(
-    field::ScalarField{T,N},
-    grid::Grid,
-    dir::Int,
-    exec,
-) where {T,N}
-    kernel! = spectral_multiply_kernel!(exec)
-    fhat = fft(field.data, dir)
-    k = spectral_wavenumbers(field.data, grid, dir)
-    ctx = DifferentiateContext(k, size(fhat), dir)
-    kernel!(fhat, ctx; ndrange = length(fhat))
-    KernelAbstractions.synchronize(exec)
-    return ScalarField(real(ifft(fhat, dir)))
-end
-
 # Allocation-free variant: writes into pre-allocated `out` using cached buffers and plans.
 # Set negate=true to compute -d(field)/dx_dir (for E = -∇φ).
 function _differentiate_impl!(
@@ -219,13 +204,21 @@ function differentiate(field::ScalarField{T,N}, grid::Grid, dir::Int) where {T,N
     1 <= dir <= N || throw(ArgumentError("direction $dir is outside the field dimensions"))
     dir <= length(grid.xaxes) ||
         throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
-    return _differentiate_impl(field, grid, dir, bslLD.backend())
+    ws  = _get_spectral_workspace(field.data, grid)
+    out = similar(field.data, Float64)
+    _differentiate_impl!(out, field, ws, dir)
+    return ScalarField(out)
 end
 
 function grad(field::ScalarField{T,N}, grid::Grid) where {T,N}
     ndirs = spatial_ndims(grid)
     ndirs >= 1 || throw(ArgumentError("grad requires at least one spatial dimension"))
-    return VectorField([differentiate(field, grid, dir) for dir = 1:ndirs])
+    ws = _get_spectral_workspace(field.data, grid)
+    return VectorField([begin
+        out = similar(field.data, Float64)
+        _differentiate_impl!(out, field, ws, d)
+        ScalarField(out)
+    end for d in 1:ndirs])
 end
 
 function div(field::VectorField{T,N}, grid::Grid) where {T,N}
@@ -235,13 +228,11 @@ function div(field::VectorField{T,N}, grid::Grid) where {T,N}
     ncomp >= ndirs || throw(
         ArgumentError("div on a $ndirs-D grid requires at least $ndirs vector components"),
     )
-
-    result = differentiate(field[1], grid, 1)
-    for dir = 2:ndirs
-        result = result + differentiate(field[dir], grid, dir)
-    end
-
-    return result
+    ws   = _get_spectral_workspace(field[1].data, grid)
+    out  = similar(field[1].data, Float64)
+    temp = similar(out)
+    _apply_div!(out, field, temp, ws, grid)
+    return ScalarField(out)
 end
 
 function div(field::MatrixField{DT,N,SF,NR,NC,NF}, grid::Grid) where {DT,N,SF,NR,NC,NF}
@@ -250,75 +241,50 @@ function div(field::MatrixField{DT,N,SF,NR,NC,NF}, grid::Grid) where {DT,N,SF,NR
     NC >= ndirs || throw(
         ArgumentError("div on a $ndirs-D grid requires at least $ndirs matrix columns"),
     )
-
+    ws   = _get_spectral_workspace(field[1,1].data, grid)
+    out  = similar(field[1,1].data, Float64)
+    temp = similar(out)
     rows = Vector{SF}(undef, NR)
-    for i = 1:NR
-        row_result = differentiate(field[i, 1], grid, 1)
-        for dir = 2:ndirs
-            row_result = row_result + differentiate(field[i, dir], grid, dir)
-        end
-        rows[i] = row_result
+    for i in 1:NR
+        row = VectorField([field[i, d] for d in 1:ndirs])
+        _apply_div!(out, row, temp, ws, grid)
+        rows[i] = ScalarField(copy(out))
     end
-
     return VectorField(rows)
 end
 
 function curl(field::VectorField, grid::Grid)
     ndims_x = spatial_ndims(grid)
-    ncomp = ncomponents(field)
+    ncomp   = ncomponents(field)
+    ws   = _get_spectral_workspace(field[1].data, grid)
+    temp = similar(field[1].data, Float64)
+
+    # 2D 2-component returns a ScalarField; _apply_curl! doesn't handle this case
+    if ndims_x == 2 && ncomp == 2
+        dv = similar(temp); du = similar(temp)
+        _differentiate_impl!(dv, field[2], ws, 1)
+        _differentiate_impl!(du, field[1], ws, 2)
+        return ScalarField(dv .- du)
+    end
 
     if ndims_x == 1
         ncomp in (2, 3) || throw(ArgumentError("1D curl requires 2 or 3 vector components"))
-
-        if ncomp == 2
-            df1_dx = differentiate(field[1], grid, 1)
-            df2_dx = differentiate(field[2], grid, 1)
-            return VectorField([ScalarField(-df2_dx.data), ScalarField(df1_dx.data)])
-        end
-
-        df2_dx = differentiate(field[2], grid, 1)
-        df3_dx = differentiate(field[3], grid, 1)
-        zero_component = ScalarField(zero.(df2_dx.data))
-        return VectorField([
-            zero_component,
-            ScalarField(-df3_dx.data),
-            ScalarField(df2_dx.data),
-        ])
     elseif ndims_x == 2
-        ncomp in (2, 3) || throw(ArgumentError("2D curl requires 2 or 3 vector components"))
-
-        dv_dx = differentiate(field[2], grid, 1)
-        du_dy = differentiate(field[1], grid, 2)
-
-        if ncomp == 2
-            return ScalarField(dv_dx.data .- du_dy.data)
-        end
-
-        dw_dx = differentiate(field[3], grid, 1)
-        dw_dy = differentiate(field[3], grid, 2)
-        return VectorField([
-            ScalarField(dw_dy.data),
-            ScalarField(-dw_dx.data),
-            ScalarField(dv_dx.data .- du_dy.data),
-        ])
+        ncomp == 3 || throw(ArgumentError("2D curl requires 3 field components"))
     elseif ndims_x == 3
         ncomp == 3 || throw(ArgumentError("3D curl requires exactly 3 vector components"))
-
-        dw_dy = differentiate(field[3], grid, 2)
-        dv_dz = differentiate(field[2], grid, 3)
-        du_dz = differentiate(field[1], grid, 3)
-        dw_dx = differentiate(field[3], grid, 1)
-        dv_dx = differentiate(field[2], grid, 1)
-        du_dy = differentiate(field[1], grid, 2)
-
-        return VectorField([
-            ScalarField(dw_dy.data .- dv_dz.data),
-            ScalarField(du_dz.data .- dw_dx.data),
-            ScalarField(dv_dx.data .- du_dy.data),
-        ])
+    else
+        throw(ArgumentError("curl currently supports 1D, 2D, and 3D grids"))
     end
 
-    throw(ArgumentError("curl currently supports 1D, 2D, and 3D grids"))
+    out = ntuple(_ -> similar(field[1].data, Float64), 3)
+    _apply_curl!(out, field, temp, ws, grid)
+
+    if ndims_x == 1 && ncomp == 2
+        return VectorField([ScalarField(out[1]), ScalarField(out[2])])
+    else
+        return VectorField([ScalarField(out[1]), ScalarField(out[2]), ScalarField(out[3])])
+    end
 end
 
 spatial_fft_dims(grid::Grid) = Tuple(1:spatial_ndims(grid))
@@ -388,39 +354,7 @@ function _spectral_curl_hat!(out, fieldhat, kviews, ndims_x::Int)
 end
 
 function spectral_curl_hat(fieldhat::Vector, kviews, ndims_x::Int)
-    ncomp = length(fieldhat)
-
-    if ndims_x == 1
-        kx = kviews[1]
-        if ncomp == 2
-            return [-im .* kx .* fieldhat[2], im .* kx .* fieldhat[1]]
-        elseif ncomp == 3
-            zero_component = zero.(fieldhat[1])
-            return [zero_component, -im .* kx .* fieldhat[3], im .* kx .* fieldhat[2]]
-        end
-    elseif ndims_x == 2
-        kx, ky = kviews
-        if ncomp == 3
-            return [
-                im .* ky .* fieldhat[3],
-                -im .* kx .* fieldhat[3],
-                im .* kx .* fieldhat[2] .- im .* ky .* fieldhat[1],
-            ]
-        end
-    elseif ndims_x == 3
-        kx, ky, kz = kviews
-        if ncomp == 3
-            return [
-                im .* ky .* fieldhat[3] .- im .* kz .* fieldhat[2],
-                im .* kz .* fieldhat[1] .- im .* kx .* fieldhat[3],
-                im .* kx .* fieldhat[2] .- im .* ky .* fieldhat[1],
-            ]
-        end
-    end
-
-    throw(
-        ArgumentError(
-            "unsupported spectral curl layout for $ndims_x spatial dimensions and $ncomp components",
-        ),
-    )
+    out = [similar(fieldhat[1]) for _ in 1:length(fieldhat)]
+    _spectral_curl_hat!(out, fieldhat, kviews, ndims_x)
+    return out
 end
