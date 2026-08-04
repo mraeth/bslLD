@@ -21,7 +21,7 @@ jobs:
             using Pkg
             Pkg.add("JuliaFormatter")
             using JuliaFormatter
-            format(".", check=true) || (println("Run `using JuliaFormatter; format(\".\")` to fix."); exit(1))
+            format(".") || (@error "Files not formatted — run `format(\".\")` locally and commit."; exit(1))
           '
 
   test:
