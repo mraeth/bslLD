@@ -8,17 +8,19 @@ struct AdiabaticSolver <: AbstractFieldSolver end
 
 # ── AdiabaticSolver workspace ────────────────────────────────────────────────
 
-struct AdiabaticSolverWorkspace{SW,EVF,ZVF}
+struct AdiabaticSolverWorkspace{SW,EVF,ZVF,ZSF}
     sw::SW      # SpectralWorkspace (shared with other solvers on the same grid)
     E_vf::EVF   # pre-allocated VectorField written in-place each step
     zero_vf3::ZVF
+    zero_phi::ZSF  # zero ScalarField used for the FieldSolution.phi slot
 end
 
 function _make_adiabatic_workspace(rho::ScalarField, grid::Grid)
     sw = _get_spectral_workspace(rho.data, grid)
     E_vf = VectorField([ScalarField(fill!(similar(rho.data, Float64), 0.0)) for _ = 1:3])
     zero_vf3 = zero_vectorfield3(grid)
-    return AdiabaticSolverWorkspace(sw, E_vf, zero_vf3)
+    zero_phi = ScalarField(fill!(similar(rho.data, Float64), 0.0))
+    return AdiabaticSolverWorkspace(sw, E_vf, zero_vf3, zero_phi)
 end
 
 function _get_adiabatic_workspace(rho::ScalarField, grid::Grid)
@@ -156,7 +158,12 @@ function solve_fields(moments::Moments, grid::Grid, solver::PoissonSolver)
     for dir = (ndims_x+1):3
         fill!(ws.E_vf[dir].data, 0.0)
     end
-    return FieldSolution{typeof(ws.E_vf)}(ws.E_vf, ws.zero_vf3, ws.zero_vf3)
+    return FieldSolution{typeof(ws.E_vf),typeof(phi_sf)}(
+        ws.E_vf,
+        ws.zero_vf3,
+        ws.zero_vf3,
+        phi_sf,
+    )
 end
 
 function solve_fields(moments::Moments, grid::Grid, ::AdiabaticSolver)
@@ -165,5 +172,10 @@ function solve_fields(moments::Moments, grid::Grid, ::AdiabaticSolver)
     for dir = 1:ndims_x
         _differentiate_impl!(ws.E_vf[dir].data, moments.rho, ws.sw, dir, true)
     end
-    return FieldSolution{typeof(ws.E_vf)}(ws.E_vf, ws.zero_vf3, ws.zero_vf3)
+    return FieldSolution{typeof(ws.E_vf),typeof(ws.zero_phi)}(
+        ws.E_vf,
+        ws.zero_vf3,
+        ws.zero_vf3,
+        ws.zero_phi,
+    )
 end

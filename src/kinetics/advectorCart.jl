@@ -76,7 +76,7 @@ end
     delta_v = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, ctx.electric_scale*ctx.phi)
     for field_dir = 1:length(ctx.e_components)
-        delta_v += ctx.e_components[field_dir][ixs[1]] * rotation[ctx.dir, field_dir]
+        delta_v += ctx.e_components[field_dir][ixs...] * rotation[ctx.dir, field_dir]
     end
 
     return cis(-ctx.dt * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * delta_v)
@@ -136,15 +136,6 @@ function _get_plan(
     end
 end
 
-function advectX!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
-    grid::CartGrid,
-    simTime::SimulationTime,
-    plan::AdvectionPlan,
-) where {NX,NV,NXNV}
-    return _advect_x_planned!(f, grid, simTime, plan, plan.backend)
-end
-
 function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
     @. ff_buf = f.data
     fwd_plan * ff_buf
@@ -155,92 +146,74 @@ function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
     return nothing
 end
 
-function _advect_x_planned!(
+function _advect_x_dir!(
     f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
+    dir::Int,
     plan::AdvectionPlan,
-    exec,
 ) where {NX,NV,NXNV}
+    1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
+    exec = plan.backend
     kernel! = spectral_multiply_kernel!(exec)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
-    phi = simTime.phase
-    dt = _effective_dt(simTime)
-    vth = thermal_velocity(f)
-    electric_scale = electric_acceleration_scale(f)
-
-    for dir = 1:NX
-        ctx = XShiftContext(
-            grid,
-            plan.kx[dir],
-            plan.vaxes,
-            sizes_x,
-            sizes_v,
-            dir,
-            phi,
-            dt,
-            vth,
-            electric_scale,
-        )
-        _apply_phase_shift!(
-            f,
-            plan.ff_buf,
-            plan.fwd_x[dir],
-            plan.inv_x[dir],
-            kernel!,
-            ctx,
-            exec,
-        )
-    end
+    ctx = XShiftContext(
+        grid,
+        plan.kx[dir],
+        plan.vaxes,
+        sizes_x,
+        sizes_v,
+        dir,
+        simTime.phase,
+        _effective_dt(simTime),
+        thermal_velocity(f),
+        electric_acceleration_scale(f),
+    )
+    _apply_phase_shift!(
+        f,
+        plan.ff_buf,
+        plan.fwd_x[dir],
+        plan.inv_x[dir],
+        kernel!,
+        ctx,
+        exec,
+    )
     return nothing
 end
 
-function advectV!(
+function _advect_v_dir!(
     f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
+    dir::Int,
     plan::AdvectionPlan,
 ) where {NX,NV,NXNV}
-    return _advect_v_planned!(f, grid, simTime, e, plan, plan.backend)
-end
-
-function _advect_v_planned!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
-    grid::CartGrid,
-    simTime::SimulationTime,
-    e::VectorField,
-    plan::AdvectionPlan,
-    exec,
-) where {NX,NV,NXNV}
+    1 <= dir <= NV || throw(ArgumentError("advectV! direction $dir out of 1:$NV"))
+    exec = plan.backend
     kernel! = spectral_multiply_kernel!(exec)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     e_components = ntuple(i -> e[i].data, Val(NV))
-    phi = simTime.phase
-    dt = _effective_dt(simTime)
-    electric_scale = electric_acceleration_scale(f)
-    for dir = 1:NV
-        ctx = VShiftContext(
-            grid,
-            e_components,
-            plan.kv[dir],
-            sizes_x,
-            sizes_v,
-            dir,
-            phi,
-            dt,
-            electric_scale,
-        )
-        _apply_phase_shift!(
-            f,
-            plan.ff_buf,
-            plan.fwd_v[dir],
-            plan.inv_v[dir],
-            kernel!,
-            ctx,
-            exec,
-        )
-    end
+    ctx = VShiftContext(
+        grid,
+        e_components,
+        plan.kv[dir],
+        sizes_x,
+        sizes_v,
+        dir,
+        simTime.phase,
+        _effective_dt(simTime),
+        electric_acceleration_scale(f),
+    )
+    _apply_phase_shift!(
+        f,
+        plan.ff_buf,
+        plan.fwd_v[dir],
+        plan.inv_v[dir],
+        kernel!,
+        ctx,
+        exec,
+    )
     return nothing
 end
 
@@ -249,7 +222,19 @@ function advectX!(
     grid::CartGrid,
     simTime::SimulationTime,
 ) where {NX,NV,NXNV}
-    advectX!(f, grid, simTime, _get_plan(f, grid))
+    plan = _get_plan(f, grid)
+    for dir = 1:NX
+        _advect_x_dir!(f, grid, simTime, dir, plan)
+    end
+end
+
+function advectX!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+    dir::Int,
+) where {NX,NV,NXNV}
+    _advect_x_dir!(f, grid, simTime, dir, _get_plan(f, grid))
 end
 
 function advectV!(
@@ -258,5 +243,18 @@ function advectV!(
     simTime::SimulationTime,
     e::VectorField,
 ) where {NX,NV,NXNV}
-    advectV!(f, grid, simTime, e, _get_plan(f, grid))
+    plan = _get_plan(f, grid)
+    for dir = 1:NV
+        _advect_v_dir!(f, grid, simTime, e, dir, plan)
+    end
+end
+
+function advectV!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    simTime::SimulationTime,
+    e::VectorField,
+    dir::Int,
+) where {NX,NV,NXNV}
+    _advect_v_dir!(f, grid, simTime, e, dir, _get_plan(f, grid))
 end
