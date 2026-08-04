@@ -366,4 +366,3 @@ function _spectral_curl_hat!(out, fieldhat, kviews, ndims_x::Int)
         ),
     )
 end
-

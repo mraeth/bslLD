@@ -2,8 +2,18 @@ using Pkg
 Pkg.activate(".")
 Pkg.develop(path = "..")
 
-is_cuda   = try success(`nvidia-smi`) catch; false end
-is_amdgpu = !is_cuda && try success(`rocm-smi`) catch; false end
+is_cuda = try
+    success(`nvidia-smi`)
+catch
+    ;
+    false
+end
+is_amdgpu = !is_cuda && try
+    success(`rocm-smi`)
+catch
+    ;
+    false
+end
 
 if is_cuda
     println("NVIDIA GPU detected — loading CUDA.")

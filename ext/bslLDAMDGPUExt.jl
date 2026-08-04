@@ -14,7 +14,10 @@ function amdgpu_available_hook()
 end
 
 function set_amdgpu_execution_space_hook()
-    bslLD.set_execution_space!(; alloc = x -> AMDGPU.ROCArray(x), exec = AMDGPU.ROCBackend())
+    bslLD.set_execution_space!(;
+        alloc = x -> AMDGPU.ROCArray(x),
+        exec = AMDGPU.ROCBackend(),
+    )
     return nothing
 end
 
