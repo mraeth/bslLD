@@ -16,8 +16,12 @@ end
 
 function _make_adiabatic_workspace(rho::ScalarField, grid::Grid)
     sw = _get_spectral_workspace(rho.data, grid)
-    E_vf = VectorField([ScalarField(fill!(similar(rho.data, Float64), 0.0)) for _ = 1:3])
-    zero_vf3 = zero_vectorfield3(grid)
+    T = eltype(rho.data)
+
+    E_vf = VectorField([ScalarField(fill!(similar(rho.data), zero(T))) for _ = 1:3])
+
+    zero_vf3 = VectorField([ScalarField(fill!(similar(rho.data), zero(T))) for _ = 1:3])
+
     return AdiabaticSolverWorkspace(sw, E_vf, zero_vf3)
 end
 

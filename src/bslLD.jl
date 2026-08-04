@@ -80,6 +80,7 @@ include("maxwell/solvers_vacuum.jl")
 include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
 include("execution.jl")
+include("sources.jl")
 
 greet() = print("Hello World!")
 
