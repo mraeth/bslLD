@@ -76,7 +76,7 @@ end
     delta_v = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, ctx.electric_scale*ctx.phi)
     for field_dir = 1:length(ctx.e_components)
-        delta_v += ctx.e_components[field_dir][ixs[1]] * rotation[ctx.dir, field_dir]
+        delta_v += ctx.e_components[field_dir][ixs...] * rotation[ctx.dir, field_dir]
     end
 
     return cis(-ctx.dt * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * delta_v)

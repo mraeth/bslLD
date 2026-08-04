@@ -10,7 +10,7 @@ end
 
 Adapt.@adapt_structure KappaTContext
 
-@inline _Ecomp(Ei, ixs) = Ei[ixs[1]]
+@inline _Ecomp(Ei, ixs) = Ei[ixs...]
 
 @inline function _xhat_dot_ExB(ctx, ixs)
     ctx.Bdir == 1 && return zero(_Ecomp(ctx.E[1], ixs))       # B = (1,0,0)
@@ -23,24 +23,29 @@ end
     ixs, ivs = index_1d_to_combined(I, ctx.sizes_x, ctx.sizes_v)
 
     v2 = zero(eltype(fdata))
+    fac = one(eltype(fdata))
+    sub = zero(eltype(fdata))
+
     @inbounds for d in 1:length(ivs)
         v = ctx.vaxes[d][ivs[d]]
         v2 += v*v
+        fac *= exp(-v*v/2)/(2*pi)^(1/2)
+        sub += 0.5
     end
 
     @inbounds fdata[I] += ctx.kappa_T * ctx.dt *
                           _xhat_dot_ExB(ctx, ixs) *
-                          (v2/2 - 3/2)
+                          (v2/2 - sub)*fac
 end
 
 function add_kappaT!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
     dt,
     kappa_T,
     E::VectorField;
     exec = bslLD.backend(),
-) where {NX,NV,NXNV}
+) where {DT, NX,NV,NXNV}
 
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
 
