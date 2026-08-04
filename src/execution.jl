@@ -12,6 +12,15 @@ function use_cuda!()
     return _set_cuda_execution_space!()
 end
 
+function amdgpu_available()
+    return _amdgpu_available()
+end
+
+function use_amdgpu!()
+    amdgpu_available() || error("AMDGPU is installed but no functional GPU is available")
+    return _set_amdgpu_execution_space!()
+end
+
 function backend_copy(x::AbstractArray)
     return bslLD.backend_array(Array(x))
 end

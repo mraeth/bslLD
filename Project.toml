@@ -32,14 +32,17 @@ Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 TaylorSeries = "6aa5eb33-94cf-58f4-a9d0-e4b2c4fc25ea"
 
 [extensions]
+bslLDAMDGPUExt = "AMDGPU"
 bslLDCUDAExt = "CUDA"
 
 [weakdeps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 
 [compat]
 AbstractFFTs = "1.5.0"
 Adapt = "4"
+AMDGPU = "1"
 CUDA = "6.1.0"
 CubicSplines = "0.2.1"
 DSP = "0.8.4"
