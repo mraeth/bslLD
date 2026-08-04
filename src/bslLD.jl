@@ -81,6 +81,7 @@ include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
 include("kinetics/exbBracketCart.jl")
 include("execution.jl")
+include("sources.jl")
 
 greet() = print("Hello World!")
 
