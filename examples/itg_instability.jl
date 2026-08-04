@@ -56,22 +56,22 @@ Lz = 240*pi
 
 vmax = 4.0
 
-Nx = 16
-Ny = 16
+Nx = 64
+Ny = 64
 Nz = 8
 Nv = 16
 
 nDiag = 20
 
 grid =  bslLD.Grid([0.0,0.0,0.0,-vmax,-vmax,-vmax],[Lx, Ly, Lz, vmax, vmax, vmax],[Nx, Ny, Nz, Nv, Nv, Nv],3, 1.0, 3)
-simTime = bslLD.SimulationTime(0.1, 2000.0, gyro_frequency=1.0)
+simTime = bslLD.SimulationTime(0.1, 10000.0, gyro_frequency=1.0)
 
-initFuncx(x) = 1+ 0.000000001 * randn()
+initFuncx(x) = 1+ 0.0001 * randn()
 
 if abspath(PROGRAM_FILE) == @__FILE__
     println("Running Simulation")
 
-    f = bslLD.Distribution(grid, 0.000000001, initFuncx = initFuncx);
+    f = bslLD.Distribution(grid, 0.0, initFuncx = initFuncx);
 
     function diags!(rho, simTime)
         simTime.step % nDiag == 0 || return
