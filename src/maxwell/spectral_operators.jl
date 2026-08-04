@@ -75,7 +75,7 @@ end
 # Set negate=true to compute -d(field)/dx_dir (for E = -∇φ).
 function _differentiate_impl!(
     out::AbstractArray,
-    field::ScalarField,
+    field_data::AbstractArray,
     fhat_buf::AbstractArray,
     fwd_plan,
     inv_plan,
@@ -85,7 +85,7 @@ function _differentiate_impl!(
     negate::Bool = false,
 )
     kernel! = spectral_multiply_kernel!(exec)
-    @. fhat_buf = field.data
+    @. fhat_buf = field_data
     fwd_plan * fhat_buf
     ctx = DifferentiateContext(k, size(fhat_buf), dir)
     kernel!(fhat_buf, ctx; ndrange = length(fhat_buf))
@@ -99,16 +99,19 @@ function _differentiate_impl!(
     return out
 end
 
+@inline _differentiate_impl!(out::AbstractArray, field::ScalarField, args...) =
+    _differentiate_impl!(out, field.data, args...)
+
 function _differentiate_impl!(
     out::AbstractArray,
-    field::ScalarField,
+    field_data::AbstractArray,
     ws::SpectralWorkspace,
     dir::Int,
     negate::Bool = false,
 )
     _differentiate_impl!(
         out,
-        field,
+        field_data,
         ws.fft_buf,
         ws.fwd_plans[dir],
         ws.inv_plans[dir],

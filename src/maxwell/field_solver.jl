@@ -26,14 +26,16 @@ struct Moments{
     end
 end
 
-struct FieldSolution{VF<:VectorField}
+struct FieldSolution{VF<:VectorField,SF<:ScalarField}
     E::VF
     B::VF
     Enew::VF   # E^{n+1}, written by solve_fields!
+    phi::SF    # electrostatic potential; zero for solvers where phi is not meaningful
 end
 
 function FieldSolution(E::VF, B::VF) where {VF<:VectorField}
-    return FieldSolution{VF}(E, B, zero_vectorfield_like(E))
+    phi = zero_scalarfield_like(E[1])
+    return FieldSolution{VF,typeof(phi)}(E, B, zero_vectorfield_like(E), phi)
 end
 
 function zero_scalarfield_like(field::ScalarField)
