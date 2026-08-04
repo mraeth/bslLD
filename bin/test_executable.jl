@@ -1,23 +1,4 @@
-using Pkg
-Pkg.activate(".")
-Pkg.develop(path = "..")
-
-isCuda = success(`nvidia-smi`)
-
-if isCuda
-    println("CUDA is available, using GPU acceleration.")
-    using CUDA
-end
-
-using bslLD
-bslLD.greet()
-
-if isCuda
-    println("Setting backend to CUDA.")
-    bslLD.use_cuda!()
-else
-    println("CUDA not available, using CPU.")
-end
+include("../scripts/select_backend.jl")
 
 #2D3V grid with 32x8 32x32x32 grid points 
 grid = bslLD.Grid(
