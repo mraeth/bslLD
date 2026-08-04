@@ -33,7 +33,11 @@ function stepStrang!(f, grid, simTime)
     diags!(bslLD.compute_density(f, grid), simTime)
 end
 
-function write_scalarfield(sf::bslLD.ScalarField, filename::AbstractString, field::AbstractString)
+function write_scalarfield(
+    sf::bslLD.ScalarField,
+    filename::AbstractString,
+    field::AbstractString,
+)
     # Ensure parent directory exists
     dir = dirname(filename)
     if !isempty(dir) && !isdir(dir)
@@ -63,10 +67,17 @@ Nv = 16
 
 nDiag = 20
 
-grid =  bslLD.Grid([0.0,0.0,0.0,-vmax,-vmax,-vmax],[Lx, Ly, Lz, vmax, vmax, vmax],[Nx, Ny, Nz, Nv, Nv, Nv],3, 1.0, 3)
-simTime = bslLD.SimulationTime(0.1, 10000.0, gyro_frequency=1.0)
+grid = bslLD.Grid(
+    [0.0, 0.0, 0.0, -vmax, -vmax, -vmax],
+    [Lx, Ly, Lz, vmax, vmax, vmax],
+    [Nx, Ny, Nz, Nv, Nv, Nv],
+    3,
+    1.0,
+    3,
+)
+simTime = bslLD.SimulationTime(0.1, 10000.0, gyro_frequency = 1.0)
 
-initFuncx(x) = 1+ 0.0001 * randn()
+initFuncx(x) = 1 + 0.0001 * randn()
 
 if abspath(PROGRAM_FILE) == @__FILE__
     println("Running Simulation")

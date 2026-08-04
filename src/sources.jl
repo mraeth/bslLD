@@ -26,16 +26,15 @@ end
     fac = one(eltype(fdata))
     sub = zero(eltype(fdata))
 
-    @inbounds for d in 1:length(ivs)
+    @inbounds for d = 1:length(ivs)
         v = ctx.vaxes[d][ivs[d]]
         v2 += v*v
         fac *= exp(-v*v/2)/(2*pi)^(1/2)
         sub += 0.5
     end
 
-    @inbounds fdata[I] += ctx.kappa_T * ctx.dt *
-                          _xhat_dot_ExB(ctx, ixs) *
-                          (v2/2 - sub)*fac
+    @inbounds fdata[I] +=
+        ctx.kappa_T * ctx.dt * _xhat_dot_ExB(ctx, ixs) * (v2/2 - sub) * fac
 end
 
 function add_kappaT!(
@@ -45,7 +44,7 @@ function add_kappaT!(
     kappa_T,
     E::VectorField;
     exec = bslLD.backend(),
-) where {DT, NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
 
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
 

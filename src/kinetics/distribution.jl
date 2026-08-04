@@ -1,14 +1,13 @@
 
 abstract type Distribution end
 
-struct DistributionGrid{DT, PDT,NX,NV,NXNV,ID,AT<:AbstractArray{DT,NXNV}} <: Distribution
+struct DistributionGrid{DT,PDT,NX,NV,NXNV,ID,AT<:AbstractArray{DT,NXNV}} <: Distribution
     data::AT
     m::PDT
     q::PDT
 end
 
-const DistributionGrid{DT,NX,NV,NXNV,ID,AT} =
-    DistributionGrid{DT,Float64,NX,NV,NXNV,ID,AT}
+const DistributionGrid{DT,NX,NV,NXNV,ID,AT} = DistributionGrid{DT,Float64,NX,NV,NXNV,ID,AT}
 
 const DistributionGrid1d1v{T,ID,AT} = DistributionGrid{T,1,1,2,ID,AT}
 const DistributionGrid1d2v{T,ID,AT} = DistributionGrid{T,1,2,3,ID,AT}
