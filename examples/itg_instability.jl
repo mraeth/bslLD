@@ -1,28 +1,5 @@
-ENV["OMP_NUM_THREADS"] = "4"
-using Pkg
-Pkg.activate(".")
-Pkg.develop(path="..")
-
-isCuda = try
-    success(`nvidia-smi`)
-catch
-    false
-end
-if isCuda
-    println("CUDA is available, using GPU acceleration.")
-    using CUDA
-end
-
-using bslLD, Random, FFTW, DSP, CairoMakie, Statistics
+include("../scripts/select_backend.jl")
 bslLD.greet()
-
-if isCuda
-    println("Setting backend to CUDA.")
-    bslLD.use_cuda!()
-else
-    println("CUDA not available, using CPU.")
-end
-
 
 using HDF5
 
