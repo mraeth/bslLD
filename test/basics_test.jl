@@ -65,7 +65,7 @@ using Adapt
         vector = bslLD.VectorField([collect(1.0:4.0), collect(5.0:8.0)])
 
         @test scalar.data isa Array
-        @test all(component -> component isa bslLD.ScalarField, vector.data)
-        @test all(component -> component.data isa Array, vector.data)
+        @test all(component -> component isa bslLD.ScalarField, vector)
+        @test all(component -> component.data isa Array, vector)
     end
 end

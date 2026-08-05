@@ -264,17 +264,18 @@ function div(field::VectorField{T,N}, grid::Grid) where {T,N}
     return ScalarField(out)
 end
 
-function div(field::MatrixField{DT,N,SF,NR,NC,NF}, grid::Grid) where {DT,N,SF,NR,NC,NF}
+function div(field::TensorField{DT,N,AT,2,NF}, grid::Grid) where {DT,N,AT,NF}
     ndirs = spatial_ndims(grid)
+    NS = isqrt(NF)
     ndirs >= 1 || throw(ArgumentError("div requires at least one spatial dimension"))
-    NC >= ndirs || throw(
+    NS >= ndirs || throw(
         ArgumentError("div on a $ndirs-D grid requires at least $ndirs matrix columns"),
     )
     ws = _get_spectral_workspace(field[1, 1].data, grid)
     out = similar(field[1, 1].data, Float64)
     temp = similar(out)
-    rows = Vector{SF}(undef, NR)
-    for i = 1:NR
+    rows = Vector{ScalarField}(undef, NS)
+    for i = 1:NS
         row = VectorField([field[i, d] for d = 1:ndirs])
         _apply_div!(out, row, temp, ws, grid)
         rows[i] = ScalarField(copy(out))

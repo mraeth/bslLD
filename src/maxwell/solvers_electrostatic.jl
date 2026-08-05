@@ -176,6 +176,6 @@ function solve_fields(moments::Moments, grid::Grid, ::AdiabaticSolver)
         ws.E_vf,
         ws.zero_vf3,
         ws.zero_vf3,
-        ws.zero_phi,
+        moments.rho,
     )
 end
