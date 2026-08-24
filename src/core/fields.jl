@@ -27,8 +27,9 @@ end
 
 function ScalarField(data::AbstractArray{DT,N}) where {DT,N}
     allocated = bslLD.backend_array(data)
+    ET = eltype(allocated)
     AT = typeof(allocated)
-    return TensorField{DT,N,AT,0,1}((allocated,))
+    return TensorField{ET,N,AT,0,1}((allocated,))
 end
 
 function VectorField(data::AbstractVector{<:AbstractArray})
@@ -142,10 +143,10 @@ end
 -(a::ScalarField{DT,N}, b::ScalarField{DT,N}) where {DT,N} = _sf_elemwise(-, a, b)
 *(a::ScalarField{DT,N}, b::ScalarField{DT,N}) where {DT,N} = _sf_elemwise(*, a, b)
 
-+(a::ScalarField, b::Number) = ScalarField(_comps(a)[1] .+ b)
-+(a::Number, b::ScalarField) = ScalarField(a .+ _comps(b)[1])
-*(a::ScalarField, b::Number) = ScalarField(_comps(a)[1] .* b)
-*(a::Number, b::ScalarField) = ScalarField(a .* _comps(b)[1])
++(a::ScalarField, b::Number) = ScalarField(_comps(a)[1] .+ eltype(_comps(a)[1])(b))
++(a::Number, b::ScalarField) = ScalarField(eltype(_comps(b)[1])(a) .+ _comps(b)[1])
+*(a::ScalarField, b::Number) = ScalarField(_comps(a)[1] .* eltype(_comps(a)[1])(b))
+*(a::Number, b::ScalarField) = ScalarField(eltype(_comps(b)[1])(a) .* _comps(b)[1])
 
 
 # Unified element-wise arithmetic for VectorField and MatrixField
@@ -157,8 +158,8 @@ const _CompoundTF = Union{VectorField,MatrixField}
 -(a::TF, b::TF) where {TF<:_CompoundTF} =
     _reconstruct(a, map((x, y) -> x .- y, _comps(a), _comps(b)))
 
-*(n::Number, a::TF) where {TF<:_CompoundTF} = _reconstruct(a, map(x -> n .* x, _comps(a)))
-*(a::TF, n::Number) where {TF<:_CompoundTF} = _reconstruct(a, map(x -> x .* n, _comps(a)))
+*(n::Number, a::TF) where {TF<:_CompoundTF} = _reconstruct(a, map(x -> eltype(x)(n) .* x, _comps(a)))
+*(a::TF, n::Number) where {TF<:_CompoundTF} = _reconstruct(a, map(x -> x .* eltype(x)(n), _comps(a)))
 
 
 # Matrix-specific operations (square NS×NS matrices)

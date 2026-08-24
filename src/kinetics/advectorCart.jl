@@ -3,15 +3,16 @@ using StaticArrays
 
 function R(id::Int, phi::Real)
     c, s = cos(phi), sin(phi)
+    z, o = zero(c), one(c)
     if id == 1
         # Rotation around X-axis
-        return SMatrix{3,3}(1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c)
+        return SMatrix{3,3}(o, z, z, z, c, s, z, -s, c)
     elseif id == 2
         # Rotation around Y-axis
-        return SMatrix{3,3}(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c)
+        return SMatrix{3,3}(c, z, -s, z, o, z, s, z, c)
     else
         # Rotation around Z-axis
-        return SMatrix{3,3}(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0)
+        return SMatrix{3,3}(c, s, z, -s, c, z, z, z, o)
     end
 end
 
@@ -97,24 +98,24 @@ struct AdvectionPlan{FB,PXF,PXI,PVF,PVI,KXT,KVT,VAT,BK}
 end
 
 function AdvectionPlan(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
-) where {NX,NV,NXNV}
-    ff_buf = similar(f.data, Complex{Float64})
+) where {DT,NX,NV,NXNV}
+    ff_buf = similar(f.data, Complex{DT})
     fwd_x = ntuple(d -> plan_fft!(ff_buf, d), Val(NX))
     inv_x = ntuple(d -> plan_ifft!(ff_buf, d), Val(NX))
     fwd_v = ntuple(d -> plan_fft!(ff_buf, NX + d), Val(NV))
     inv_v = ntuple(d -> plan_ifft!(ff_buf, NX + d), Val(NV))
     kx = ntuple(Val(NX)) do d
         n = size(f.data, d)
-        k = similar(f.data, Float64, n)
-        copyto!(k, collect((2pi / (n * grid.delta[d])) .* fftfreq(n, n)))
+        k = similar(f.data, DT, n)
+        copyto!(k, DT.((2pi / (n * grid.delta[d])) .* fftfreq(n, n)))
         k
     end
     kv = ntuple(Val(NV)) do d
         n = size(f.data, NX + d)
-        k = similar(f.data, Float64, n)
-        copyto!(k, collect((2pi / (n * grid.delta[NX+d])) .* fftfreq(n, n)))
+        k = similar(f.data, DT, n)
+        copyto!(k, DT.((2pi / (n * grid.delta[NX+d])) .* fftfreq(n, n)))
         k
     end
     vaxes = map(backend_vector, grid.vaxes)
@@ -127,9 +128,9 @@ const _plan_cache_lock = ReentrantLock()
 @inline _plan_cache_key(grid::CartGrid) = (grid.xaxes, grid.vaxes, grid.delta, grid.Bdir)
 
 function _get_plan(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
-) where {NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
     lock(_plan_cache_lock) do
         plans_for_data = get!(() -> Dict{Any,AdvectionPlan}(), _plan_cache, f.data)
         get!(() -> AdvectionPlan(f, grid), plans_for_data, _plan_cache_key(grid))
@@ -147,12 +148,12 @@ function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
 end
 
 function _advect_x_dir!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
     dir::Int,
     plan::AdvectionPlan,
-) where {NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
     1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
     exec = plan.backend
     kernel! = spectral_multiply_kernel!(exec)
@@ -164,10 +165,10 @@ function _advect_x_dir!(
         sizes_x,
         sizes_v,
         dir,
-        simTime.phase,
-        _effective_dt(simTime),
-        thermal_velocity(f),
-        electric_acceleration_scale(f),
+        DT(simTime.phase),
+        DT(_effective_dt(simTime)),
+        DT(thermal_velocity(f)),
+        DT(electric_acceleration_scale(f)),
     )
     _apply_phase_shift!(
         f,
@@ -182,13 +183,13 @@ function _advect_x_dir!(
 end
 
 function _advect_v_dir!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
     dir::Int,
     plan::AdvectionPlan,
-) where {NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
     1 <= dir <= NV || throw(ArgumentError("advectV! direction $dir out of 1:$NV"))
     exec = plan.backend
     kernel! = spectral_multiply_kernel!(exec)
@@ -201,9 +202,9 @@ function _advect_v_dir!(
         sizes_x,
         sizes_v,
         dir,
-        simTime.phase,
-        _effective_dt(simTime),
-        electric_acceleration_scale(f),
+        DT(simTime.phase),
+        DT(_effective_dt(simTime)),
+        DT(electric_acceleration_scale(f)),
     )
     _apply_phase_shift!(
         f,
@@ -218,10 +219,10 @@ function _advect_v_dir!(
 end
 
 function advectX!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
-) where {NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
     plan = _get_plan(f, grid)
     for dir = 1:NX
         _advect_x_dir!(f, grid, simTime, dir, plan)
@@ -229,20 +230,20 @@ function advectX!(
 end
 
 function advectX!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
     dir::Int,
-) where {NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
     _advect_x_dir!(f, grid, simTime, dir, _get_plan(f, grid))
 end
 
 function advectV!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
-) where {NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
     plan = _get_plan(f, grid)
     for dir = 1:NV
         _advect_v_dir!(f, grid, simTime, e, dir, plan)
@@ -250,11 +251,11 @@ function advectV!(
 end
 
 function advectV!(
-    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
     dir::Int,
-) where {NX,NV,NXNV}
+) where {DT,NX,NV,NXNV}
     _advect_v_dir!(f, grid, simTime, e, dir, _get_plan(f, grid))
 end

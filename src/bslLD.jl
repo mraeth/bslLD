@@ -17,6 +17,12 @@ const SET_AMDGPU_EXECUTION_SPACE_HOOK = Ref{Function}(
         "AMDGPU-dependent functionality requires `using AMDGPU` in the active Julia session.",
     ),
 )
+const METAL_AVAILABLE_HOOK = Ref{Function}(() -> false)
+const SET_METAL_EXECUTION_SPACE_HOOK = Ref{Function}(
+    () -> error(
+        "Metal-dependent functionality requires `using Metal` in the active Julia session.",
+    ),
+)
 
 function _allocator_ref()
     if !isdefined(@__MODULE__, :DEFAULT_ALLOCATOR)
@@ -40,6 +46,8 @@ _cuda_available() = CUDA_AVAILABLE_HOOK[]()
 _set_cuda_execution_space!() = SET_CUDA_EXECUTION_SPACE_HOOK[]()
 _amdgpu_available() = AMDGPU_AVAILABLE_HOOK[]()
 _set_amdgpu_execution_space!() = SET_AMDGPU_EXECUTION_SPACE_HOOK[]()
+_metal_available() = METAL_AVAILABLE_HOOK[]()
+_set_metal_execution_space!() = SET_METAL_EXECUTION_SPACE_HOOK[]()
 
 _backend_synchronize!(::Any) = nothing
 

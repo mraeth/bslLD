@@ -40,19 +40,20 @@ function _make_em_dk_pol_workspace(
 
     sw = _get_spectral_workspace(arr, grid)
 
-    curl_buf = ntuple(_ -> fill!(similar(arr, Float64), 0.0), 3)
-    temp1 = fill!(similar(arr, Float64), 0.0)
-    temp2 = fill!(similar(arr, Float64), 0.0)
-    temp3 = fill!(similar(arr, Float64), 0.0)
+    DT = eltype(arr)
+    curl_buf = ntuple(_ -> fill!(similar(arr), zero(DT)), 3)
+    temp1 = fill!(similar(arr), zero(DT))
+    temp2 = fill!(similar(arr), zero(DT))
+    temp3 = fill!(similar(arr), zero(DT))
 
     # Pre-compute Helmholtz operator: -kperp2 - (beta_i/2)*(1+1/mu)
-    kperp2 = fill!(similar(arr, Float64), 0.0)
+    kperp2 = fill!(similar(arr), zero(DT))
     for d in spatial_perp_dirs
         kv = reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data))
         kperp2 .+= kv .^ 2
     end
-    lambda = (solver.beta_i / 2) * (1 + 1 / solver.mu)
-    helmholtz = similar(arr, Float64)
+    lambda = DT((solver.beta_i / 2) * (1 + 1 / solver.mu))
+    helmholtz = similar(arr)
     @. helmholtz = -kperp2 - lambda
 
     return EMDKPolWorkspace(
@@ -108,21 +109,23 @@ function _step_dk_pol!(
     ws::EMDKPolWorkspace,
 )
     d1, d2, pz = ws.d1, ws.d2, ws.pz
+    DT = eltype(ws.temp1)
+    _dt = DT(dt)
 
     # Explicit Faraday: B^{n-1/2} -> B^{n+1/2}
     _apply_curl!(ws.curl_buf, E, ws.temp3, ws.sw, grid)
     for d = 1:ncomponents(B)
-        B[d].data .-= dt .* ws.curl_buf[d]
+        B[d].data .-= _dt .* ws.curl_buf[d]
     end
 
     # Implicit E_⊥ update: [I - (dt/μ)R] E_⊥^{n+1} = RHS_⊥
     _apply_curl!(ws.curl_buf, B, ws.temp3, ws.sw, grid)
-    α = dt / solver.mu
-    c = 2 / solver.beta_i
+    α = DT(dt / solver.mu)
+    c = DT(2 / solver.beta_i)
     @. ws.temp1 = E[d1].data + α * (c * ws.curl_buf[d1] - J_i_perp[1].data)  # rhs1
     @. ws.temp2 = E[d2].data + α * (c * ws.curl_buf[d2] - J_i_perp[2].data)  # rhs2
-    denom = 1 + α^2
-    parity = (d2 % 3 + 1 == pz) ? 1 : -1
+    denom = DT(1) + α^2
+    parity = DT((d2 % 3 + 1 == pz) ? 1 : -1)
     @. E[d1].data = (ws.temp1 + parity * α * ws.temp2) / denom
     @. E[d2].data = (ws.temp2 - parity * α * ws.temp1) / denom
 
@@ -155,7 +158,8 @@ function _step_dk_pol!(
     end
 
     # rhs_data = (beta_i/2)*div_Pi + dz_div_E_perp → temp1 (in-place)
-    @. ws.temp1 = (solver.beta_i / 2) * ws.temp1 + ws.temp3
+    _half_beta = DT(solver.beta_i / 2)
+    @. ws.temp1 = _half_beta * ws.temp1 + ws.temp3
 
     # Forward FFT rhs_data into fft_buf, divide by helmholtz, inverse FFT
     @. ws.sw.fft_buf = ws.temp1
@@ -250,7 +254,7 @@ function _make_kview_or_zero(
     if d <= ndims_x
         return reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data))
     else
-        return fill!(similar(arr, Float64, ntuple(_ -> 1, ndims_data)), 0.0)
+        return fill!(similar(arr, eltype(arr), ntuple(_ -> 1, ndims_data)), zero(eltype(arr)))
     end
 end
 
@@ -275,8 +279,9 @@ function _make_em_dk_no_pol_workspace(
     k2_view = _make_kview_or_zero(sw, d2, ndims_x, ndims_data, arr)
     kz_view = _make_kview_or_zero(sw, pz, ndims_x, ndims_data, arr)
 
-    c_arr() = similar(arr, Complex{Float64})
-    f_arr() = fill!(similar(arr, Float64), 0.0)
+    DT = eltype(arr)
+    c_arr() = similar(arr, Complex{DT})
+    f_arr() = fill!(similar(arr), zero(DT))
 
     Bhat = ntuple(_ -> c_arr(), 3)
     Jhat = ntuple(_ -> c_arr(), 2)
@@ -294,7 +299,7 @@ function _make_em_dk_no_pol_workspace(
     @. a31_pre = kz_view * k1_view
     a32_pre = f_arr();
     @. a32_pre = kz_view * k2_view
-    lambda = (solver.beta_i / 2) * (1 + 1 / solver.mu)
+    lambda = DT((solver.beta_i / 2) * (1 + 1 / solver.mu))
     a33_pre = f_arr();
     @. a33_pre = -k2_perp - lambda
 
@@ -373,8 +378,11 @@ function _step_dk_no_pol!(
 )
     ndims_x = ws.ndims_x
     d1, d2, pz = ws.d1, ws.d2, ws.pz
-    c = 2 / solver.beta_i
-    α = c * dt
+    DT = eltype(ws.k2_perp)
+    c = DT(2 / solver.beta_i)
+    α = DT(c * dt)
+    _dt = DT(dt)
+    _half_beta = DT(solver.beta_i / 2)
     sw = ws.sw
 
     # Forward FFT inputs
@@ -401,15 +409,16 @@ function _step_dk_no_pol!(
     @. ws.curlBhat[d1] = c * ws.curlBhat[d1] - ws.Jhat[1]   # w1
     @. ws.curlBhat[d2] = c * ws.curlBhat[d2] - ws.Jhat[2]   # w2
     # b3 = (beta_i/2)*div_Pi_hat  (in-place overwrite)
-    @. ws.div_Pi_hat *= (solver.beta_i / 2)
+    @. ws.div_Pi_hat *= _half_beta
 
     # a-matrix entries (all real, per-call due to α = c*dt)
     k1v, k2v, kzv = ws.k1_view, ws.k2_view, ws.kz_view
-    @. ws.a11 = 1 - α * k1v * k2v
+    _one = one(DT)
+    @. ws.a11 = _one - α * k1v * k2v
     @. ws.a12 = α * (ws.k2_tot - k2v^2)
     @. ws.a13 = -α * k2v * kzv
     @. ws.a21 = -α * (ws.k2_tot - k1v^2)
-    @. ws.a22 = 1 + α * k1v * k2v
+    @. ws.a22 = _one + α * k1v * k2v
     @. ws.a23 = α * k1v * kzv
 
     # Cofactors and determinant
@@ -442,7 +451,7 @@ function _step_dk_no_pol!(
     # Faraday: Bhat -= dt * curl(Ehat)  — reuse curlBhat buffers
     _spectral_curl_hat!(ws.curlBhat, ws.Ehat, ws.kviews, ndims_x)
     for d = 1:3
-        @. ws.Bhat[d] -= dt * ws.curlBhat[d]
+        @. ws.Bhat[d] -= _dt * ws.curlBhat[d]
     end
 
     # Inverse FFT
@@ -475,8 +484,9 @@ end
 # Initialise B to the staggered B^{-1/2} from B^0 and E^0 (EMSolverDKPol only).
 function initialize_staggered_B!(sol::FieldSolution, grid::Grid, dt::Real)
     curlE = curl(sol.E, grid)
+    DT = eltype(sol.B[1].data)
     for d = 1:ncomponents(sol.B)
-        sol.B[d].data .+= (dt / 2) .* curlE[d].data
+        sol.B[d].data .+= DT(dt / 2) .* curlE[d].data
     end
     return sol
 end

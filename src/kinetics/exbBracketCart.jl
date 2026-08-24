@@ -85,6 +85,7 @@ function _exb_setup!(
         ),
     )
 
+    grid.b0 == 0.0 && error("ExB bracket requires nonzero b0")
     inv_b0 = inv(grid.b0)
     for d = 1:2
         _differentiate_impl!(plan.dg_x[d], phi.data, plan.ws_phi, d)

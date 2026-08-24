@@ -34,16 +34,19 @@ TaylorSeries = "6aa5eb33-94cf-58f4-a9d0-e4b2c4fc25ea"
 [extensions]
 bslLDAMDGPUExt = "AMDGPU"
 bslLDCUDAExt = "CUDA"
+bslLDMetalExt = "Metal"
 
 [weakdeps]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
 
 [compat]
 AbstractFFTs = "1.5.0"
 Adapt = "4"
 AMDGPU = "1"
 CUDA = "6.1.0"
+Metal = "1"
 CubicSplines = "0.2.1"
 DSP = "0.8.4"
 Dierckx = "0.5.4"

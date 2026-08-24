@@ -21,15 +21,26 @@ function use_amdgpu!()
     return _set_amdgpu_execution_space!()
 end
 
+function metal_available()
+    return _metal_available()
+end
+
+function use_metal!()
+    metal_available() || error("Metal is installed but no functional GPU is available")
+    return _set_metal_execution_space!()
+end
+
 function backend_copy(x::AbstractArray)
     return bslLD.backend_array(Array(x))
 end
 
 function backend_copy(f::DistributionGrid)
     data = backend_copy(f.data)
-    _, NX, NV, NXNV, ID = typeof(f).parameters[1:5]
+    # DistributionGridImpl has parameters {DT, PDT, NX, NV, NXNV, ID, AT};
+    # skip both DT and PDT to reach NX.
+    _, _, NX, NV, NXNV, ID = typeof(f).parameters[1:6]
     DT = eltype(data)
-    return DistributionGrid{DT,NX,NV,NXNV,ID,typeof(data)}(data, DT(f.m), DT(f.q))
+    return DistributionGrid{DT,NX,NV,NXNV,ID,typeof(data)}(data, f.m, f.q)
 end
 
 function backend_copy(e::VectorField)

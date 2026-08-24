@@ -37,12 +37,13 @@ end
 
 # Half-step ion velocity update: δu += (dt/2) * E, then rotate by (dt/2)*Ω_i about ê_{Bdir}.
 function _advance_u_half!(fluid::ColdIonFluid, E::VectorField, grid::Grid, dt::Real)
-    half = dt / 2
-    Ω = grid.b0
+    DT = eltype(fluid.u[1].data)
+    half = DT(dt / 2)
+    Ω = DT(grid.b0)
     pz = grid.Bdir
     perp_dirs = [d for d = 1:3 if d != pz]
     d1, d2 = perp_dirs[1], perp_dirs[2]
-    parity = (d2 % 3 + 1 == pz) ? 1 : -1  # sign of ε_{d1,d2,Bdir}
+    parity = DT((d2 % 3 + 1 == pz) ? 1 : -1)  # sign of ε_{d1,d2,Bdir}
 
     # E-kick
     for d = 1:3
@@ -55,8 +56,8 @@ function _advance_u_half!(fluid::ColdIonFluid, E::VectorField, grid::Grid, dt::R
     u1 = copy(fluid.u[d1].data)
     u2 = copy(fluid.u[d2].data)
 
-    fluid.u[d1].data .= c .* u1 .+ parity * s .* u2
-    fluid.u[d2].data .= .-parity * s .* u1 .+ c .* u2
+    fluid.u[d1].data .= c .* u1 .+ parity .* s .* u2
+    fluid.u[d2].data .= .-parity .* s .* u1 .+ c .* u2
 
 
     return nothing
@@ -68,7 +69,8 @@ function _advance_n_half!(fluid::ColdIonFluid, grid::Grid, dt::Real)
     # div only over spatial components
     u_spatial = VectorField([fluid.u[d] for d = 1:ndims_x])
     div_u = div(u_spatial, grid)
-    fluid.delta_n.data .-= (dt / 2) .* div_u.data
+    DT = eltype(fluid.delta_n.data)
+    fluid.delta_n.data .-= DT(dt / 2) .* div_u.data
     return nothing
 end
 

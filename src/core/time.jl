@@ -8,7 +8,6 @@ mutable struct SimulationTime{T<:AbstractFloat} <: AbstractVector{T}
     step::Int
     phase::T
     nmax::Int
-    gyro_frequency::T
     wall_start_ns::UInt64
     _progress::Union{Progress,Nothing}
 end
@@ -18,26 +17,18 @@ function SimulationTime(
     dt::T,
     final_T::T;
     nmax::Integer = typemax(Int),
-    gyro_frequency = zero(T),
     current_T = zero(T),
     step::Integer = 0,
     phase = zero(T),
 ) where {T<:AbstractFloat}
-
-    gyro_frequency >= 0 || throw(
-        ArgumentError(
-            "gyro_frequency must be non-negative; charge sign is handled by electric_acceleration_scale",
-        ),
-    )
     return SimulationTime{T}(
         dt,
-        1.0,
+        one(T),
         T(current_T),
         final_T,
         Int(step),
         T(phase),
         Int(round(Int, final_T/dt)),
-        T(gyro_frequency),
         time_ns(),
         nothing,
     )
@@ -53,10 +44,11 @@ function SimulationTime(dt::Real, final_T::Real; kwargs...)
     return SimulationTime(T(dt), T(final_T); kwargs...)
 end
 
-function advance!(t::SimulationTime{T}; wrap_phase::Bool = true) where {T<:AbstractFloat}
+
+function advance!(t::SimulationTime{T}, gyro_frequency::Real; wrap_phase::Bool = true) where {T<:AbstractFloat}
     t.current_T += t.dt
     t.step += 1
-    t.phase += t.gyro_frequency * t.dt
+    t.phase += T(gyro_frequency) * t.dt
 
     if wrap_phase
         t.phase = mod(t.phase, T(2π))

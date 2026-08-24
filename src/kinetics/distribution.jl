@@ -1,13 +1,13 @@
 
 abstract type Distribution end
 
-struct DistributionGrid{DT,PDT,NX,NV,NXNV,ID,AT<:AbstractArray{DT,NXNV}} <: Distribution
+struct DistributionGridImpl{DT,PDT,NX,NV,NXNV,ID,AT<:AbstractArray{DT,NXNV}} <: Distribution
     data::AT
     m::PDT
     q::PDT
 end
 
-const DistributionGrid{DT,NX,NV,NXNV,ID,AT} = DistributionGrid{DT,Float64,NX,NV,NXNV,ID,AT}
+const DistributionGrid{DT,NX,NV,NXNV,ID,AT} = DistributionGridImpl{DT,Float64,NX,NV,NXNV,ID,AT}
 
 const DistributionGrid1d1v{T,ID,AT} = DistributionGrid{T,1,1,2,ID,AT}
 const DistributionGrid1d2v{T,ID,AT} = DistributionGrid{T,1,2,3,ID,AT}
@@ -92,7 +92,7 @@ function compute_density(
     grid::CartGrid,
 ) where {DT,NX,NV,NXNV}
     dim = ntuple(i -> NX + i, Val(NV))
-    dv = prod(grid.delta[(1+NX):(NX+NV)])
+    dv = DT(prod(grid.delta[(1+NX):(NX+NV)]))
     return ScalarField(
         reshape(sum(f.data, dims = dim) * dv, ntuple(i -> length(grid.xaxes[i]), Val(NX))),
     )
@@ -103,7 +103,7 @@ end
     grid::CartGrid,
 ) where {DT,NX,NV,NXNV}
     vdims = ntuple(i -> NX + i, Val(NV))
-    dv = prod(grid.delta[(NX+1):(NX+NV)])
+    dv = DT(prod(grid.delta[(NX+1):(NX+NV)]))
     xsize = ntuple(i -> length(grid.xaxes[i]), Val(NX))
     return vdims, dv, xsize
 end
@@ -115,7 +115,7 @@ function _current_arrays(
     vdims, dv, xsize = _moment_setup(f, grid)
     return ntuple(
         a -> begin
-            v = collect(grid.vaxes[a])
+            v = bslLD.backend_array(collect(grid.vaxes[a]))
             vshape = ntuple(k -> k == NX + a ? length(v) : 1, Val(NXNV))
             reshape(sum(f.data .* reshape(v, vshape), dims = vdims) * dv, xsize)
         end,
@@ -151,8 +151,8 @@ function _momentum_tensor_arrays(
     vdims, dv, xsize = _moment_setup(f, grid)
     return [
         begin
-            va = collect(grid.vaxes[a])
-            vb = collect(grid.vaxes[b])
+            va = bslLD.backend_array(collect(grid.vaxes[a]))
+            vb = bslLD.backend_array(collect(grid.vaxes[b]))
             vashape = ntuple(k -> k == NX + a ? length(va) : 1, Val(NXNV))
             vbshape = ntuple(k -> k == NX + b ? length(vb) : 1, Val(NXNV))
             reshape(
@@ -184,6 +184,8 @@ function compute_momentum_tensor(
     return Rot * Pi * Rot'
 end
 
+
+gyro_frequency(f::DistributionGrid, grid::Grid) = abs(f.q) / f.m * grid.b0
 
 function compute_density(f::DistributionGrid, grid::PolarGrid)
     dim = Tuple(i for i = (length(grid.xaxes)+1):(length(grid.xaxes)+length(grid.vaxes)))

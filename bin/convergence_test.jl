@@ -35,7 +35,7 @@ end
 
 function stepStrang!(f, grid, simTime)
     phase_start = simTime.phase
-    Ω = simTime.gyro_frequency
+    Ω = bslLD.gyro_frequency(f, grid)
 
     # V half-step at phase(t)
     sol = bslLD.solve_fields(
@@ -69,12 +69,12 @@ end
 function run_test(dt, grid, stepFunc)
     println("Running test with dt = ", dt, " and step function ", stepFunc)
     nmax = round(Int, 1.0 / dt)
-    simTime = bslLD.SimulationTime(dt, 1.0; nmax = nmax, gyro_frequency = 1.0)
     f = bslLD.Distribution(grid, 0.0001)
+    simTime = bslLD.SimulationTime(dt, 1.0; nmax = nmax)
 
     while bslLD.continue_advection(simTime)
         stepFunc(f, grid, simTime)
-        bslLD.advance!(simTime)
+        bslLD.advance!(simTime, bslLD.gyro_frequency(f, grid))
     end
 
     return bslLD.compute_density(f, grid).data

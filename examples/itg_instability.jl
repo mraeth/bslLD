@@ -5,7 +5,7 @@ using HDF5
 
 function stepStrang!(f, grid, simTime)
     phase_start = simTime.phase
-    Ω = simTime.gyro_frequency
+    Ω = bslLD.gyro_frequency(f, grid)
 
     # K–V half-step at phase(t)
     rho = bslLD.compute_density(f, grid)
@@ -75,14 +75,13 @@ grid = bslLD.Grid(
     1.0,
     3,
 )
-simTime = bslLD.SimulationTime(0.1, 10000.0, gyro_frequency = 1.0)
-
 initFuncx(x) = 1 + 0.0001 * randn()
 
 if abspath(PROGRAM_FILE) == @__FILE__
     println("Running Simulation")
 
     f = bslLD.Distribution(grid, 0.0, initFuncx = initFuncx);
+    simTime = bslLD.SimulationTime(0.1, 10000.0)
 
     function diags!(rho, simTime)
         simTime.step % nDiag == 0 || return
@@ -91,7 +90,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
 
     while bslLD.continue_advection(simTime, true)
         stepStrang!(f, grid, simTime)
-        bslLD.advance!(simTime)
+        bslLD.advance!(simTime, bslLD.gyro_frequency(f, grid))
     end
 
 end

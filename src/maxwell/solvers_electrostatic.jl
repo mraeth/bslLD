@@ -17,9 +17,10 @@ end
 
 function _make_adiabatic_workspace(rho::ScalarField, grid::Grid)
     sw = _get_spectral_workspace(rho.data, grid)
-    E_vf = VectorField([ScalarField(fill!(similar(rho.data, Float64), 0.0)) for _ = 1:3])
+    DT = eltype(rho.data)
+    E_vf = VectorField([ScalarField(fill!(similar(rho.data), zero(DT))) for _ = 1:3])
     zero_vf3 = zero_vectorfield3(grid)
-    zero_phi = ScalarField(fill!(similar(rho.data, Float64), 0.0))
+    zero_phi = ScalarField(fill!(similar(rho.data), zero(DT)))
     return AdiabaticSolverWorkspace(sw, E_vf, zero_vf3, zero_phi)
 end
 
@@ -41,8 +42,8 @@ end
 
 struct PoissonSolverWorkspace{SW,K2,PHI,EVF,ZVF}
     sw::SW
-    k2::K2        # Float64 field-sized — spectral |k|²
-    phi_buf::PHI  # Float64 field-sized — real phi
+    k2::K2        # field-sized — spectral |k|²
+    phi_buf::PHI  # field-sized — real phi
     E_vf::EVF
     zero_vf3::ZVF
 end
@@ -51,14 +52,15 @@ function _make_poisson_workspace(rho::ScalarField, grid::Grid)
     sw = _get_spectral_workspace(rho.data, grid)
     ndims_x = spatial_ndims(grid)
     # Pre-compute |k|² on the backend
-    k2 = fill!(similar(rho.data, Float64), 0.0)
+    DT = eltype(rho.data)
+    k2 = fill!(similar(rho.data), zero(DT))
     for d = 1:ndims_x
         kd = sw.k[d]
         # kd is 1-D; broadcast as a length-n_d slice along dim d
         k2 .+= reshape(kd, ntuple(i -> i == d ? length(kd) : 1, ndims(k2))) .^ 2
     end
-    phi_buf = fill!(similar(rho.data, Float64), 0.0)
-    E_vf = VectorField([ScalarField(fill!(similar(rho.data, Float64), 0.0)) for _ = 1:3])
+    phi_buf = fill!(similar(rho.data), zero(DT))
+    E_vf = VectorField([ScalarField(fill!(similar(rho.data), zero(DT))) for _ = 1:3])
     zero_vf3 = zero_vectorfield3(grid)
     return PoissonSolverWorkspace(sw, k2, phi_buf, E_vf, zero_vf3)
 end
@@ -120,7 +122,9 @@ function _poisson_potential!(
     for d = 1:length(sw.fwd_plans)
         sw.fwd_plans[d] * sw.fft_buf
     end
-    @. sw.fft_buf = ifelse(ws.k2 == 0, complex(0.0), -sw.fft_buf / (coefficient * ws.k2))
+    _coeff = eltype(ws.k2)(coefficient)
+    _czero = complex(zero(eltype(ws.k2)))
+    @. sw.fft_buf = ifelse(ws.k2 == 0, _czero, -sw.fft_buf / (_coeff * ws.k2))
     for d = 1:length(sw.inv_plans)
         sw.inv_plans[d] * sw.fft_buf
     end
@@ -134,8 +138,9 @@ function _fourier_filter!(ws::PoissonSolverWorkspace, cutoff_fraction::Real)
     for d = 1:length(sw.fwd_plans)
         sw.fwd_plans[d] * sw.fft_buf
     end
-    kmax2 = maximum(ws.k2) * cutoff_fraction^2
-    @. sw.fft_buf = ifelse(ws.k2 > kmax2, complex(0.0), sw.fft_buf)
+    kmax2 = eltype(ws.k2)(maximum(ws.k2) * cutoff_fraction^2)
+    _czero = complex(zero(eltype(ws.k2)))
+    @. sw.fft_buf = ifelse(ws.k2 > kmax2, _czero, sw.fft_buf)
     for d = 1:length(sw.inv_plans)
         sw.inv_plans[d] * sw.fft_buf
     end
@@ -156,7 +161,7 @@ function solve_fields(moments::Moments, grid::Grid, solver::PoissonSolver)
         _differentiate_impl!(ws.E_vf[dir].data, phi_sf, ws.sw, dir, true)
     end
     for dir = (ndims_x+1):3
-        fill!(ws.E_vf[dir].data, 0.0)
+        fill!(ws.E_vf[dir].data, zero(eltype(ws.E_vf[dir].data)))
     end
     return FieldSolution{typeof(ws.E_vf),typeof(phi_sf)}(
         ws.E_vf,

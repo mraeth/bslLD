@@ -9,9 +9,8 @@ grid = bslLD.Grid(
     1.0,
     2,
 )
-simTime = bslLD.SimulationTime(0.01, 1, gyro_frequency = 1.0)
-
 f = bslLD.Distribution(grid, 0.0001);
+simTime = bslLD.SimulationTime(0.01, 1.0)
 
 function step!(f, grid, simTime)
     bslLD.advectX!(f, grid, simTime)
@@ -37,6 +36,6 @@ end
 while bslLD.continue_advection(simTime)
     bslLD.reset_timer!(simTime)
     step!(f, grid, simTime)
-    bslLD.advance!(simTime)
+    bslLD.advance!(simTime, bslLD.gyro_frequency(f, grid))
     print_progress(simTime)
 end

@@ -16,15 +16,16 @@ end
 end
 
 function spectral_wavenumbers(field_data::AbstractArray, grid::Grid, dir::Int)
+    T = real(eltype(field_data))
     1 <= dir <= length(grid.xaxes) ||
         throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
     n = size(field_data, dir)
     axis_length = n * grid.delta[dir]
-    kvec = collect((2pi / axis_length) .* fftfreq(n, n))
+    kvec = T.((2pi / axis_length) .* fftfreq(n, n))
     if iseven(n)
-        kvec[n÷2+1] = 0.0
+        kvec[n÷2+1] = zero(T)
     end
-    k = similar(field_data, Float64, n)
+    k = similar(field_data, T, n)
     copyto!(k, kvec)
     return k
 end
@@ -42,7 +43,7 @@ end
 
 function SpectralWorkspace(arr::AbstractArray, grid::Grid)
     ndims_x = spatial_ndims(grid)
-    fft_buf = similar(arr, Complex{Float64})
+    fft_buf = similar(arr, Complex{eltype(arr)})
     fwd_plans = ntuple(d -> plan_fft!(fft_buf, d), ndims_x)
     inv_plans = ntuple(d -> plan_ifft!(fft_buf, d), ndims_x)
     k = ntuple(d -> spectral_wavenumbers(arr, grid, d), ndims_x)
@@ -232,7 +233,7 @@ function differentiate(field::ScalarField{T,N}, grid::Grid, dir::Int) where {T,N
     dir <= length(grid.xaxes) ||
         throw(ArgumentError("direction $dir is outside the spatial grid dimensions"))
     ws = _get_spectral_workspace(field.data, grid)
-    out = similar(field.data, Float64)
+    out = similar(field.data, eltype(field.data))
     _differentiate_impl!(out, field, ws, dir)
     return ScalarField(out)
 end
@@ -243,7 +244,7 @@ function grad(field::ScalarField{T,N}, grid::Grid) where {T,N}
     ws = _get_spectral_workspace(field.data, grid)
     return VectorField([
         begin
-            out = similar(field.data, Float64)
+            out = similar(field.data, eltype(field.data))
             _differentiate_impl!(out, field, ws, d)
             ScalarField(out)
         end for d = 1:ndirs
@@ -258,7 +259,7 @@ function div(field::VectorField{T,N}, grid::Grid) where {T,N}
         ArgumentError("div on a $ndirs-D grid requires at least $ndirs vector components"),
     )
     ws = _get_spectral_workspace(field[1].data, grid)
-    out = similar(field[1].data, Float64)
+    out = similar(field[1].data, eltype(field[1].data))
     temp = similar(out)
     _apply_div!(out, field, temp, ws, grid)
     return ScalarField(out)
@@ -272,7 +273,7 @@ function div(field::TensorField{DT,N,AT,2,NF}, grid::Grid) where {DT,N,AT,NF}
         ArgumentError("div on a $ndirs-D grid requires at least $ndirs matrix columns"),
     )
     ws = _get_spectral_workspace(field[1, 1].data, grid)
-    out = similar(field[1, 1].data, Float64)
+    out = similar(field[1, 1].data, eltype(field[1, 1].data))
     temp = similar(out)
     rows = Vector{ScalarField}(undef, NS)
     for i = 1:NS
@@ -287,8 +288,8 @@ function curl(field::VectorField, grid::Grid)
     ndims_x = spatial_ndims(grid)
     ncomp = ncomponents(field)
     ws = _get_spectral_workspace(field[1].data, grid)
-    temp = similar(field[1].data, Float64)
-    out = ntuple(_ -> similar(field[1].data, Float64), 3)
+    temp = similar(field[1].data, eltype(field[1].data))
+    out = ntuple(_ -> similar(field[1].data, eltype(field[1].data)), 3)
     _apply_curl!(out, field, temp, ws, grid)
 
     if ndims_x == 2 && ncomp == 2
@@ -323,7 +324,7 @@ end
 
 function spectral_wavenumber_squared(field::ScalarField, grid::Grid)
     kviews = spectral_wavenumber_views(field, grid)
-    k2 = bslLD.backend_array(zeros(Float64, size(field.data)))
+    k2 = fill!(similar(field.data, eltype(field.data)), zero(eltype(field.data)))
     for kview in kviews
         k2 .+= kview .^ 2
     end
@@ -335,12 +336,12 @@ function _spectral_curl_hat!(out, fieldhat, kviews, ndims_x::Int)
     if ndims_x == 1
         kx = kviews[1]
         if ncomp == 2
-            @. out[1] = -im * kx * fieldhat[2]
+            @. out[1] = -(im * kx * fieldhat[2])
             @. out[2] = im * kx * fieldhat[1]
             return out
         elseif ncomp == 3
             fill!(out[1], 0)
-            @. out[2] = -im * kx * fieldhat[3]
+            @. out[2] = -(im * kx * fieldhat[3])
             @. out[3] = im * kx * fieldhat[2]
             return out
         end
@@ -348,7 +349,7 @@ function _spectral_curl_hat!(out, fieldhat, kviews, ndims_x::Int)
         kx, ky = kviews[1], kviews[2]
         if ncomp == 3
             @. out[1] = im * ky * fieldhat[3]
-            @. out[2] = -im * kx * fieldhat[3]
+            @. out[2] = -(im * kx * fieldhat[3])
             @. out[3] = im * kx * fieldhat[2] - im * ky * fieldhat[1]
             return out
         end
