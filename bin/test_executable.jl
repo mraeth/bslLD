@@ -1,3 +1,4 @@
+using Pkg; Pkg.activate(@__DIR__)
 include("../scripts/select_backend.jl")
 
 #2D3V grid with 32x8 32x32x32 grid points 

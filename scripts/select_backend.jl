@@ -1,6 +1,8 @@
 using Pkg
-Pkg.activate(".")
-Pkg.develop(path = "..")
+if abspath(PROGRAM_FILE) == @__FILE__
+    Pkg.activate(@__DIR__)
+    Pkg.develop(path = joinpath(@__DIR__, ".."))
+end
 
 is_cuda = try
     success(`nvidia-smi`)

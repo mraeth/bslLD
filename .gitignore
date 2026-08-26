@@ -16,6 +16,7 @@ build/
 *.pdf
 !docs/**/*.png
 !docs/**/*.pdf
+*html
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/

@@ -1,3 +1,4 @@
+using Pkg; Pkg.activate(@__DIR__)
 include("../scripts/select_backend.jl")
 bslLD.greet()
 

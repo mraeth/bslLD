@@ -374,14 +374,15 @@ function _step_dk_no_pol!(
     Pi_diff::VectorField,
     solver::EMSolverDKNoPol,
     dt::Real,
-    ws::EMDKNoPolWorkspace,
+    ws::EMDKNoPolWorkspace;
+    dt_faraday::Real = dt,
 )
     ndims_x = ws.ndims_x
     d1, d2, pz = ws.d1, ws.d2, ws.pz
     DT = eltype(ws.k2_perp)
     c = DT(2 / solver.beta_i)
     α = DT(c * dt)
-    _dt = DT(dt)
+    _dt_faraday = DT(dt_faraday)
     _half_beta = DT(solver.beta_i / 2)
     sw = ws.sw
 
@@ -448,16 +449,20 @@ function _step_dk_no_pol!(
             ws.a12 * (ws.a21 * b3 + w1 * ws.a31_pre) + w2 * ws.m13
         ) / ws.detA
 
-    # Faraday: Bhat -= dt * curl(Ehat)  — reuse curlBhat buffers
-    _spectral_curl_hat!(ws.curlBhat, ws.Ehat, ws.kviews, ndims_x)
-    for d = 1:3
-        @. ws.Bhat[d] -= _dt * ws.curlBhat[d]
-    end
-
-    # Inverse FFT
+    # Inverse FFT E always
     for d = 1:3
         _inv_fft_from!(sw, ws.Ehat[d], E[d].data, ndims_x)
-        _inv_fft_from!(sw, ws.Bhat[d], B[d].data, ndims_x)
+    end
+
+    # Faraday and B IFFT only when dt_faraday != 0
+    if !iszero(_dt_faraday)
+        _spectral_curl_hat!(ws.curlBhat, ws.Ehat, ws.kviews, ndims_x)
+        for d = 1:3
+            @. ws.Bhat[d] -= _dt_faraday * ws.curlBhat[d]
+        end
+        for d = 1:3
+            _inv_fft_from!(sw, ws.Bhat[d], B[d].data, ndims_x)
+        end
     end
 
     return nothing
@@ -480,6 +485,85 @@ function solve_fields!(
     return sol
 end
 
+# Midpoint field solve: uses α = c·dt/2 in matrix A, does NOT update B.
+# Caller is responsible for applying Faraday with the full dt after convergence.
+function solve_fields_midpoint!(
+    sol::FieldSolution,
+    moments::Moments,
+    grid::Grid,
+    solver::EMSolverDKNoPol,
+    dt::Real,
+)
+    moments.J !== nothing ||
+        throw(ArgumentError("moments.J is required for EMSolverDKNoPol"))
+    moments.Pi_diff !== nothing ||
+        throw(ArgumentError("moments.Pi_diff is required for EMSolverDKNoPol"))
+    copyto!(sol.Enew, sol.E)
+    ws = _get_em_dk_no_pol_workspace(sol, grid, solver)
+    _step_dk_no_pol!(
+        sol.Enew, sol.B, moments.J, moments.Pi_diff, solver,
+        dt / 2, ws; dt_faraday = zero(dt),
+    )
+    return sol
+end
+
+# Implicit midpoint field solve: derived by eliminating B^m = B^n − (dt/2)∇×E^m into
+# E_⊥^m = c∇×B^n − c(dt/2)∇×∇×E^m − J_⊥^m.
+# Produces the same 3×3 system as solve_fields_midpoint! (α = c·dt/2).
+# B is not modified; caller applies Faraday with the full dt after convergence.
+function solve_fields_implicit_midpoint!(
+    sol::FieldSolution,
+    moments::Moments,
+    grid::Grid,
+    solver::EMSolverDKNoPol,
+    dt::Real,
+)
+    moments.J !== nothing ||
+        throw(ArgumentError("moments.J is required for EMSolverDKNoPol"))
+    moments.Pi_diff !== nothing ||
+        throw(ArgumentError("moments.Pi_diff is required for EMSolverDKNoPol"))
+    copyto!(sol.Enew, sol.E)
+    ws = _get_em_dk_no_pol_workspace(sol, grid, solver)
+    _step_dk_no_pol!(
+        sol.Enew, sol.B, moments.J, moments.Pi_diff, solver,
+        dt / 2, ws; dt_faraday = zero(dt),
+    )
+    return sol
+end
+
+# θ-method field solve: α = c·θ·Δt derived from B^θ = B^n − θΔt·∇×E^θ elimination.
+# With θ = 0.5 + κΔt, retains O(Δt²) accuracy while adding O(Δt²) numerical damping.
+# B is not modified; caller applies Faraday with the full dt after convergence.
+function solve_fields_damped_midpoint!(
+    sol::FieldSolution,
+    moments::Moments,
+    grid::Grid,
+    solver::EMSolverDKNoPol,
+    dt::Real,
+    theta::Real,
+)
+    moments.J !== nothing ||
+        throw(ArgumentError("moments.J is required for EMSolverDKNoPol"))
+    moments.Pi_diff !== nothing ||
+        throw(ArgumentError("moments.Pi_diff is required for EMSolverDKNoPol"))
+    copyto!(sol.Enew, sol.E)
+    ws = _get_em_dk_no_pol_workspace(sol, grid, solver)
+    _step_dk_no_pol!(
+        sol.Enew, sol.B, moments.J, moments.Pi_diff, solver,
+        theta * dt, ws; dt_faraday = zero(dt),
+    )
+    return sol
+end
+
+# Apply Faraday's law in-place: B -= dt * curl(E), spectrally exact.
+function apply_faraday!(B::VectorField, E::VectorField, grid::Grid, dt::Real)
+    curlE = curl(E, grid)
+    DT = eltype(B[1].data)
+    for d in 1:ncomponents(B)
+        B[d].data .-= DT(dt) .* curlE[d].data
+    end
+    return B
+end
 
 # Initialise B to the staggered B^{-1/2} from B^0 and E^0 (EMSolverDKPol only).
 function initialize_staggered_B!(sol::FieldSolution, grid::Grid, dt::Real)
