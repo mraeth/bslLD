@@ -3,95 +3,64 @@ module bslLD
 using AbstractFFTs, Adapt, FFTW, KernelAbstractions
 using Dierckx, Base.Threads, StaticArrays, ProgressMeter
 
-const DEFAULT_ALLOCATOR = Ref{Function}(identity)
-const DEFAULT_BACKEND = Ref{Any}(KernelAbstractions.CPU())
-const CUDA_AVAILABLE_HOOK = Ref{Function}(() -> false)
-const SET_CUDA_EXECUTION_SPACE_HOOK = Ref{Function}(
-    () -> error(
-        "CUDA-dependent functionality requires `using CUDA` in the active Julia session.",
-    ),
-)
-const AMDGPU_AVAILABLE_HOOK = Ref{Function}(() -> false)
-const SET_AMDGPU_EXECUTION_SPACE_HOOK = Ref{Function}(
-    () -> error(
-        "AMDGPU-dependent functionality requires `using AMDGPU` in the active Julia session.",
-    ),
-)
-const METAL_AVAILABLE_HOOK = Ref{Function}(() -> false)
-const SET_METAL_EXECUTION_SPACE_HOOK = Ref{Function}(
-    () -> error(
-        "Metal-dependent functionality requires `using Metal` in the active Julia session.",
-    ),
-)
+using PlasmaCore:
+    # Backend infrastructure
+    DEFAULT_BACKEND, DEFAULT_ALLOCATOR,
+    CUDA_AVAILABLE_HOOK, SET_CUDA_EXECUTION_SPACE_HOOK,
+    AMDGPU_AVAILABLE_HOOK, SET_AMDGPU_EXECUTION_SPACE_HOOK,
+    METAL_AVAILABLE_HOOK, SET_METAL_EXECUTION_SPACE_HOOK,
+    allocate, backend, backend_array, set_execution_space!,
+    _allocator_ref, _backend_ref,
+    _backend_array_matches,
+    _cuda_available, _set_cuda_execution_space!,
+    _amdgpu_available, _set_amdgpu_execution_space!,
+    _metal_available, _set_metal_execution_space!,
+    _backend_synchronize!,
+    # Grid
+    Grid, Cart, Polar, CartGrid, PolarGrid, outer_product,
+    # Time
+    SimulationTime, advance!, continue_advection, elapsed_seconds, reset_timer!,
+    # Indexing
+    index_nd_to_1d, index_1d_to_nd, index_combined_to_1d, index_1d_to_combined,
+    spectral_multiply_kernel!,
+    # Fields
+    TensorField, ScalarField, VectorField, MatrixField,
+    empty_scalarfield, empty_vectorfield, empty_matrixfield,
+    zero_vectorfield_like, zero_scalarfield_like,
+    # Distribution data (physics constructors and moments live in bslLD kinetics files)
+    DistributionGrid, DistributionGridImpl,
+    DistributionGrid1d1v, DistributionGrid1d2v, DistributionGrid2d2v,
+    # Spectral operators (public)
+    SpectralWorkspace, DifferentiateContext,
+    differentiate, grad, div, curl,
+    spatial_ndims, ncomponents,
+    fft_spatial, ifft_spatial, spatial_fft_dims,
+    spectral_wavenumbers, spectral_wavenumber_squared, spectral_wavenumber_views,
+    # Spectral operators (private, needed by solver files)
+    _solver_workspace_cache, _solver_workspace_cache_lock,
+    _spectral_ws_cache, _spectral_ws_cache_lock,
+    _get_spectral_workspace, _spectral_ws_key,
+    _differentiate_impl!, _spectral_curl_hat!,
+    _fwd_fft_to!, _inv_fft_from!,
+    _apply_div!, _apply_curl!,
+    # Field solver interface
+    AbstractFieldSolver, Moments, FieldSolution,
+    vectorfield_from_spatial_components, zero_vectorfield3, background_field,
+    # Execution utilities
+    use_cpu!, cuda_available, use_cuda!, amdgpu_available, use_amdgpu!,
+    metal_available, use_metal!, backend_copy, backend_synchronize!
 
-function _allocator_ref()
-    if !isdefined(@__MODULE__, :DEFAULT_ALLOCATOR)
-        @eval const DEFAULT_ALLOCATOR = Ref{Function}(identity)
-    end
-    return getfield(@__MODULE__, :DEFAULT_ALLOCATOR)
-end
-
-function _backend_ref()
-    if !isdefined(@__MODULE__, :DEFAULT_BACKEND)
-        @eval const DEFAULT_BACKEND = Ref{Any}(KernelAbstractions.CPU())
-    end
-    return getfield(@__MODULE__, :DEFAULT_BACKEND)
-end
-
-allocate(x) = _allocator_ref()[](x)
-backend() = _backend_ref()[]
-
-_backend_array_matches(::Any, ::AbstractArray) = false
-_cuda_available() = CUDA_AVAILABLE_HOOK[]()
-_set_cuda_execution_space!() = SET_CUDA_EXECUTION_SPACE_HOOK[]()
-_amdgpu_available() = AMDGPU_AVAILABLE_HOOK[]()
-_set_amdgpu_execution_space!() = SET_AMDGPU_EXECUTION_SPACE_HOOK[]()
-_metal_available() = METAL_AVAILABLE_HOOK[]()
-_set_metal_execution_space!() = SET_METAL_EXECUTION_SPACE_HOOK[]()
-
-_backend_synchronize!(::Any) = nothing
-
-function backend_array(x::AbstractArray)
-    exec = backend()
-    if exec isa KernelAbstractions.CPU
-        return x isa Array ? x : Array(x)
-    end
-    if _backend_array_matches(exec, x)
-        return x
-    end
-    return allocate(x)
-end
-
-function set_execution_space!(alloc, exec)
-    _allocator_ref()[] = alloc
-    _backend_ref()[] = exec
-    return nothing
-end
-
-function set_execution_space!(; alloc = nothing, exec = nothing)
-    alloc === nothing || (_allocator_ref()[] = alloc)
-    exec === nothing || (_backend_ref()[] = exec)
-    return nothing
-end
-
-include("core/grid.jl")
-include("core/time.jl")
-include("core/indexing.jl")
-include("core/fields.jl")
-include("kinetics/distribution.jl")
+include("kinetics/species.jl")
 include("kinetics/advectorCart.jl")
 include("kinetics/advectorPolar.jl")
+include("kinetics/initialization.jl")
+include("kinetics/moments.jl")
 include("kinetics/moment_response.jl")
-include("maxwell/spectral_operators.jl")
-include("maxwell/field_solver.jl")
 include("maxwell/solvers_electrostatic.jl")
 include("maxwell/solvers_vacuum.jl")
 include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
 include("kinetics/exbBracketCart.jl")
-include("execution.jl")
 include("sources.jl")
-
-greet() = print("Hello World!")
 
 end # module bslLD

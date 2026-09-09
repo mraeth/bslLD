@@ -61,8 +61,9 @@ end
 function _similar_distribution(
     f::DistributionGrid{DT,NX,NV,NXNV,ID},
 ) where {DT,NX,NV,NXNV,ID}
-    data = similar(f.data)
-    return DistributionGrid{DT,NX,NV,NXNV,ID,typeof(data)}(data, f.m, f.q)
+    new_raw = similar(f.data)
+    new_sf = ScalarField(new_raw)
+    return DistributionGridImpl{NX, NV, ID, typeof(new_sf)}(new_sf)
 end
 
 # Fill plan.dg with ∇_{x1,x2}(φ/B_0) and plan.df_buf{1,2} with ∂f/∂x{1,2}. All reads of
@@ -150,3 +151,24 @@ function exb_euler!(
 ) where {NX,NV,NXNV}
     return exb_euler!(f_out, f_in, phi, grid, dt, _get_exb_plan(f_in, grid))
 end
+
+# Species forwarding overloads
+ExBBracketPlan(sp::Species, grid::CartGrid) = ExBBracketPlan(sp.dist, grid)
+_get_exb_plan(sp::Species, grid::CartGrid) = _get_exb_plan(sp.dist, grid)
+exb_bracket(sp::Species, phi::ScalarField, grid::CartGrid) = exb_bracket(sp.dist, phi, grid)
+exb_bracket!(df::DistributionGrid, sp::Species, phi::ScalarField, grid::CartGrid, plan::ExBBracketPlan) =
+    exb_bracket!(df, sp.dist, phi, grid, plan)
+exb_bracket!(df::DistributionGrid, sp::Species, phi::ScalarField, grid::CartGrid) =
+    exb_bracket!(df, sp.dist, phi, grid)
+exb_bracket!(df::Species, f_in::Species, phi::ScalarField, grid::CartGrid, plan::ExBBracketPlan) =
+    exb_bracket!(df.dist, f_in.dist, phi, grid, plan)
+exb_bracket!(df::Species, f_in::Species, phi::ScalarField, grid::CartGrid) =
+    exb_bracket!(df.dist, f_in.dist, phi, grid)
+exb_euler!(f_out::DistributionGrid, sp::Species, phi::ScalarField, grid::CartGrid, dt::Real, plan::ExBBracketPlan) =
+    exb_euler!(f_out, sp.dist, phi, grid, dt, plan)
+exb_euler!(f_out::DistributionGrid, sp::Species, phi::ScalarField, grid::CartGrid, dt::Real) =
+    exb_euler!(f_out, sp.dist, phi, grid, dt)
+exb_euler!(f_out::Species, f_in::Species, phi::ScalarField, grid::CartGrid, dt::Real, plan::ExBBracketPlan) =
+    exb_euler!(f_out.dist, f_in.dist, phi, grid, dt, plan)
+exb_euler!(f_out::Species, f_in::Species, phi::ScalarField, grid::CartGrid, dt::Real) =
+    exb_euler!(f_out.dist, f_in.dist, phi, grid, dt)

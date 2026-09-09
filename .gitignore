@@ -30,6 +30,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+*.cache
 
 # Local environment
 LocalPreferences.toml

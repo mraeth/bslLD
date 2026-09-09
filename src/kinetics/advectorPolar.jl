@@ -8,12 +8,13 @@ end
 
 
 function advectX!(
-    f::DistributionGrid1d2v{DT,Polar},
+    sp::Species,
     grid::PolarGrid,
     advector = advect1DFourier!,
-) where {DT}
+)
+    f = sp.dist
     dt = grid.dt
-    vth = thermal_velocity(f)
+    vth = thermal_velocity(sp)
     for iv1 = 2:size(f.data)[2]
         for iv2 = 1:size(f.data)[3]
             xdisp =
@@ -50,11 +51,12 @@ end
 end
 
 function advectV!(
-    f::DistributionGrid1d2v{DT,Polar},
+    sp::Species,
     grid::PolarGrid,
-    e::VectorField{DT,1},
-) where {DT}
-    F = bslLD.fft(f.data[:, :, :], [3]) / length(grid.vaxes[2])
+    e::VectorField,
+)
+    f = sp.dist
+    F = fft(f.data[:, :, :], [3]) / length(grid.vaxes[2])
     rgrid = grid.xaxes[1]
     vgrid = grid.vaxes[1]
     phigrid = grid.vaxes[2]
@@ -63,7 +65,7 @@ function advectV!(
     nphi = length(phigrid)
     imax = min(round(Int, (nphi / 2 - 1)), fld(nphi, 2))
     dt = grid.dt
-    electric_scale = electric_acceleration_scale(f)
+    electric_scale = electric_acceleration_scale(sp)
 
     @threads for ix = 1:nx
         delta_vx = dt * electric_scale * e[1].data[ix]

@@ -13,11 +13,11 @@ function predict_midpoint_current(
     n_a::ScalarField,
     J_a::VectorField,
     E::VectorField,
-    f::DistributionGrid,
+    sp::Species,
     ::CartGrid,
     dt::Real,
 )
-    eas = bslLD.electric_acceleration_scale(f)
+    eas = electric_acceleration_scale(sp)
     τ = dt / 2
     return VectorField([
         J_a[d].data .+ eas .* n_a.data .* τ .* E[d].data
@@ -31,12 +31,12 @@ function predict_stage_current(
     n_a::ScalarField,
     J_a::VectorField,
     E::VectorField,
-    f::DistributionGrid,
+    sp::Species,
     ::CartGrid,
     dt::Real,
     theta::Real,
 )
-    eas = bslLD.electric_acceleration_scale(f)
+    eas = electric_acceleration_scale(sp)
     τ = theta * dt
     return VectorField([
         J_a[d].data .+ eas .* n_a.data .* τ .* E[d].data
@@ -45,12 +45,8 @@ function predict_stage_current(
 end
 
 # Combined density + current computation to avoid two separate passes.
-function compute_density_current(
-    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
-    grid::CartGrid,
-    phase::Real,
-) where {DT,NX,NV,NXNV}
-    n = compute_density(f, grid)
-    J = compute_current(f, grid, phase)
+function compute_density_current(sp::Species, grid::CartGrid, phase::Real)
+    n = compute_density(sp.dist, grid)
+    J = compute_current(sp, grid, phase)
     return n, J
 end

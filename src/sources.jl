@@ -64,3 +64,5 @@ function add_kappaT!(
 
     return f
 end
+
+add_kappaT!(sp::Species, args...; kwargs...) = add_kappaT!(sp.dist, args...; kwargs...)

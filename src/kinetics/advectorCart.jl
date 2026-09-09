@@ -148,12 +148,15 @@ function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
 end
 
 function _advect_x_dir!(
-    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+    sp::Species,
     grid::CartGrid,
     simTime::SimulationTime,
     dir::Int,
     plan::AdvectionPlan,
-) where {DT,NX,NV,NXNV}
+)
+    f = sp.dist
+    DT = eltype(f.data)
+    NX = length(grid.xaxes)
     1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
     exec = plan.backend
     kernel! = spectral_multiply_kernel!(exec)
@@ -167,34 +170,29 @@ function _advect_x_dir!(
         dir,
         DT(simTime.phase),
         DT(_effective_dt(simTime)),
-        DT(thermal_velocity(f)),
-        DT(electric_acceleration_scale(f)),
+        DT(thermal_velocity(sp)),
+        DT(electric_acceleration_scale(sp)),
     )
-    _apply_phase_shift!(
-        f,
-        plan.ff_buf,
-        plan.fwd_x[dir],
-        plan.inv_x[dir],
-        kernel!,
-        ctx,
-        exec,
-    )
+    _apply_phase_shift!(f, plan.ff_buf, plan.fwd_x[dir], plan.inv_x[dir], kernel!, ctx, exec)
     return nothing
 end
 
 function _advect_v_dir!(
-    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+    sp::Species,
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
     dir::Int,
     plan::AdvectionPlan,
-) where {DT,NX,NV,NXNV}
+)
+    f = sp.dist
+    DT = eltype(f.data)
+    NV = length(grid.vaxes)
     1 <= dir <= NV || throw(ArgumentError("advectV! direction $dir out of 1:$NV"))
     exec = plan.backend
     kernel! = spectral_multiply_kernel!(exec)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
-    e_components = ntuple(i -> e[i].data, Val(NV))
+    e_components = ntuple(i -> e[i].data, Val(length(grid.vaxes)))
     ctx = VShiftContext(
         grid,
         e_components,
@@ -204,58 +202,36 @@ function _advect_v_dir!(
         dir,
         DT(simTime.phase),
         DT(_effective_dt(simTime)),
-        DT(electric_acceleration_scale(f)),
+        DT(electric_acceleration_scale(sp)),
     )
-    _apply_phase_shift!(
-        f,
-        plan.ff_buf,
-        plan.fwd_v[dir],
-        plan.inv_v[dir],
-        kernel!,
-        ctx,
-        exec,
-    )
+    _apply_phase_shift!(f, plan.ff_buf, plan.fwd_v[dir], plan.inv_v[dir], kernel!, ctx, exec)
     return nothing
 end
 
-function advectX!(
-    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
-    grid::CartGrid,
-    simTime::SimulationTime,
-) where {DT,NX,NV,NXNV}
-    plan = _get_plan(f, grid)
-    for dir = 1:NX
-        _advect_x_dir!(f, grid, simTime, dir, plan)
+function advectX!(sp::Species, grid::CartGrid, simTime::SimulationTime)
+    plan = _get_plan(sp.dist, grid)
+    for dir = 1:length(grid.xaxes)
+        _advect_x_dir!(sp, grid, simTime, dir, plan)
     end
 end
 
-function advectX!(
-    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
-    grid::CartGrid,
-    simTime::SimulationTime,
-    dir::Int,
-) where {DT,NX,NV,NXNV}
-    _advect_x_dir!(f, grid, simTime, dir, _get_plan(f, grid))
+function advectX!(sp::Species, grid::CartGrid, simTime::SimulationTime, dir::Int)
+    _advect_x_dir!(sp, grid, simTime, dir, _get_plan(sp.dist, grid))
 end
 
-function advectV!(
-    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
-    grid::CartGrid,
-    simTime::SimulationTime,
-    e::VectorField,
-) where {DT,NX,NV,NXNV}
-    plan = _get_plan(f, grid)
-    for dir = 1:NV
-        _advect_v_dir!(f, grid, simTime, e, dir, plan)
+function advectV!(sp::Species, grid::CartGrid, simTime::SimulationTime, e::VectorField)
+    plan = _get_plan(sp.dist, grid)
+    for dir = 1:length(grid.vaxes)
+        _advect_v_dir!(sp, grid, simTime, e, dir, plan)
     end
 end
 
 function advectV!(
-    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+    sp::Species,
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
     dir::Int,
-) where {DT,NX,NV,NXNV}
-    _advect_v_dir!(f, grid, simTime, e, dir, _get_plan(f, grid))
+)
+    _advect_v_dir!(sp, grid, simTime, e, dir, _get_plan(sp.dist, grid))
 end
