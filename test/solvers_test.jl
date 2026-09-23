@@ -423,7 +423,8 @@ end
     end
 
     # Same 3x3 system as a full solve_fields! call at dt/2 (with no Faraday update).
-    sol_ref = bslLD.FieldSolution(bslLD.zero_vectorfield3(grid), bslLD.zero_vectorfield3(grid))
+    sol_ref =
+        bslLD.FieldSolution(bslLD.zero_vectorfield3(grid), bslLD.zero_vectorfield3(grid))
     bslLD.solve_fields!(sol_ref, moments, grid, solver, dt / 2)
 
     for d = 1:3
@@ -459,7 +460,8 @@ end
     end
 
     # Same 3x3 system as a full solve_fields! call at theta*dt (with no Faraday update).
-    sol_ref = bslLD.FieldSolution(bslLD.zero_vectorfield3(grid), bslLD.zero_vectorfield3(grid))
+    sol_ref =
+        bslLD.FieldSolution(bslLD.zero_vectorfield3(grid), bslLD.zero_vectorfield3(grid))
     bslLD.solve_fields!(sol_ref, moments, grid, solver, theta * dt)
 
     for d = 1:3

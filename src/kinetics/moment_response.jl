@@ -20,8 +20,7 @@ function predict_midpoint_current(
     eas = electric_acceleration_scale(sp)
     τ = dt / 2
     return VectorField([
-        J_a[d].data .+ eas .* n_a.data .* τ .* E[d].data
-        for d in 1:length(J_a)
+        J_a[d].data .+ eas .* n_a.data .* τ .* E[d].data for d = 1:length(J_a)
     ])
 end
 
@@ -39,8 +38,7 @@ function predict_stage_current(
     eas = electric_acceleration_scale(sp)
     τ = theta * dt
     return VectorField([
-        J_a[d].data .+ eas .* n_a.data .* τ .* E[d].data
-        for d in 1:length(J_a)
+        J_a[d].data .+ eas .* n_a.data .* τ .* E[d].data for d = 1:length(J_a)
     ])
 end
 

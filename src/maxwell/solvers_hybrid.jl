@@ -254,7 +254,10 @@ function _make_kview_or_zero(
     if d <= ndims_x
         return reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data))
     else
-        return fill!(similar(arr, eltype(arr), ntuple(_ -> 1, ndims_data)), zero(eltype(arr)))
+        return fill!(
+            similar(arr, eltype(arr), ntuple(_ -> 1, ndims_data)),
+            zero(eltype(arr)),
+        )
     end
 end
 
@@ -501,8 +504,14 @@ function solve_fields_midpoint!(
     copyto!(sol.Enew, sol.E)
     ws = _get_em_dk_no_pol_workspace(sol, grid, solver)
     _step_dk_no_pol!(
-        sol.Enew, sol.B, moments.J, moments.Pi_diff, solver,
-        dt / 2, ws; dt_faraday = zero(dt),
+        sol.Enew,
+        sol.B,
+        moments.J,
+        moments.Pi_diff,
+        solver,
+        dt / 2,
+        ws;
+        dt_faraday = zero(dt),
     )
     return sol
 end
@@ -525,8 +534,14 @@ function solve_fields_damped_midpoint!(
     copyto!(sol.Enew, sol.E)
     ws = _get_em_dk_no_pol_workspace(sol, grid, solver)
     _step_dk_no_pol!(
-        sol.Enew, sol.B, moments.J, moments.Pi_diff, solver,
-        theta * dt, ws; dt_faraday = zero(dt),
+        sol.Enew,
+        sol.B,
+        moments.J,
+        moments.Pi_diff,
+        solver,
+        theta * dt,
+        ws;
+        dt_faraday = zero(dt),
     )
     return sol
 end
@@ -535,7 +550,7 @@ end
 function apply_faraday!(B::VectorField, E::VectorField, grid::Grid, dt::Real)
     curlE = curl(E, grid)
     DT = eltype(B[1].data)
-    for d in 1:ncomponents(B)
+    for d = 1:ncomponents(B)
         B[d].data .-= DT(dt) .* curlE[d].data
     end
     return B

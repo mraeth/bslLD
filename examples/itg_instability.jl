@@ -1,4 +1,5 @@
-using Pkg; Pkg.activate(@__DIR__)
+using Pkg;
+Pkg.activate(@__DIR__)
 include("../scripts/select_backend.jl")
 
 using HDF5

@@ -3,7 +3,9 @@ function Distribution(
     epsilon;
     m = 1.0,
     q = 1.0,
-    initFuncx = (x -> (1.0 .+ epsilon * sin(2pi / (grid.xaxes[1][end] + grid.delta[1]) * x))),
+    initFuncx = (
+        x -> (1.0 .+ epsilon * sin(2pi / (grid.xaxes[1][end] + grid.delta[1]) * x))
+    ),
     initFuncv = (v -> exp(-v^2 / 2) / sqrt(2 * pi)),
     initFuncv1 = initFuncv,
 )
@@ -20,7 +22,7 @@ function Distribution(
     sf = ScalarField(raw)
     NX = length(grid.xaxes)
     NV = length(grid.vaxes)
-    dist = DistributionGridImpl{NX, NV, Cart, typeof(sf)}(sf)
+    dist = DistributionGridImpl{NX,NV,Cart,typeof(sf)}(sf)
     return Species(m, q, dist)
 end
 
@@ -29,7 +31,9 @@ function Distribution(
     epsilon;
     m = 1.0,
     q = 1.0,
-    initFuncx = (x -> (1.0 .+ epsilon * sin(2pi / (grid.xaxes[1][end] + grid.delta[1]) * x))),
+    initFuncx = (
+        x -> (1.0 .+ epsilon * sin(2pi / (grid.xaxes[1][end] + grid.delta[1]) * x))
+    ),
     initFuncv = (v -> exp(-v^2 / 2) / sqrt(2 * pi)),
 )
     fct_sp(x) = initFuncx(x)
@@ -41,6 +45,6 @@ function Distribution(
     sf = ScalarField(raw)
     NX = length(grid.xaxes)
     NV = length(grid.vaxes)
-    dist = DistributionGridImpl{NX, NV, Polar, typeof(sf)}(sf)
+    dist = DistributionGridImpl{NX,NV,Polar,typeof(sf)}(sf)
     return Species(m, q, dist)
 end

@@ -173,7 +173,15 @@ function _advect_x_dir!(
         DT(thermal_velocity(sp)),
         DT(electric_acceleration_scale(sp)),
     )
-    _apply_phase_shift!(f, plan.ff_buf, plan.fwd_x[dir], plan.inv_x[dir], kernel!, ctx, exec)
+    _apply_phase_shift!(
+        f,
+        plan.ff_buf,
+        plan.fwd_x[dir],
+        plan.inv_x[dir],
+        kernel!,
+        ctx,
+        exec,
+    )
     return nothing
 end
 
@@ -204,7 +212,15 @@ function _advect_v_dir!(
         DT(_effective_dt(simTime)),
         DT(electric_acceleration_scale(sp)),
     )
-    _apply_phase_shift!(f, plan.ff_buf, plan.fwd_v[dir], plan.inv_v[dir], kernel!, ctx, exec)
+    _apply_phase_shift!(
+        f,
+        plan.ff_buf,
+        plan.fwd_v[dir],
+        plan.inv_v[dir],
+        kernel!,
+        ctx,
+        exec,
+    )
     return nothing
 end
 
