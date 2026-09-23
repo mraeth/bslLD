@@ -32,6 +32,9 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 TaylorSeries = "6aa5eb33-94cf-58f4-a9d0-e4b2c4fc25ea"
 
+[sources]
+PlasmaCore = {url = "https://github.com/mraeth/PlasmaCore.jl.git"}
+
 [compat]
 AbstractFFTs = "1.5.0"
 Adapt = "4"
@@ -46,6 +49,7 @@ Interpolations = "0.16.2"
 KernelAbstractions = "0.9"
 LaTeXStrings = "1.4.0"
 Latexify = "0.16.10"
+PlasmaCore = "0.1.0"
 Polynomials = "4.1.0"
 Profile = "1.11.0"
 ProgressBars = "1.5.1"
