@@ -6,10 +6,20 @@ Pkg.develop(path = joinpath(@__DIR__, ".."); io = devnull)
 
 using Statistics
 
-is_cuda   = try success(`nvidia-smi`) catch; false end
-is_amdgpu = !is_cuda && try success(`rocm-smi`) catch; false end
-is_metal  = !is_cuda && !is_amdgpu && Sys.isapple() && Sys.ARCH === :aarch64
-has_gpu   = is_cuda || is_amdgpu || is_metal
+is_cuda = try
+    success(`nvidia-smi`)
+catch
+    ;
+    false
+end
+is_amdgpu = !is_cuda && try
+    success(`rocm-smi`)
+catch
+    ;
+    false
+end
+is_metal = !is_cuda && !is_amdgpu && Sys.isapple() && Sys.ARCH === :aarch64
+has_gpu = is_cuda || is_amdgpu || is_metal
 
 if is_cuda
     using CUDA
@@ -68,9 +78,15 @@ function print_summary(device, routine, stats)
     println(
         rpad(device, 8),
         rpad(routine, 12),
-        "min=",    round(stats.minimum * 1e3; digits = 3), " ms  ",
-        "median=", round(stats.median  * 1e3; digits = 3), " ms  ",
-        "mean=",   round(stats.mean    * 1e3; digits = 3), " ms",
+        "min=",
+        round(stats.minimum * 1e3; digits = 3),
+        " ms  ",
+        "median=",
+        round(stats.median * 1e3; digits = 3),
+        " ms  ",
+        "mean=",
+        round(stats.mean * 1e3; digits = 3),
+        " ms",
     )
 end
 
@@ -84,13 +100,13 @@ function benchmark_routine!(
     warmup;
     sync! = () -> nothing,
 )
-    for _ in 1:warmup
+    for _ = 1:warmup
         f, e = clone_inputs(f_template, e_template)
         routine!(f, grid, e, simTime)
         sync!()
     end
     times = Float64[]
-    for _ in 1:samples
+    for _ = 1:samples
         f, e = clone_inputs(f_template, e_template)
         elapsed = @elapsed begin
             routine!(f, grid, e, simTime)
@@ -107,7 +123,14 @@ function bench(device, use_backend!, make_inputs_fn, samples, warmup; sync! = ()
     println("\n$device benchmarks")
     stats = Dict(
         label => benchmark_routine!(
-            routine!, f_template, grid, e_template, simTime, samples, warmup; sync!,
+            routine!,
+            f_template,
+            grid,
+            e_template,
+            simTime,
+            samples,
+            warmup;
+            sync!,
         ) for (label, routine!) in ROUTINES
     )
     for (label, _) in ROUTINES
@@ -127,9 +150,9 @@ end
 gpu_label() = is_cuda ? "CUDA" : is_amdgpu ? "AMDGPU" : is_metal ? "Metal" : "GPU"
 
 function use_gpu!()
-    is_cuda   && return bslLD.use_cuda!()
+    is_cuda && return bslLD.use_cuda!()
     is_amdgpu && return bslLD.use_amdgpu!()
-    is_metal  && return bslLD.use_metal!()
+    is_metal && return bslLD.use_metal!()
 end
 
 function main(args)
@@ -137,7 +160,9 @@ function main(args)
     make_case() = make_inputs(opts["nx"], opts["nv"], opts["dt"], opts["epsilon"])
 
     println("CPU vs GPU comparison")
-    println("nx=$(opts["nx"])  nv=$(opts["nv"])  dt=$(opts["dt"])  samples=$(opts["samples"])  warmup=$(opts["warmup"])")
+    println(
+        "nx=$(opts["nx"])  nv=$(opts["nv"])  dt=$(opts["dt"])  samples=$(opts["samples"])  warmup=$(opts["warmup"])",
+    )
     has_gpu && println("GPU backend: $(gpu_label())")
 
     cpu_stats = bench("CPU", bslLD.use_cpu!, make_case, opts["samples"], opts["warmup"])

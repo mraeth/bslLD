@@ -16,6 +16,7 @@ build/
 *.pdf
 !docs/**/*.png
 !docs/**/*.pdf
+*html
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
@@ -29,6 +30,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+*.cache
 
 # Local environment
 LocalPreferences.toml

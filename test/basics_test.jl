@@ -21,7 +21,7 @@ using Adapt
         @test grid.xaxes isa Tuple
         @test grid.vaxes isa Tuple
 
-        bslLD.advance!(simTime)
+        bslLD.advance!(simTime, 0.0)
         @test simTime.step == 1
         @test simTime.current_T == 0.05
     end
