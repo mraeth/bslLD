@@ -8,10 +8,10 @@ end
 
 
 function advectX!(
-    sp::Species,
+    sp::Species{PDT,<:DistributionGrid1d2v{DT,Polar}},
     grid::PolarGrid,
     advector = advect1DFourier!,
-)
+) where {PDT,DT}
     f = sp.dist
     dt = grid.dt
     vth = thermal_velocity(sp)
@@ -51,10 +51,10 @@ end
 end
 
 function advectV!(
-    sp::Species,
+    sp::Species{PDT,<:DistributionGrid1d2v{DT,Polar}},
     grid::PolarGrid,
-    e::VectorField,
-)
+    e::VectorField{DT,1},
+) where {PDT,DT}
     f = sp.dist
     F = fft(f.data[:, :, :], [3]) / length(grid.vaxes[2])
     rgrid = grid.xaxes[1]

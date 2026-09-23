@@ -50,30 +50,47 @@ julia --project=docs docs/make.jl
 
 ## Architecture
 
-The package is structured around three layers:
+Grid, field, distribution, spectral-operator, execution/GPU, and field-solver-interface
+primitives have been factored out into the separate `PlasmaCore.jl` package (imported via
+`using PlasmaCore: ...` at the top of `src/bslLD.jl`), which `bslLD` depends on via a remote
+git URL (see the outer `kinetics/CLAUDE.md`, not something to vendor back in without being
+asked). That package provides, among others: `Grid{T,XT,VT,MT,ID}` (`Cart`/`Polar`),
+`ScalarField`/`VectorField`/`MatrixField`, `SimulationTime`/`advance!`/`continue_advection`,
+`DistributionGrid{DT,NX,NV,NXNV,ID,AT}` (and the `DistributionGrid1d1v`/`1d2v`/`2d2v`
+aliases), the spectral operators (`grad`/`div`/`curl`/`differentiate`), the
+`AbstractFieldSolver`/`Moments`/`FieldSolution` interface, and the backend/GPU utilities
+(`use_cuda!`, `backend_array`, `backend_copy`, etc.) plus its CUDA extension.
 
-### Core (`src/core/`)
-- `grid.jl` — `Grid{T,XT,VT,MT,ID}` parametrised by coordinate type `ID` (`Cart` or `Polar`). Constructed via `Grid(etaMin, etaMax, N, nx, b0, Bdir; type=Cart)`. Stores typed tuples of `StepRange` axes for x and v dimensions.
-- `fields.jl` — `ScalarField`, `VectorField`, `MatrixField` wrappers around arrays. All field arithmetic (`+`, `-`, `*`, matrix–vector products) is defined here. Fields are always routed through `bslLD.backend_array()` at construction so the same code runs on CPU or GPU.
-- `time.jl` — `SimulationTime` and `advance!` / `continue_advection`.
-- `indexing.jl` — multi-dimensional index helpers used in kernels.
+`bslLD` itself now holds only the physics built on top of those primitives:
 
 ### Kinetics (`src/kinetics/`)
-- `distribution.jl` — `DistributionGrid{DT,NX,NV,NXNV,ID,AT}` holds the phase-space distribution function as a multi-dimensional array. Type aliases `DistributionGrid1d1v`, `DistributionGrid1d2v`, `DistributionGrid2d2v` select specific configurations. `compute_density`, `compute_current`, `compute_momentum_tensor` reduce over velocity dimensions.
-- `advectorCart.jl` / `advectorPolar.jl` — `advectX!` and `advectV!` implement BSL back-tracing using `KernelAbstractions` kernels (parallelises over velocity slices on CPU via threads, or over all cells on GPU). Interpolation uses Fourier modes or Dierckx splines.
+- `species.jl` — `Species{PDT,DG}` pairs a mass/charge with a `DistributionGrid`;
+  `thermal_velocity`, `electric_acceleration_scale`, `gyro_frequency`.
+- `initialization.jl` — `Distribution(...)` constructors building a `Species` from grid +
+  initial-condition functions.
+- `advectorCart.jl` / `advectorPolar.jl` — `advectX!`/`advectV!` implement BSL back-tracing
+  over a `Species`, dispatching on `CartGrid`/`PolarGrid`. Cartesian uses FFT-based
+  (Fourier-mode) interpolation; Polar uses Dierckx splines and is type-constrained to
+  `DistributionGrid1d2v{DT,Polar}` (1D config × 2D polar velocity only).
+- `moments.jl` — `compute_density`, `compute_current`, `compute_momentum_tensor` reducing a
+  `Species`'s distribution over velocity dimensions (Cart and Polar variants).
+- `moment_response.jl` — `predict_midpoint_current`/`predict_stage_current` (linear-response
+  current predictors for the EM midpoint solvers) and `compute_density_current`.
+- `exbBracketCart.jl` — `exb_bracket!`/`exb_euler!`, the E×B Poisson-bracket advection used
+  by the hybrid Darwin-Kinetic solvers.
 
 ### Maxwell (`src/maxwell/`)
-- `spectral_operators.jl` — FFT-based spectral gradient, curl, divergence; wavenumber arrays.
-- `field_solver.jl` — defines `AbstractFieldSolver`, `Moments{rho, J, Pi_diff}`, and `FieldSolution{E, B, Enew}`.
-- `solvers_electrostatic.jl` — `PoissonSolver`, `AdiabaticSolver` (both FFT-based, periodic, with 2/3-rule dealiasing).
+- `solvers_electrostatic.jl` — `PoissonSolver`, `AdiabaticSolver` (both FFT-based, periodic,
+  with 2/3-rule dealiasing).
 - `solvers_vacuum.jl` — `EMSolverVacuum` with Crank–Nicolson time-stepping; `electromagnetic_energy` and `maxwell_constraints` diagnostics.
-- `solvers_hybrid.jl` — `EMSolverDKPol` (Darwin-Kinetic with polarisation drift, 2×2 per-mode linear solve + Helmholtz) and `EMSolverDKNoPol` (fully spectral 3×3 Cramer solve).
+- `solvers_hybrid.jl` — `EMSolverDKPol` (Darwin-Kinetic with polarisation drift, 2×2 per-mode
+  linear solve + Helmholtz) and `EMSolverDKNoPol` (fully spectral 3×3 Cramer solve), plus
+  its midpoint/θ-method time-integration variants (`solve_fields_midpoint!`,
+  `solve_fields_damped_midpoint!`) and `apply_faraday!`.
 - `cold_plasma.jl` — `ColdIonFluid` for linear benchmarks without a kinetic distribution.
 
-### Backend / GPU (`src/execution.jl`, `ext/bslLDCUDAExt.jl`)
-- Default backend is `KernelAbstractions.CPU()`. Call `bslLD.use_cuda!()` after `using CUDA` to switch to GPU.
-- `bslLD.backend_array(x)` moves an array to the active backend. `bslLD.backend_copy` deep-copies any field or distribution to the current backend.
-- The CUDA extension wires up `CUDA_AVAILABLE_HOOK` and `SET_CUDA_EXECUTION_SPACE_HOOK` via weak-dependency extension loading.
+### Sources (`src/sources.jl`)
+- `KappaTContext`/`add_kappaT!` — temperature-gradient-driven source terms.
 
 ## Key Conventions
 

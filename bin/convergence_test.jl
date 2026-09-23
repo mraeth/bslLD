@@ -13,7 +13,6 @@ if isCuda
 end
 
 using bslLD
-bslLD.greet()
 
 if isCuda
     println("Setting backend to CUDA.")

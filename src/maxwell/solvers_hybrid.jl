@@ -507,30 +507,6 @@ function solve_fields_midpoint!(
     return sol
 end
 
-# Implicit midpoint field solve: derived by eliminating B^m = B^n − (dt/2)∇×E^m into
-# E_⊥^m = c∇×B^n − c(dt/2)∇×∇×E^m − J_⊥^m.
-# Produces the same 3×3 system as solve_fields_midpoint! (α = c·dt/2).
-# B is not modified; caller applies Faraday with the full dt after convergence.
-function solve_fields_implicit_midpoint!(
-    sol::FieldSolution,
-    moments::Moments,
-    grid::Grid,
-    solver::EMSolverDKNoPol,
-    dt::Real,
-)
-    moments.J !== nothing ||
-        throw(ArgumentError("moments.J is required for EMSolverDKNoPol"))
-    moments.Pi_diff !== nothing ||
-        throw(ArgumentError("moments.Pi_diff is required for EMSolverDKNoPol"))
-    copyto!(sol.Enew, sol.E)
-    ws = _get_em_dk_no_pol_workspace(sol, grid, solver)
-    _step_dk_no_pol!(
-        sol.Enew, sol.B, moments.J, moments.Pi_diff, solver,
-        dt / 2, ws; dt_faraday = zero(dt),
-    )
-    return sol
-end
-
 # θ-method field solve: α = c·θ·Δt derived from B^θ = B^n − θΔt·∇×E^θ elimination.
 # With θ = 0.5 + κΔt, retains O(Δt²) accuracy while adding O(Δt²) numerical damping.
 # B is not modified; caller applies Faraday with the full dt after convergence.

@@ -125,8 +125,7 @@ function stepMidpoint!(f_i, sol, grid, simTime, solver;
         end
     end
 
-    f_i.data .= f_a_data; simTime.fraction_dt = 0.5
-    bslLD.advectV!(f_i, grid, simTime, E_mid)
+    f_i.data .= f_a_data; simTime.fraction_dt = 1.0
     bslLD.advectV!(f_i, grid, simTime, E_mid)
 
     copyto!(sol.B, B_n)

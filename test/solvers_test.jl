@@ -393,3 +393,126 @@ end
     @test maximum(abs.(sol.Enew[1].data .- Ex_expected)) < 1e-8
     @test maximum(abs.(sol.Enew[2].data .- Ey_expected)) < 1e-8
 end
+
+@testset "solve_fields_midpoint! (EMSolverDKNoPol)" begin
+    bslLD.set_execution_space!(exec = bslLD.backend())
+    beta_i, mu, dt = 0.5, 4.0, 0.2
+    solver = bslLD.EMSolverDKNoPol(beta_i, mu)
+    Nx, Ny = 16, 14
+    grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
+
+    J1_val, J2_val = 0.3, 0.7
+    J_perp = bslLD.VectorField([
+        bslLD.ScalarField(fill(J1_val, Nx, Ny)),
+        bslLD.ScalarField(fill(J2_val, Nx, Ny)),
+        bslLD.ScalarField(zeros(Nx, Ny)),
+    ])
+    Pi_zero = bslLD.zero_vectorfield3(grid)
+    moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_zero)
+
+    E = bslLD.zero_vectorfield3(grid)
+    B = bslLD.zero_vectorfield3(grid)
+    B_before = [copy(B[d].data) for d = 1:3]
+    sol = bslLD.FieldSolution(E, B)
+
+    bslLD.solve_fields_midpoint!(sol, moments, grid, solver, dt)
+
+    # B must not be mutated by the midpoint solve — caller applies Faraday separately.
+    for d = 1:3
+        @test sol.B[d].data == B_before[d]
+    end
+
+    # Same 3x3 system as a full solve_fields! call at dt/2 (with no Faraday update).
+    sol_ref = bslLD.FieldSolution(bslLD.zero_vectorfield3(grid), bslLD.zero_vectorfield3(grid))
+    bslLD.solve_fields!(sol_ref, moments, grid, solver, dt / 2)
+
+    for d = 1:3
+        @test maximum(abs.(sol.Enew[d].data .- sol_ref.Enew[d].data)) < 1e-12
+    end
+end
+
+@testset "solve_fields_damped_midpoint! (EMSolverDKNoPol)" begin
+    bslLD.set_execution_space!(exec = bslLD.backend())
+    beta_i, mu, dt, theta = 0.5, 4.0, 0.2, 0.55
+    solver = bslLD.EMSolverDKNoPol(beta_i, mu)
+    Nx, Ny = 16, 14
+    grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
+
+    J1_val, J2_val = 0.3, 0.7
+    J_perp = bslLD.VectorField([
+        bslLD.ScalarField(fill(J1_val, Nx, Ny)),
+        bslLD.ScalarField(fill(J2_val, Nx, Ny)),
+        bslLD.ScalarField(zeros(Nx, Ny)),
+    ])
+    Pi_zero = bslLD.zero_vectorfield3(grid)
+    moments = bslLD.Moments(bslLD.empty_scalarfield(grid), J_perp, Pi_zero)
+
+    E = bslLD.zero_vectorfield3(grid)
+    B = bslLD.zero_vectorfield3(grid)
+    B_before = [copy(B[d].data) for d = 1:3]
+    sol = bslLD.FieldSolution(E, B)
+
+    bslLD.solve_fields_damped_midpoint!(sol, moments, grid, solver, dt, theta)
+
+    for d = 1:3
+        @test sol.B[d].data == B_before[d]
+    end
+
+    # Same 3x3 system as a full solve_fields! call at theta*dt (with no Faraday update).
+    sol_ref = bslLD.FieldSolution(bslLD.zero_vectorfield3(grid), bslLD.zero_vectorfield3(grid))
+    bslLD.solve_fields!(sol_ref, moments, grid, solver, theta * dt)
+
+    for d = 1:3
+        @test maximum(abs.(sol.Enew[d].data .- sol_ref.Enew[d].data)) < 1e-12
+    end
+end
+
+@testset "apply_faraday!" begin
+    bslLD.set_execution_space!(exec = bslLD.backend())
+    Nx, Ny = 32, 32
+    grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
+    x, y = grid.xaxes
+    dt = 0.3
+
+    Ez_mode = [sin(xi) for xi in x, yi in y]
+    E = bslLD.VectorField([
+        bslLD.ScalarField(zeros(Nx, Ny)),
+        bslLD.ScalarField(zeros(Nx, Ny)),
+        bslLD.ScalarField(Ez_mode),
+    ])
+    B = bslLD.zero_vectorfield3(grid)
+
+    bslLD.apply_faraday!(B, E, grid, dt)
+
+    # curl(E)_y = -∂_x E_z = -cos(x)  ⇒  B_y -= dt * curl(E)_y = dt*cos(x)
+    expected_By = [dt * cos(xi) for xi in x, yi in y]
+    @test maximum(abs.(B[1].data)) < 1e-10
+    @test maximum(abs.(B[2].data .- expected_By)) < 1e-10
+    @test maximum(abs.(B[3].data)) < 1e-10
+end
+
+@testset "predict_midpoint_current / predict_stage_current" begin
+    Nx, Ny = 8, 6
+    grid = bslLD.Grid([0.0, 0.0], [2pi, 2pi], [Nx, Ny], 2, 1.0, 3)
+    sp = bslLD.Distribution(grid, 0.0; m = 4.0, q = 2.0)
+    eas = bslLD.electric_acceleration_scale(sp)
+
+    n_a = bslLD.ScalarField(fill(1.5, Nx, Ny))
+    J_a = bslLD.VectorField([bslLD.ScalarField(fill(v, Nx, Ny)) for v in (0.1, 0.2, 0.3)])
+    E = bslLD.VectorField([bslLD.ScalarField(fill(v, Nx, Ny)) for v in (1.0, -2.0, 0.5)])
+    dt, theta = 0.4, 0.7
+
+    J_mid = bslLD.predict_midpoint_current(n_a, J_a, E, sp, grid, dt)
+    τ_mid = dt / 2
+    for d = 1:3
+        expected = J_a[d].data .+ eas .* n_a.data .* τ_mid .* E[d].data
+        @test maximum(abs.(J_mid[d].data .- expected)) < 1e-12
+    end
+
+    J_stage = bslLD.predict_stage_current(n_a, J_a, E, sp, grid, dt, theta)
+    τ_stage = theta * dt
+    for d = 1:3
+        expected = J_a[d].data .+ eas .* n_a.data .* τ_stage .* E[d].data
+        @test maximum(abs.(J_stage[d].data .- expected)) < 1e-12
+    end
+end
