@@ -26,6 +26,9 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
+      - name: Add BSLRegistry
+        run: julia -e 'using Pkg; Pkg.Registry.add("General"); Pkg.Registry.add(url="https://gitlab.mpcdf.mpg.de/bsl6d/BSLRegistry.git")'
+
       - name: Install Python dependencies
         run: pip install nbconvert jupyter
 
