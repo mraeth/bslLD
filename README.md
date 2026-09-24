@@ -14,9 +14,29 @@ This package is a testing ground for numerical methods intended for [BSL6D](http
 
 ## Installation
 
+bslLD and its PlasmaCore.jl dependency are distributed through the [BSLRegistry](https://gitlab.mpcdf.mpg.de/bsl6d/BSLRegistry)
+(neither is in Julia's General registry). Add the registry once per machine / cluster account:
+
 ```julia
-] dev /path/to/bslLD
+pkg> registry add https://gitlab.mpcdf.mpg.de/bsl6d/BSLRegistry.git
 ```
+
+then install it like any registered package:
+
+```julia
+pkg> add bslLD
+julia> using bslLD
+```
+
+Alternatively, type `using bslLD` directly in the REPL: if the package isn't installed in the
+active environment yet, Julia offers to install it.
+
+Pick up new releases with `pkg> registry up` followed by `pkg> up`.
+
+**Development:** clone this repository and run `julia --project=.` in it (`pkg> instantiate` on first
+use), or `pkg> dev /path/to/bslLD` into another environment. To test against a local PlasmaCore.jl
+checkout, `pkg> dev /path/to/PlasmaCore.jl` in the bslLD environment; this only changes the
+(gitignored) `Manifest.toml`, and `pkg> free PlasmaCore` returns to the registered release.
 
 To enable GPU execution, load CUDA before using the package:
 
