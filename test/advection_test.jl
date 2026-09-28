@@ -145,3 +145,49 @@ end
         @test maximum(abs.(f_v.data .- expected_v)) < 1e-10
     end
 end
+
+@testset "Cartesian Lagrange advection" begin
+    grid = cartesian_grid(1, 1)
+    simTime = bslLD.SimulationTime(0.5, 0.5)     # shift up to ~0.95 cells
+    initial = advection_seed_data(grid)
+    expected_x = expected_after_advect_x(grid, simTime)
+
+    errs = map((4, 8, 16)) do W
+        f = bslLD.Distribution(grid, 0.01)
+        f.data .= initial
+        mass0 = sum(f.data)
+        bslLD.advectX!(f, grid, simTime; method = bslLD.Lagrange(W))
+
+        @test all(isfinite, f.data)
+        # constant shift per line + periodic wrap + sum(w) == 1  =>  mass is exact
+        @test abs(sum(f.data) - mass0) < 1e-12 * max(abs(mass0), 1.0)
+        maximum(abs, f.data .- expected_x)
+    end
+
+    @test errs[2] < errs[1]                      # higher order, smaller error
+    @test errs[3] <= errs[2]
+    @test errs[2] < 1e-3
+
+    e_field = constant_electric_field(grid)
+    expected_v = expected_after_advect_v(grid, simTime, e_field)
+    f_v = bslLD.Distribution(grid, 0.01)
+    f_v.data .= initial
+    mass_v = sum(f_v.data)
+    bslLD.advectV!(f_v, grid, simTime, e_field; method = bslLD.Lagrange(8))
+
+    @test maximum(abs, f_v.data .- expected_v) < 1e-3
+    @test abs(sum(f_v.data) - mass_v) < 1e-12 * max(abs(mass_v), 1.0)
+
+    # Fourier stays the default and is bit-for-bit unchanged by the refactor
+    f_default = bslLD.Distribution(grid, 0.01)
+    f_default.data .= initial
+    f_fourier = bslLD.Distribution(grid, 0.01)
+    f_fourier.data .= initial
+    bslLD.advectX!(f_default, grid, simTime)
+    bslLD.advectX!(f_fourier, grid, simTime; method = bslLD.Fourier())
+
+    @test f_default.data == f_fourier.data
+    @test maximum(abs, f_default.data .- expected_x) < 1e-10
+
+    @test bslLD.Lagrange(8) === bslLD.Lagrange{8}()
+end

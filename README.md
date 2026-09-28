@@ -8,7 +8,8 @@ This package is a testing ground for numerical methods intended for [BSL6D](http
 
 - **Grid systems**: Cartesian and polar coordinate support
 - **Distribution functions**: 1D1v, 1D2v, and 2D2v phase-space configurations
-- **Advection**: Fourier-based and spline (Dierckx) interpolation, threaded over velocity slices
+- **Advection**: Fourier (default) or arbitrary-order Lagrange interpolation, selected per call via `method = Lagrange(W)`; polar advection uses splines (Dierckx)
+- **Interpolation primitives**: arbitrary even-order Lagrange stencils (`lagrange_weights`, `lagrange_gather`), allocation-free and usable inside KernelAbstractions kernels
 - **Field solvers**: electrostatic (Poisson), Darwin/hybrid-kinetic (DK), and vacuum Maxwell — see [Field Solvers](#field-solvers) below
 - **Optional GPU acceleration**: KernelAbstractions-based kernels, switchable at runtime via a CUDA weak dependency
 
@@ -65,6 +66,21 @@ while bslLD.continue_advection(simTime, true)
     bslLD.advance!(simTime)
 end
 ```
+
+### Interpolation method
+
+`advectX!`/`advectV!` take a `method` keyword. The default `Fourier()` is spectrally exact but
+imposes periodicity; `Lagrange(W)` performs the shift with a centred Lagrange stencil of even
+width `W`, which is a dispatch parameter (each `W` compiles its own unrolled kernel):
+
+```julia
+bslLD.advectX!(f, grid, simTime; method = bslLD.Lagrange(24))
+bslLD.advectV!(f, grid, simTime, sol.E; method = bslLD.Lagrange(24))
+```
+
+Both directions are currently treated as periodic. Wider stencils hold the spectrum flat out to
+larger `k`: over 200 steps the amplitude retained at `kh = 0.5π` is 0.03 for `W = 8`, 0.85 for
+`W = 16` and 0.99 for `W = 24`. See `examples/interpolation_spectra.jl`.
 
 ## Field Solvers
 
@@ -151,6 +167,7 @@ bslLD/
 │   │   └── fields.jl                  # ScalarField, VectorField, MatrixField
 │   ├── kinetics/
 │   │   ├── distribution.jl            # DistributionGrid, compute_density/current/Pi
+│   │   ├── interpolation.jl           # arbitrary-order Lagrange weights/gather (uniform grid)
 │   │   ├── advectorCart.jl            # BSL advection (Cartesian, KernelAbstractions)
 │   │   └── advectorPolar.jl           # BSL advection (polar coordinates)
 │   ├── maxwell/

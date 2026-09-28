@@ -32,6 +32,7 @@ struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST}
     dir::Int
     phi::PT
     dt::PT
+    delta::PT
     vth::VTT
     electric_scale::EST
 end
@@ -45,6 +46,7 @@ struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
     dir::Int
     phi::PT
     dt::PT
+    delta::PT
     electric_scale::EST
 end
 
@@ -59,34 +61,40 @@ end
     return compute_v_multiplier(ctx, index)
 end
 
-@inline function compute_x_multiplier(ctx::XShiftContext, index::Int)
-    ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
-
+# Departure-point characteristics, shared by the Fourier and Lagrange paths.
+@inline function _x_displacement(ctx::XShiftContext, ivs)
     xdisp = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, -ctx.electric_scale*ctx.phi)
     for dv = 1:length(ivs)
         xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
     end
-
-    return cis(-ctx.dt * ctx.k[ixs[ctx.dir]] * ctx.vth * xdisp)
+    return xdisp
 end
 
-@inline function compute_v_multiplier(ctx::VShiftContext, index::Int)
+@inline function compute_x_multiplier(ctx::XShiftContext, index::Int)
     ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
+    return cis(-ctx.dt * ctx.k[ixs[ctx.dir]] * ctx.vth * _x_displacement(ctx, ivs))
+end
 
+@inline function _v_displacement(ctx::VShiftContext, ixs)
     delta_v = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, ctx.electric_scale*ctx.phi)
     for field_dir = 1:length(ctx.e_components)
         delta_v += ctx.e_components[field_dir][ixs...] * rotation[ctx.dir, field_dir]
     end
+    return delta_v
+end
 
-    return cis(-ctx.dt * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * delta_v)
+@inline function compute_v_multiplier(ctx::VShiftContext, index::Int)
+    ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
+    return cis(-ctx.dt * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * _v_displacement(ctx, ixs))
 end
 
 # --- AdvectionPlan: pre-allocated buffers and cached data for zero-allocation advection ---
 
-struct AdvectionPlan{FB,PXF,PXI,PVF,PVI,KXT,KVT,VAT,BK}
+struct AdvectionPlan{FB,RB,PXF,PXI,PVF,PVI,KXT,KVT,VAT,BK}
     ff_buf::FB   # Complex{Float64} work buffer, same shape as f.data
+    rbuf::RB  # real work buffer for out-of-place gathers (Lagrange path)
     fwd_x::PXF  # ntuple of in-place forward FFT plans, one per x-dim
     inv_x::PXI  # ntuple of in-place inverse FFT plans, one per x-dim
     fwd_v::PVF  # ntuple of in-place forward FFT plans, one per v-dim
@@ -102,6 +110,7 @@ function AdvectionPlan(
     grid::CartGrid,
 ) where {DT,NX,NV,NXNV}
     ff_buf = similar(f.data, Complex{DT})
+    rbuf = similar(f.data)
     fwd_x = ntuple(d -> plan_fft!(ff_buf, d), Val(NX))
     inv_x = ntuple(d -> plan_ifft!(ff_buf, d), Val(NX))
     fwd_v = ntuple(d -> plan_fft!(ff_buf, NX + d), Val(NV))
@@ -119,7 +128,8 @@ function AdvectionPlan(
         k
     end
     vaxes = map(backend_vector, grid.vaxes)
-    return AdvectionPlan(ff_buf, fwd_x, inv_x, fwd_v, inv_v, kx, kv, vaxes, bslLD.backend())
+    return AdvectionPlan(
+        ff_buf, rbuf, fwd_x, inv_x, fwd_v, inv_v, kx, kv, vaxes, bslLD.backend())
 end
 
 const _plan_cache = IdDict{Any,Dict{Any,AdvectionPlan}}()
@@ -147,21 +157,71 @@ function _apply_phase_shift!(f, ff_buf, fwd_plan, inv_plan, kernel!, ctx, exec)
     return nothing
 end
 
-function _advect_x_dir!(
-    sp::Species,
-    grid::CartGrid,
-    simTime::SimulationTime,
-    dir::Int,
-    plan::AdvectionPlan,
-)
-    f = sp.dist
-    DT = eltype(f.data)
-    NX = length(grid.xaxes)
-    1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
-    exec = plan.backend
-    kernel! = spectral_multiply_kernel!(exec)
+# --- Interpolation methods ------------------------------------------------
+
+"""
+    Fourier()
+
+Spectral shift. Exact for periodic data (`|g| == 1` at every wavenumber), and
+the default for every direction.
+"""
+struct Fourier end
+
+"""
+    Lagrange(W)  ==  Lagrange{W}()
+
+Backward-semi-Lagrangian shift by centred Lagrange interpolation of even
+stencil width `W`. The width is a dispatch parameter, so each `W` compiles to
+its own fully unrolled kernel. All directions are treated as periodic.
+"""
+struct Lagrange{W} end
+Lagrange(W::Integer) = Lagrange{Int(W)}()
+@inline stencil_order(::Lagrange{W}) where {W} = Val(W)
+
+# Departure-point displacement in cells along the advected axis. It is constant
+# along that axis -- it depends only on the *other* indices -- so every thread
+# on a line recomputes the same weights. Hoisting them into a per-line setup
+# kernel is the obvious next optimisation, and also removes the Float64
+# accumulation inside `lagrange_weights` from the per-point path.
+@inline _shift_cells(ctx::XShiftContext, ixs, ivs) =
+    ctx.dt * ctx.vth * _x_displacement(ctx, ivs) / ctx.delta
+@inline _shift_cells(ctx::VShiftContext, ixs, ivs) =
+    ctx.dt * ctx.electric_scale * _v_displacement(ctx, ixs) / ctx.delta
+
+@inline _line_length(ctx::XShiftContext) = ctx.sizes_x[ctx.dir]
+@inline _line_length(ctx::VShiftContext) = ctx.sizes_v[ctx.dir]
+
+@inline _line_index(ctx::XShiftContext, ixs, ivs) = ixs[ctx.dir]
+@inline _line_index(ctx::VShiftContext, ixs, ivs) = ivs[ctx.dir]
+
+@inline _line_linear_index(ctx::XShiftContext, ixs, ivs, i) =
+    index_combined_to_1d(Base.setindex(ixs, i, ctx.dir), ivs, ctx.sizes_x, ctx.sizes_v)
+@inline _line_linear_index(ctx::VShiftContext, ixs, ivs, i) =
+    index_combined_to_1d(ixs, Base.setindex(ivs, i, ctx.dir), ctx.sizes_x, ctx.sizes_v)
+
+@kernel function lagrange_shift_kernel!(dst, @Const(src), ctx, order::Val)
+    I = @index(Global, Linear)
+    ixs, ivs = index_1d_to_combined(I, ctx.sizes_x, ctx.sizes_v)
+
+    cells, alpha = shift_split(_shift_cells(ctx, ixs, ivs))
+    w = lagrange_weights(order, alpha, eltype(dst))
+
+    n = _line_length(ctx)
+    base = _line_index(ctx, ixs, ivs) - cells - length(w) ÷ 2 - 1
+
+    acc = zero(eltype(dst))
+    @inbounds for m = 1:length(w)
+        acc += w[m] * src[_line_linear_index(ctx, ixs, ivs, mod1(base + m, n))]
+    end
+    @inbounds dst[I] = acc
+end
+
+# --- Direction drivers ----------------------------------------------------
+
+function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, plan)
+    DT = eltype(sp.dist.data)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
-    ctx = XShiftContext(
+    return XShiftContext(
         grid,
         plan.kx[dir],
         plan.vaxes,
@@ -170,17 +230,77 @@ function _advect_x_dir!(
         dir,
         DT(simTime.phase),
         DT(_effective_dt(simTime)),
+        DT(grid.delta[dir]),
         DT(thermal_velocity(sp)),
         DT(electric_acceleration_scale(sp)),
     )
+end
+
+function _v_context(
+    sp::Species,
+    grid::CartGrid,
+    simTime::SimulationTime,
+    e::VectorField,
+    dir,
+    plan,
+)
+    DT = eltype(sp.dist.data)
+    NX = length(grid.xaxes)
+    sizes_x, sizes_v = _cartesian_axis_sizes(grid)
+    return VShiftContext(
+        grid,
+        ntuple(i -> e[i].data, Val(length(grid.vaxes))),
+        plan.kv[dir],
+        sizes_x,
+        sizes_v,
+        dir,
+        DT(simTime.phase),
+        DT(_effective_dt(simTime)),
+        DT(grid.delta[NX+dir]),
+        DT(electric_acceleration_scale(sp)),
+    )
+end
+
+function _advect_dir!(f, ctx, plan, ::Fourier, fwd_plan, inv_plan)
+    exec = plan.backend
     _apply_phase_shift!(
         f,
         plan.ff_buf,
-        plan.fwd_x[dir],
-        plan.inv_x[dir],
-        kernel!,
+        fwd_plan,
+        inv_plan,
+        spectral_multiply_kernel!(exec),
         ctx,
         exec,
+    )
+    return nothing
+end
+
+function _advect_dir!(f, ctx, plan, method::Lagrange, _fwd_plan, _inv_plan)
+    exec = plan.backend
+    k! = lagrange_shift_kernel!(exec)
+    k!(plan.rbuf, f.data, ctx, stencil_order(method); ndrange = length(f.data))
+    KernelAbstractions.synchronize(exec)
+    copyto!(f.data, plan.rbuf)
+    return nothing
+end
+
+function _advect_x_dir!(
+    sp::Species,
+    grid::CartGrid,
+    simTime::SimulationTime,
+    dir::Int,
+    plan::AdvectionPlan,
+    method,
+)
+    NX = length(grid.xaxes)
+    1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
+    _advect_dir!(
+        sp.dist,
+        _x_context(sp, grid, simTime, dir, plan),
+        plan,
+        method,
+        plan.fwd_x[dir],
+        plan.inv_x[dir],
     )
     return nothing
 end
@@ -192,53 +312,53 @@ function _advect_v_dir!(
     e::VectorField,
     dir::Int,
     plan::AdvectionPlan,
+    method,
 )
-    f = sp.dist
-    DT = eltype(f.data)
     NV = length(grid.vaxes)
     1 <= dir <= NV || throw(ArgumentError("advectV! direction $dir out of 1:$NV"))
-    exec = plan.backend
-    kernel! = spectral_multiply_kernel!(exec)
-    sizes_x, sizes_v = _cartesian_axis_sizes(grid)
-    e_components = ntuple(i -> e[i].data, Val(length(grid.vaxes)))
-    ctx = VShiftContext(
-        grid,
-        e_components,
-        plan.kv[dir],
-        sizes_x,
-        sizes_v,
-        dir,
-        DT(simTime.phase),
-        DT(_effective_dt(simTime)),
-        DT(electric_acceleration_scale(sp)),
-    )
-    _apply_phase_shift!(
-        f,
-        plan.ff_buf,
+    _advect_dir!(
+        sp.dist,
+        _v_context(sp, grid, simTime, e, dir, plan),
+        plan,
+        method,
         plan.fwd_v[dir],
         plan.inv_v[dir],
-        kernel!,
-        ctx,
-        exec,
     )
     return nothing
 end
 
-function advectX!(sp::Species, grid::CartGrid, simTime::SimulationTime)
+function advectX!(
+    sp::Species,
+    grid::CartGrid,
+    simTime::SimulationTime;
+    method = Fourier(),
+)
     plan = _get_plan(sp.dist, grid)
     for dir = 1:length(grid.xaxes)
-        _advect_x_dir!(sp, grid, simTime, dir, plan)
+        _advect_x_dir!(sp, grid, simTime, dir, plan, method)
     end
 end
 
-function advectX!(sp::Species, grid::CartGrid, simTime::SimulationTime, dir::Int)
-    _advect_x_dir!(sp, grid, simTime, dir, _get_plan(sp.dist, grid))
+function advectX!(
+    sp::Species,
+    grid::CartGrid,
+    simTime::SimulationTime,
+    dir::Int;
+    method = Fourier(),
+)
+    _advect_x_dir!(sp, grid, simTime, dir, _get_plan(sp.dist, grid), method)
 end
 
-function advectV!(sp::Species, grid::CartGrid, simTime::SimulationTime, e::VectorField)
+function advectV!(
+    sp::Species,
+    grid::CartGrid,
+    simTime::SimulationTime,
+    e::VectorField;
+    method = Fourier(),
+)
     plan = _get_plan(sp.dist, grid)
     for dir = 1:length(grid.vaxes)
-        _advect_v_dir!(sp, grid, simTime, e, dir, plan)
+        _advect_v_dir!(sp, grid, simTime, e, dir, plan, method)
     end
 end
 
@@ -247,7 +367,8 @@ function advectV!(
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
-    dir::Int,
+    dir::Int;
+    method = Fourier(),
 )
-    _advect_v_dir!(sp, grid, simTime, e, dir, _get_plan(sp.dist, grid))
+    _advect_v_dir!(sp, grid, simTime, e, dir, _get_plan(sp.dist, grid), method)
 end

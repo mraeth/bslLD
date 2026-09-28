@@ -108,6 +108,7 @@ using PlasmaCore:
     backend_copy,
     backend_synchronize!
 
+include("kinetics/interpolation.jl")
 include("kinetics/species.jl")
 include("kinetics/advectorCart.jl")
 include("kinetics/advectorPolar.jl")
