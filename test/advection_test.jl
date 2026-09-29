@@ -191,3 +191,81 @@ end
 
     @test bslLD.Lagrange(8) === bslLD.Lagrange{8}()
 end
+
+@testset "Mirror boundary conditions" begin
+    nx, nvx = 16, 6
+    grid = bslLD.Grid([0.0, -1.5, -1.5], [2pi, 1.5, 1.5], [nx, nvx, nvx], 1)
+    simTime = bslLD.SimulationTime(0.3, 0.3)
+    nv1, nv2 = length.(grid.vaxes)          # v axes include both endpoints
+    lag, mirror = bslLD.Lagrange(8), bslLD.Mirror()
+
+    function seed(fun)
+        f = bslLD.Distribution(grid, 0.01)
+        for ix = 1:nx, j1 = 1:nv1, j2 = 1:nv2
+            f.data[ix, j1, j2] =
+                fun(grid.xaxes[1][ix], grid.vaxes[1][j1], grid.vaxes[2][j2])
+        end
+        return f
+    end
+    # mass of a node-centred reflecting domain: half weight on the mirror nodes
+    trapz(d) = sum(d) - (sum(@view d[1, :, :]) + sum(@view d[end, :, :])) / 2
+
+    @testset "reflection with velocity flip is exact" begin
+        # uniform in x and even in both velocity components: every stencil, halo
+        # included, sees the same value, so the mirror must be a no-op
+        f = seed((x, v1, v2) -> exp(-(v1^2 + v2^2) / 2))
+        before = copy(f.data)
+        bslLD.advectX!(f, grid, simTime; method = lag, boundary = mirror)
+        @test maximum(abs, f.data .- before) < 1e-15
+    end
+
+    @testset "mirror acts only near the wall" begin
+        # odd in v2: the reflected halo carries the opposite sign, so the wall
+        # region changes while the interior stays a plain periodic-free shift
+        f = seed((x, v1, v2) -> v2 * exp(-(v1^2 + v2^2) / 2))
+        before = copy(f.data)
+        bslLD.advectX!(f, grid, simTime; method = lag, boundary = mirror)
+        delta = abs.(f.data .- before)
+        @test maximum(delta) > 0.1                      # the wall reacts
+        @test maximum(delta[7:10, :, :]) < 1e-15        # the interior does not
+    end
+
+    @testset "mass is conserved in the reflecting-domain norm" begin
+        f = seed((x, v1, v2) -> (1 + 0.3sin(x)) * exp(-(v1^2 + v2^2) / 2) * (1 + 0.2v1))
+        m_plain, m_trapz = sum(f.data), trapz(f.data)
+        for _ = 1:20
+            bslLD.advectX!(f, grid, simTime; method = lag, boundary = mirror)
+        end
+        @test abs(trapz(f.data) - m_trapz) < 1e-13 * abs(m_trapz)
+        # the plain sum over-weights the two mirror nodes and drifts at O(h^2)
+        @test abs(sum(f.data) - m_plain) > 1e-6 * abs(m_plain)
+    end
+
+    @testset "boundary nodes are symmetrised" begin
+        f = seed((x, v1, v2) -> (1 + 0.3sin(x)) * exp(-(v1^2 + v2^2) / 2) * (1 + 0.2v1))
+        before = copy(f.data)
+        still = bslLD.SimulationTime(1.0, 1.0)          # no shift: symmetrise only
+        still.dt = 0.0                                  # (dt = 0 up front divides by zero)
+        bslLD.advectX!(f, grid, still; method = lag, boundary = mirror)
+        for i in (1, nx), j1 = 1:nv1, j2 = 1:nv2
+            @test f.data[i, j1, j2] ≈
+                  (before[i, j1, j2] + before[i, nv1+1-j1, nv2+1-j2]) / 2
+        end
+        @test f.data[2:end-1, :, :] ≈ before[2:end-1, :, :]
+    end
+
+    @testset "rejected combinations" begin
+        f = seed((x, v1, v2) -> 1.0)
+        e_field = bslLD.VectorField([fill(0.1, nx) for _ = 1:2])
+        @test_throws ArgumentError bslLD.advectX!(
+            f, grid, simTime; method = bslLD.Fourier(), boundary = mirror)
+        @test_throws ArgumentError bslLD.advectV!(
+            f, grid, simTime, e_field; method = lag, boundary = mirror)
+
+        # a velocity axis that is not symmetric about zero cannot pair v with -v
+        skew = bslLD.Grid([0.0, -1.0, -1.5], [2pi, 2.0, 1.5], [nx, nvx, nvx], 1)
+        g = bslLD.Distribution(skew, 0.01)
+        @test_throws ArgumentError bslLD.advectX!(
+            g, skew, simTime; method = lag, boundary = mirror)
+    end
+end

@@ -23,7 +23,7 @@ backend_vector(values) = bslLD.backend_array(collect(values))
 @inline _cartesian_axis_sizes(grid::CartGrid) =
     (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
 
-struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST}
+struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT}
     grid::GT
     k::KT
     vaxes::VAT
@@ -35,6 +35,7 @@ struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST}
     delta::PT
     vth::VTT
     electric_scale::EST
+    vflip::FT  # which velocity components a mirror on this axis reverses
 end
 
 struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
@@ -199,7 +200,81 @@ Lagrange(W::Integer) = Lagrange{Int(W)}()
 @inline _line_linear_index(ctx::VShiftContext, ixs, ivs, i) =
     index_combined_to_1d(ixs, Base.setindex(ivs, i, ctx.dir), ctx.sizes_x, ctx.sizes_v)
 
-@kernel function lagrange_shift_kernel!(dst, @Const(src), ctx, order::Val)
+# --- Boundary conditions --------------------------------------------------
+
+"""
+    Periodic()
+
+Wrap the stencil around the advected axis. The default, and the only condition
+the spectral path can represent.
+"""
+struct Periodic end
+
+"""
+    Mirror()
+
+Specular reflection at the two end nodes of a *spatial* axis, following bsl6d
+(`105-implement-mirror-boundary-conditions`): the halo is filled by reflecting
+the interior about the boundary node while reversing the velocity components
+that the reflection flips, and the boundary node itself is symmetrised so that
+`f(x_b, v) == f(x_b, R v)`.
+
+With `B` along `grid.Bdir`, a mirror on an axis perpendicular to `B` reverses
+both gyration-plane velocities; a mirror along `B` reverses the field-aligned
+one. Requires a velocity axis symmetric about zero (`v[end+1-j] == -v[j]`),
+which is checked when the advection is set up.
+
+The mirror planes sit at the first and last grid node, `x[1]` and `x[end]`.
+bslLD's Cartesian x-axis excludes its upper endpoint, so the reflected domain
+spans `(n-1)*delta`, one cell short of `L`; construct the axis accordingly.
+"""
+struct Mirror end
+
+# Velocity components reversed by a mirror on spatial axis `dir`.
+@inline _mirror_flip(Bdir::Int, dir::Int, ::Val{NV}) where {NV} =
+    ntuple(d -> dir == Bdir ? d == Bdir : d != Bdir, Val(NV))
+
+@inline function _flip_v(ctx, ivs::NTuple{NV,Int}) where {NV}
+    return ntuple(d -> ctx.vflip[d] ? ctx.sizes_v[d] + 1 - ivs[d] : ivs[d], Val(NV))
+end
+
+# Linear index of the stencil node `i` along the advected axis, under `bc`.
+@inline _sample_index(::Periodic, ctx, ixs, ivs, i, n) =
+    _line_linear_index(ctx, ixs, ivs, mod1(i, n))
+
+@inline function _sample_index(::Mirror, ctx::XShiftContext, ixs, ivs, i, n)
+    if i < 1
+        j = min(2 - i, n)                       # reflect about node 1
+        return index_combined_to_1d(
+            Base.setindex(ixs, j, ctx.dir), _flip_v(ctx, ivs), ctx.sizes_x, ctx.sizes_v)
+    elseif i > n
+        j = max(2n - i, 1)                      # reflect about node n
+        return index_combined_to_1d(
+            Base.setindex(ixs, j, ctx.dir), _flip_v(ctx, ivs), ctx.sizes_x, ctx.sizes_v)
+    else
+        return _line_linear_index(ctx, ixs, ivs, i)
+    end
+end
+
+# f(x_b, v) <- (f(x_b, v) + f(x_b, R v)) / 2 on the two boundary nodes. Each
+# velocity pair is handled once, by the thread holding its lower linear index,
+# so the in-place update needs no scratch buffer.
+@kernel function mirror_symmetrize_kernel!(fdata, ctx)
+    I = @index(Global, Linear)
+    ixs, ivs = index_1d_to_combined(I, ctx.sizes_x, ctx.sizes_v)
+    n = _line_length(ctx)
+    i = ixs[ctx.dir]
+    if i == 1 || i == n
+        J = index_combined_to_1d(ixs, _flip_v(ctx, ivs), ctx.sizes_x, ctx.sizes_v)
+        if I <= J
+            @inbounds mean = (fdata[I] + fdata[J]) / 2
+            @inbounds fdata[I] = mean
+            @inbounds fdata[J] = mean
+        end
+    end
+end
+
+@kernel function lagrange_shift_kernel!(dst, @Const(src), ctx, order::Val, bc)
     I = @index(Global, Linear)
     ixs, ivs = index_1d_to_combined(I, ctx.sizes_x, ctx.sizes_v)
 
@@ -211,7 +286,7 @@ Lagrange(W::Integer) = Lagrange{Int(W)}()
 
     acc = zero(eltype(dst))
     @inbounds for m = 1:length(w)
-        acc += w[m] * src[_line_linear_index(ctx, ixs, ivs, mod1(base + m, n))]
+        acc += w[m] * src[_sample_index(bc, ctx, ixs, ivs, base + m, n)]
     end
     @inbounds dst[I] = acc
 end
@@ -221,6 +296,7 @@ end
 function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, plan)
     DT = eltype(sp.dist.data)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
+    NV = length(grid.vaxes)
     return XShiftContext(
         grid,
         plan.kx[dir],
@@ -233,6 +309,7 @@ function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, p
         DT(grid.delta[dir]),
         DT(thermal_velocity(sp)),
         DT(electric_acceleration_scale(sp)),
+        _mirror_flip(grid.Bdir, dir, Val(NV)),
     )
 end
 
@@ -261,7 +338,7 @@ function _v_context(
     )
 end
 
-function _advect_dir!(f, ctx, plan, ::Fourier, fwd_plan, inv_plan)
+function _advect_dir!(f, ctx, plan, ::Fourier, ::Periodic, fwd_plan, inv_plan)
     exec = plan.backend
     _apply_phase_shift!(
         f,
@@ -275,12 +352,35 @@ function _advect_dir!(f, ctx, plan, ::Fourier, fwd_plan, inv_plan)
     return nothing
 end
 
-function _advect_dir!(f, ctx, plan, method::Lagrange, _fwd_plan, _inv_plan)
+function _advect_dir!(f, ctx, plan, method::Lagrange, bc, _fwd_plan, _inv_plan)
     exec = plan.backend
+    if bc isa Mirror
+        sym! = mirror_symmetrize_kernel!(exec)
+        sym!(f.data, ctx; ndrange = length(f.data))
+        KernelAbstractions.synchronize(exec)
+    end
     k! = lagrange_shift_kernel!(exec)
-    k!(plan.rbuf, f.data, ctx, stencil_order(method); ndrange = length(f.data))
+    k!(plan.rbuf, f.data, ctx, stencil_order(method), bc; ndrange = length(f.data))
     KernelAbstractions.synchronize(exec)
     copyto!(f.data, plan.rbuf)
+    return nothing
+end
+
+_advect_dir!(f, ctx, plan, ::Fourier, bc, fwd, inv) = throw(
+    ArgumentError("$(typeof(bc)) boundaries need a Lagrange method; Fourier is periodic"))
+
+# A mirror pairs v with -v by index, which is only the physical reflection when
+# the velocity axis is symmetric about zero.
+function _check_mirror_axes(grid::CartGrid, dir::Int, ::Val{W}) where {W}
+    n = length(grid.xaxes[dir])
+    W ÷ 2 < n || throw(ArgumentError(
+        "Lagrange half-stencil $(W ÷ 2) does not fit in axis $dir of length $n"))
+    for (d, ax) in enumerate(grid.vaxes)
+        isapprox(first(ax) + last(ax), 0, atol = 1e-12 * max(abs(first(ax)), 1)) ||
+            throw(ArgumentError(
+                "mirror boundaries need velocity axis $d symmetric about zero, " *
+                "got [$(first(ax)), $(last(ax))]"))
+    end
     return nothing
 end
 
@@ -291,14 +391,19 @@ function _advect_x_dir!(
     dir::Int,
     plan::AdvectionPlan,
     method,
+    bc,
 )
     NX = length(grid.xaxes)
     1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
+    bc isa Mirror &&
+        method isa Lagrange &&
+        _check_mirror_axes(grid, dir, stencil_order(method))
     _advect_dir!(
         sp.dist,
         _x_context(sp, grid, simTime, dir, plan),
         plan,
         method,
+        bc,
         plan.fwd_x[dir],
         plan.inv_x[dir],
     )
@@ -313,14 +418,18 @@ function _advect_v_dir!(
     dir::Int,
     plan::AdvectionPlan,
     method,
+    bc,
 )
     NV = length(grid.vaxes)
     1 <= dir <= NV || throw(ArgumentError("advectV! direction $dir out of 1:$NV"))
+    bc isa Periodic || throw(ArgumentError(
+        "mirror boundaries apply to spatial axes only, as in bsl6d"))
     _advect_dir!(
         sp.dist,
         _v_context(sp, grid, simTime, e, dir, plan),
         plan,
         method,
+        bc,
         plan.fwd_v[dir],
         plan.inv_v[dir],
     )
@@ -332,10 +441,11 @@ function advectX!(
     grid::CartGrid,
     simTime::SimulationTime;
     method = Fourier(),
+    boundary = Periodic(),
 )
     plan = _get_plan(sp.dist, grid)
     for dir = 1:length(grid.xaxes)
-        _advect_x_dir!(sp, grid, simTime, dir, plan, method)
+        _advect_x_dir!(sp, grid, simTime, dir, plan, method, boundary)
     end
 end
 
@@ -345,8 +455,9 @@ function advectX!(
     simTime::SimulationTime,
     dir::Int;
     method = Fourier(),
+    boundary = Periodic(),
 )
-    _advect_x_dir!(sp, grid, simTime, dir, _get_plan(sp.dist, grid), method)
+    _advect_x_dir!(sp, grid, simTime, dir, _get_plan(sp.dist, grid), method, boundary)
 end
 
 function advectV!(
@@ -355,10 +466,11 @@ function advectV!(
     simTime::SimulationTime,
     e::VectorField;
     method = Fourier(),
+    boundary = Periodic(),
 )
     plan = _get_plan(sp.dist, grid)
     for dir = 1:length(grid.vaxes)
-        _advect_v_dir!(sp, grid, simTime, e, dir, plan, method)
+        _advect_v_dir!(sp, grid, simTime, e, dir, plan, method, boundary)
     end
 end
 
@@ -369,6 +481,7 @@ function advectV!(
     e::VectorField,
     dir::Int;
     method = Fourier(),
+    boundary = Periodic(),
 )
-    _advect_v_dir!(sp, grid, simTime, e, dir, _get_plan(sp.dist, grid), method)
+    _advect_v_dir!(sp, grid, simTime, e, dir, _get_plan(sp.dist, grid), method, boundary)
 end

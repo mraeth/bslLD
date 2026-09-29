@@ -78,9 +78,31 @@ bslLD.advectX!(f, grid, simTime; method = bslLD.Lagrange(24))
 bslLD.advectV!(f, grid, simTime, sol.E; method = bslLD.Lagrange(24))
 ```
 
-Both directions are currently treated as periodic. Wider stencils hold the spectrum flat out to
-larger `k`: over 200 steps the amplitude retained at `kh = 0.5π` is 0.03 for `W = 8`, 0.85 for
-`W = 16` and 0.99 for `W = 24`. See `examples/interpolation_spectra.jl`.
+Wider stencils hold the spectrum flat out to larger `k`: over 200 steps the amplitude retained at
+`kh = 0.5π` is 0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24`. See
+`examples/interpolation_spectra.jl`.
+
+### Boundary conditions
+
+`advectX!` also takes `boundary`, either `Periodic()` (default) or `Mirror()`, the specular wall
+ported from bsl6d's `105-implement-mirror-boundary-conditions`:
+
+```julia
+bslLD.advectX!(f, grid, simTime, 1; method = bslLD.Lagrange(8), boundary = bslLD.Mirror())
+```
+
+The halo is filled by reflecting the interior about the first and last grid node while reversing
+the velocity components the reflection flips — with `B` along `grid.Bdir`, a mirror perpendicular
+to `B` reverses both gyration-plane velocities, a mirror along `B` the field-aligned one — and the
+boundary nodes are symmetrised so `f(x_b, v) == f(x_b, R v)`. Mass is then conserved to roundoff in
+the reflecting-domain norm (half weight on the two mirror nodes); the plain sum over grid points
+drifts at `O(Δx²)` because it over-weights them.
+
+`Mirror()` requires a `Lagrange` method (the spectral path is periodic by construction), applies to
+spatial axes only, and needs velocity axes symmetric about zero — all three are checked. Note that
+the mirror planes sit at `x[1]` and `x[end]`, and bslLD's Cartesian x-axis excludes its upper
+endpoint, so the reflected domain spans `(n-1)·Δx` rather than `L`. The field solvers remain
+spectral and therefore still assume periodicity in `x`.
 
 ## Field Solvers
 
