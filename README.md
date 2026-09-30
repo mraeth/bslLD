@@ -127,16 +127,10 @@ sub-sweeps, where `max_wall_shift = 1.0` cell by default and the maximum is take
 rotated velocity box. Periodic axes are never sub-cycled. Pass `max_wall_shift = Inf` for the
 old single-sweep behaviour.
 
-**`Specular()`.** On an axis perpendicular to `B`, `Mirror()` reverses both gyration-plane
-components (u → −u). That is invariant under the rotating grid, but it is not the physical
-reflection. `Specular()` reflects `v_x → −v_x`. On the rotating grid that is `u' = R(2φ) F u`,
-with `F` the u_x index flip and the rotation done as three shears on the halo planes only. It uses
-the same node fold and wall-node symmetrisation. Along `B` it is identical to `Mirror()`. Mass in
-the reflecting-domain norm is conserved to the velocity-interpolation error of the rotated halo,
-not to roundoff. With sub-cycling, both walls are stable, and in the tests so far (passive wall
-layer, κ = 0 stability) they give the same result, so `Mirror()` remains the cheaper default.
-`AdiabaticSolver((Mirror(),))` or `AdiabaticSolver((Specular(),))` provides the matching
-even-extension field.
+On an axis perpendicular to `B`, `Mirror()` reverses both gyration-plane components (u → −u),
+which is invariant under the rotating grid. A physically specular variant (v_x → −v_x, i.e.
+u' = R(2φ)·F·u with a rotated halo) was tried and dropped: with sub-cycling it showed no
+advantage. `AdiabaticSolver((Mirror(),))` provides the matching even-extension field.
 
 ### Magnetic geometry
 

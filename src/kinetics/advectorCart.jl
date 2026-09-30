@@ -237,7 +237,7 @@ struct Periodic end
 """
     Mirror()
 
-Specular reflection at the two end nodes of a *spatial* axis, following bsl6d
+Reflecting wall at the two end nodes of a *spatial* axis, following bsl6d
 (`105-implement-mirror-boundary-conditions`): the halo is filled by reflecting
 the interior about the boundary node while reversing the velocity components
 that the reflection flips, and the boundary node itself is symmetrised so that
@@ -251,6 +251,10 @@ which is checked when the advection is set up.
 The mirror planes sit at the first and last grid node, `x[1]` and `x[end]`.
 bslLD's Cartesian x-axis excludes its upper endpoint, so the reflected domain
 spans `(n-1)*delta`, one cell short of `L`; construct the axis accordingly.
+
+`advectX!` sub-cycles a mirror axis so that no departure point lies more than
+`max_wall_shift` (default 1) cells away: Lagrange interpolation is unstable for
+larger shifts here.
 """
 struct Mirror end
 
@@ -280,7 +284,7 @@ end
     end
 end
 
-# Value of stencil node `i`; boundaries that are not index maps (Specular) override it.
+# Value of stencil node `i` under `bc`.
 @inline _sample(bc, src, ctx, ixs, ivs, i, n) =
     @inbounds src[_sample_index(bc, ctx, ixs, ivs, i, n)]
 
@@ -496,7 +500,7 @@ function _advect_x_dir!(
 )
     NX = length(grid.xaxes)
     1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
-    (bc isa Mirror || bc isa Specular) &&
+    bc isa Mirror &&
         method isa Lagrange &&
         _check_mirror_axes(grid, dir, stencil_order(method))
     ctx = _x_context(sp, grid, simTime, dir, plan, geometry, orbit_window)

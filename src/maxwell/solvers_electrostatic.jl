@@ -9,7 +9,7 @@ PoissonSolver(factor::Real) = PoissonSolver(float(factor))
 
 `E = -∇ρ` (linear adiabatic electrons, `T_e = T_i`). `boundaries[d]` selects
 the treatment of spatial axis `d`: `Periodic()` (default for missing entries)
-or `Mirror()`/`Specular()`, which differentiate the even extension about the first and last
+or `Mirror()`, which differentiates the even extension about the first and last
 node -- the density a mirror-reflected distribution produces -- so that
 `E_d = 0` on both walls.
 """
@@ -206,8 +206,6 @@ _adiabatic_gradient!(::Periodic, out, rho, ws, grid, dir) =
 
 # -d/dx of the even extension [ρ_1 … ρ_n, ρ_{n-1} … ρ_2] (period 2(n-1)Δ),
 # restricted to the n physical nodes.
-_adiabatic_gradient!(::Specular, args...) = _adiabatic_gradient!(Mirror(), args...)
-
 function _adiabatic_gradient!(::Mirror, out, rho, ws, grid, dir)
     data = rho.data
     n = size(data, dir)
