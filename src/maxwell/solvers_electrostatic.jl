@@ -4,7 +4,22 @@ end
 PoissonSolver() = PoissonSolver(1.0)
 PoissonSolver(factor::Real) = PoissonSolver(float(factor))
 
-struct AdiabaticSolver <: AbstractFieldSolver end
+"""
+    AdiabaticSolver(boundaries = ())
+
+`E = -∇ρ` (linear adiabatic electrons, `T_e = T_i`). `boundaries[d]` selects
+the treatment of spatial axis `d`: `Periodic()` (default for missing entries)
+or `Mirror()`, which differentiates the even extension about the first and last
+node -- the density a mirror-reflected distribution produces -- so that
+`E_d = 0` on both walls.
+"""
+struct AdiabaticSolver{BC<:Tuple} <: AbstractFieldSolver
+    boundaries::BC
+end
+AdiabaticSolver() = AdiabaticSolver(())
+
+@inline _solver_boundary(s::AdiabaticSolver, d) =
+    d <= length(s.boundaries) ? s.boundaries[d] : Periodic()
 
 # ── AdiabaticSolver workspace ────────────────────────────────────────────────
 
@@ -171,11 +186,12 @@ function solve_fields(moments::Moments, grid::Grid, solver::PoissonSolver)
     )
 end
 
-function solve_fields(moments::Moments, grid::Grid, ::AdiabaticSolver)
+function solve_fields(moments::Moments, grid::Grid, solver::AdiabaticSolver)
     ws = _get_adiabatic_workspace(moments.rho, grid)
     ndims_x = spatial_ndims(grid)
     for dir = 1:ndims_x
-        _differentiate_impl!(ws.E_vf[dir].data, moments.rho, ws.sw, dir, true)
+        _adiabatic_gradient!(
+            _solver_boundary(solver, dir), ws.E_vf[dir].data, moments.rho, ws, grid, dir)
     end
     return FieldSolution{typeof(ws.E_vf),typeof(ws.zero_phi)}(
         ws.E_vf,
@@ -183,4 +199,23 @@ function solve_fields(moments::Moments, grid::Grid, ::AdiabaticSolver)
         ws.zero_vf3,
         moments.rho,
     )
+end
+
+_adiabatic_gradient!(::Periodic, out, rho, ws, grid, dir) =
+    _differentiate_impl!(out, rho, ws.sw, dir, true)
+
+# -d/dx of the even extension [ρ_1 … ρ_n, ρ_{n-1} … ρ_2] (period 2(n-1)Δ),
+# restricted to the n physical nodes.
+function _adiabatic_gradient!(::Mirror, out, rho, ws, grid, dir)
+    data = rho.data
+    n = size(data, dir)
+    n >= 2 || throw(ArgumentError("mirror derivative needs >= 2 nodes on axis $dir"))
+    ext = cat(data, reverse(selectdim(data, dir, 2:(n-1)); dims = dir); dims = dir)
+    m = size(ext, dir)
+    k = collect((2pi / (m * grid.delta[dir])) .* fftfreq(m, m))
+    k[m÷2+1] = 0                                  # drop the unpaired Nyquist mode
+    kshape = ntuple(i -> i == dir ? m : 1, ndims(ext))
+    dext = real.(ifft(fft(ext, dir) .* (im .* backend_array(reshape(k, kshape))), dir))
+    out .= .-selectdim(dext, dir, 1:n)
+    return out
 end

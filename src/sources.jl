@@ -6,6 +6,7 @@ struct KappaTContext{ET,VAT,SXT,SVT,DT,KT}
     Bdir::Int
     dt::DT
     kappa_T::KT
+    kappa_n::KT
 end
 
 Adapt.@adapt_structure KappaTContext
@@ -34,7 +35,7 @@ end
     end
 
     @inbounds fdata[I] +=
-        ctx.kappa_T * ctx.dt * _xhat_dot_ExB(ctx, ixs) * (v2/2 - sub) * fac
+        ctx.dt * _xhat_dot_ExB(ctx, ixs) * (ctx.kappa_n + ctx.kappa_T * (v2/2 - sub)) * fac
 end
 
 function add_kappaT!(
@@ -43,6 +44,7 @@ function add_kappaT!(
     dt,
     kappa_T,
     E::VectorField;
+    kappa_n = zero(kappa_T),
     exec = bslLD.backend(),
 ) where {DT,NX,NV,NXNV}
 
@@ -56,6 +58,7 @@ function add_kappaT!(
         grid.Bdir,
         dt,
         kappa_T,
+        oftype(kappa_T, kappa_n),
     )
 
     k! = kappaT_kernel!(exec)

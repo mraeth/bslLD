@@ -111,6 +111,7 @@ using PlasmaCore:
 include("kinetics/interpolation.jl")
 include("kinetics/species.jl")
 include("kinetics/advectorCart.jl")
+include("kinetics/geometry.jl")
 include("kinetics/advectorPolar.jl")
 include("kinetics/initialization.jl")
 include("kinetics/moments.jl")

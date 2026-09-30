@@ -23,7 +23,7 @@ backend_vector(values) = bslLD.backend_array(collect(values))
 @inline _cartesian_axis_sizes(grid::CartGrid) =
     (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
 
-struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT}
+struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT,GMT}
     grid::GT
     k::KT
     vaxes::VAT
@@ -36,6 +36,7 @@ struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT}
     vth::VTT
     electric_scale::EST
     vflip::FT  # which velocity components a mirror on this axis reverses
+    geometry::GMT  # kernel data of the magnetic geometry, `nothing` for Slab
 end
 
 struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
@@ -63,18 +64,18 @@ end
 end
 
 # Departure-point characteristics, shared by the Fourier and Lagrange paths.
-@inline function _x_displacement(ctx::XShiftContext, ivs)
+@inline function _x_displacement(ctx::XShiftContext, ixs, ivs)
     xdisp = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, -ctx.electric_scale*ctx.phi)
     for dv = 1:length(ivs)
         xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
     end
-    return xdisp
+    return xdisp + _geometric_displacement(ctx.geometry, ctx, ixs, ivs)
 end
 
 @inline function compute_x_multiplier(ctx::XShiftContext, index::Int)
     ixs, ivs = index_1d_to_combined(index, ctx.sizes_x, ctx.sizes_v)
-    return cis(-ctx.dt * ctx.k[ixs[ctx.dir]] * ctx.vth * _x_displacement(ctx, ivs))
+    return cis(-ctx.dt * ctx.k[ixs[ctx.dir]] * ctx.vth * _x_displacement(ctx, ixs, ivs))
 end
 
 @inline function _v_displacement(ctx::VShiftContext, ixs)
@@ -185,7 +186,7 @@ Lagrange(W::Integer) = Lagrange{Int(W)}()
 # kernel is the obvious next optimisation, and also removes the Float64
 # accumulation inside `lagrange_weights` from the per-point path.
 @inline _shift_cells(ctx::XShiftContext, ixs, ivs) =
-    ctx.dt * ctx.vth * _x_displacement(ctx, ivs) / ctx.delta
+    ctx.dt * ctx.vth * _x_displacement(ctx, ixs, ivs) / ctx.delta
 @inline _shift_cells(ctx::VShiftContext, ixs, ivs) =
     ctx.dt * ctx.electric_scale * _v_displacement(ctx, ixs) / ctx.delta
 
@@ -293,7 +294,14 @@ end
 
 # --- Direction drivers ----------------------------------------------------
 
-function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, plan)
+function _x_context(
+    sp::Species,
+    grid::CartGrid,
+    simTime::SimulationTime,
+    dir,
+    plan,
+    geometry = Slab(),
+)
     DT = eltype(sp.dist.data)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     NV = length(grid.vaxes)
@@ -310,6 +318,7 @@ function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, p
         DT(thermal_velocity(sp)),
         DT(electric_acceleration_scale(sp)),
         _mirror_flip(grid.Bdir, dir, Val(NV)),
+        _spatial_geometry(geometry, sp, grid, DT),
     )
 end
 
@@ -392,6 +401,7 @@ function _advect_x_dir!(
     plan::AdvectionPlan,
     method,
     bc,
+    geometry = Slab(),
 )
     NX = length(grid.xaxes)
     1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
@@ -400,7 +410,7 @@ function _advect_x_dir!(
         _check_mirror_axes(grid, dir, stencil_order(method))
     _advect_dir!(
         sp.dist,
-        _x_context(sp, grid, simTime, dir, plan),
+        _x_context(sp, grid, simTime, dir, plan, geometry),
         plan,
         method,
         bc,
@@ -442,10 +452,11 @@ function advectX!(
     simTime::SimulationTime;
     method = Fourier(),
     boundary = Periodic(),
+    geometry = Slab(),
 )
     plan = _get_plan(sp.dist, grid)
     for dir = 1:length(grid.xaxes)
-        _advect_x_dir!(sp, grid, simTime, dir, plan, method, boundary)
+        _advect_x_dir!(sp, grid, simTime, dir, plan, method, boundary, geometry)
     end
 end
 
@@ -456,8 +467,10 @@ function advectX!(
     dir::Int;
     method = Fourier(),
     boundary = Periodic(),
+    geometry = Slab(),
 )
-    _advect_x_dir!(sp, grid, simTime, dir, _get_plan(sp.dist, grid), method, boundary)
+    _advect_x_dir!(
+        sp, grid, simTime, dir, _get_plan(sp.dist, grid), method, boundary, geometry)
 end
 
 function advectV!(

@@ -104,6 +104,34 @@ the mirror planes sit at `x[1]` and `x[end]`, and bslLD's Cartesian x-axis exclu
 endpoint, so the reflected domain spans `(n-1)·Δx` rather than `L`. The field solvers remain
 spectral and therefore still assume periodicity in `x`.
 
+### Magnetic geometry
+
+`advectX!` takes a `geometry` keyword, and `advect_geometry!` applies the
+velocity-space part of a geometry. All geometries assume spatial axis 1 radial
+(x), axis 2 binormal (y), axis 3 (if present) along `B`, with `Bdir = 3` and three
+velocity components. The rotating logical velocity grid is unchanged.
+
+| Geometry | Spatial characteristic | Velocity space (`advect_geometry!`) |
+|---|---|---|
+| `Slab()` (default) | `ẋ = Q u` | none |
+| `ShearedSlab(; Ls, R0, kcurv)` | `ẏ += (x/Ls) v_∥ − (v_∥² + v⊥²/2)/(Ω R0) cos(kcurv z)` | none |
+| `CurvedPatch(; Rc)` | `ż = Rc/(Rc+x) v_z` | residual field `B_z(x) = Rc/(Rc+x)` (exact three-shear rotation) and curvature force `a = (v_z², 0, −v_x v_z)/(Rc+x)` |
+
+```julia
+g = bslLD.CurvedPatch(Rc = 50.0)
+bslLD.advect_geometry!(f, grid, simTime, g; method = bslLD.Lagrange(8))
+bslLD.advectX!(f, grid, simTime, 1; method = bslLD.Lagrange(8), boundary = bslLD.Mirror(), geometry = g)
+```
+
+A drift that enters only the y-characteristic does no work against `E_y`.
+`add_drift_energy!(f, grid, dt, g::ShearedSlab, E)` adds the linearised
+`E_y v_My F_M` term, which recovers the gyrokinetic `(ω − ω*)/(ω − ω_D)` response.
+`CurvedPatch` needs no such term. Its characteristics conserve `f`, and mass
+is conserved in the measure `J dx dv` with `J = (Rc+x)/Rc`.
+
+`add_kappaT!(f, grid, dt, kappa_T, E; kappa_n = 0)` is the local gradient drive
+`dt (E×B)_x (κ_n + κ_T (v²/2 − NV/2)) F_M`.
+
 ## Field Solvers
 
 All solvers implement the `AbstractFieldSolver` interface via `solve_fields` / `solve_fields!`, which takes a `Moments` struct and returns a `FieldSolution` holding the updated `E` and `B` vector fields.
@@ -113,9 +141,9 @@ All solvers implement the `AbstractFieldSolver` interface via `solve_fields` / `
 | Solver | Equation solved | Required moments |
 |--------|----------------|-----------------|
 | `PoissonSolver(factor=1.0)` | $-\nabla^2\phi = \text{factor}\cdot\rho$, $\mathbf{E}=-\nabla\phi$ | `rho` |
-| `AdiabaticSolver()` | $\mathbf{E} = -\nabla\rho$ (adiabatic electrons, no Poisson inversion) | `rho` |
+| `AdiabaticSolver(boundaries = ())` | $\mathbf{E} = -\nabla\rho$ (adiabatic electrons, no Poisson inversion); `boundaries[d] = Mirror()` differentiates the even extension along axis `d` | `rho` |
 
-Both are FFT-based and support arbitrary 1D/2D periodic domains. A 2/3-rule dealiasing filter is applied.
+Both are FFT-based and support arbitrary 1D/2D periodic domains. `AdiabaticSolver((Mirror(), Periodic()))` pairs with `Mirror()` advection in x. A 2/3-rule dealiasing filter is applied.
 
 ```julia
 sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonSolver())
