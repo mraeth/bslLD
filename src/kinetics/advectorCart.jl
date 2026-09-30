@@ -20,6 +20,14 @@ backend_vector(values) = bslLD.backend_array(collect(values))
 
 @inline _effective_dt(simTime::SimulationTime) = simTime.dt * simTime.fraction_dt
 
+# Exact average of the logical-grid rotation over a time window `w` centred on the
+# current phase: (1/w) ∫ R(-θ(s)) ds = sinc(θ' w/2) R(-θ(mid)) on the gyration
+# plane, θ' = electric_scale * Ω. `w = 0` is the midpoint rule.
+function _orbit_factor(sp, grid, w)
+    a = electric_acceleration_scale(sp) * gyro_frequency(sp, grid) * w / 2
+    return iszero(a) ? one(a) : sin(a) / a
+end
+
 @inline _cartesian_axis_sizes(grid::CartGrid) =
     (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
 
@@ -37,6 +45,7 @@ struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT,GMT}
     electric_scale::EST
     vflip::FT  # which velocity components a mirror on this axis reverses
     geometry::GMT  # kernel data of the magnetic geometry, `nothing` for Slab
+    orbit::PT  # sinc(Ω w/2): exact average of Q over the orbit window w (1 for w = 0)
 end
 
 struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
@@ -50,6 +59,7 @@ struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
     dt::PT
     delta::PT
     electric_scale::EST
+    orbit::PT
 end
 
 Adapt.@adapt_structure XShiftContext
@@ -68,7 +78,8 @@ end
     xdisp = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, -ctx.electric_scale*ctx.phi)
     for dv = 1:length(ivs)
-        xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
+        perp = dv == ctx.grid.Bdir ? one(ctx.orbit) : ctx.orbit
+        xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv] * perp
     end
     return xdisp + _geometric_displacement(ctx.geometry, ctx, ixs, ivs)
 end
@@ -82,7 +93,8 @@ end
     delta_v = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, ctx.electric_scale*ctx.phi)
     for field_dir = 1:length(ctx.e_components)
-        delta_v += ctx.e_components[field_dir][ixs...] * rotation[ctx.dir, field_dir]
+        perp = field_dir == ctx.grid.Bdir ? one(ctx.orbit) : ctx.orbit
+        delta_v += ctx.e_components[field_dir][ixs...] * rotation[ctx.dir, field_dir] * perp
     end
     return delta_v
 end
@@ -180,11 +192,9 @@ struct Lagrange{W} end
 Lagrange(W::Integer) = Lagrange{Int(W)}()
 @inline stencil_order(::Lagrange{W}) where {W} = Val(W)
 
-# Departure-point displacement in cells along the advected axis. It is constant
-# along that axis -- it depends only on the *other* indices -- so every thread
-# on a line recomputes the same weights. Hoisting them into a per-line setup
-# kernel is the obvious next optimisation, and also removes the Float64
-# accumulation inside `lagrange_weights` from the per-point path.
+# Departure-point displacement in cells along the advected axis. For these
+# contexts it is constant along that axis -- it depends only on the *other*
+# indices -- so `lagrange_line_kernel!` computes the weights once per line.
 @inline _shift_cells(ctx::XShiftContext, ixs, ivs) =
     ctx.dt * ctx.vth * _x_displacement(ctx, ixs, ivs) / ctx.delta
 @inline _shift_cells(ctx::VShiftContext, ixs, ivs) =
@@ -200,6 +210,19 @@ Lagrange(W::Integer) = Lagrange{Int(W)}()
     index_combined_to_1d(Base.setindex(ixs, i, ctx.dir), ivs, ctx.sizes_x, ctx.sizes_v)
 @inline _line_linear_index(ctx::VShiftContext, ixs, ivs, i) =
     index_combined_to_1d(ixs, Base.setindex(ivs, i, ctx.dir), ctx.sizes_x, ctx.sizes_v)
+
+# Linear-index stride between neighbours along the advected axis.
+@inline _line_stride(ctx::XShiftContext) = prod(ctx.sizes_x[1:(ctx.dir-1)])
+@inline _line_stride(ctx::VShiftContext) = prod(ctx.sizes_x) * prod(ctx.sizes_v[1:(ctx.dir-1)])
+
+# The multi-index of line `L`, with the advected coordinate set to 1.
+@inline _line_sizes(ctx::XShiftContext) =
+    (Base.setindex(ctx.sizes_x, 1, ctx.dir), ctx.sizes_v)
+@inline _line_sizes(ctx::VShiftContext) =
+    (ctx.sizes_x, Base.setindex(ctx.sizes_v, 1, ctx.dir))
+
+# Whether the shift is constant along the advected line (line kernel applies).
+@inline _constant_along_line(ctx) = true
 
 # --- Boundary conditions --------------------------------------------------
 
@@ -257,6 +280,10 @@ end
     end
 end
 
+# Value of stencil node `i`; boundaries that are not index maps (Specular) override it.
+@inline _sample(bc, src, ctx, ixs, ivs, i, n) =
+    @inbounds src[_sample_index(bc, ctx, ixs, ivs, i, n)]
+
 # f(x_b, v) <- (f(x_b, v) + f(x_b, R v)) / 2 on the two boundary nodes. Each
 # velocity pair is handled once, by the thread holding its lower linear index,
 # so the in-place update needs no scratch buffer.
@@ -287,9 +314,56 @@ end
 
     acc = zero(eltype(dst))
     @inbounds for m = 1:length(w)
-        acc += w[m] * src[_sample_index(bc, ctx, ixs, ivs, base + m, n)]
+        acc += w[m] * _sample(bc, src, ctx, ixs, ivs, base + m, n)
     end
     @inbounds dst[I] = acc
+end
+
+# One thread per line: weights once, then a strided sweep along the line. Interior
+# stencil nodes are read by stride arithmetic; only halo nodes go through `_sample`.
+@kernel function lagrange_line_kernel!(dst, @Const(src), ctx, order::Val{W}, bc) where {W}
+    L = @index(Global, Linear)
+    lsx, lsv = _line_sizes(ctx)
+    ixs, ivs = index_1d_to_combined(L, lsx, lsv)
+
+    cells, alpha = shift_split(_shift_cells(ctx, ixs, ivs))
+    w = lagrange_weights(order, alpha, eltype(dst))
+
+    n = _line_length(ctx)
+    st = _line_stride(ctx)
+    I0 = _line_linear_index(ctx, ixs, ivs, 1) - st          # I0 + j*st is node j
+    off = -cells - W ÷ 2 - 1
+    @inbounds for i = 1:n
+        base = i + off
+        acc = zero(eltype(dst))
+        if base >= 0 && base + W <= n
+            for m = 1:W
+                acc += w[m] * src[I0+(base+m)*st]
+            end
+        else
+            for m = 1:W
+                acc += w[m] * _sample_line(bc, src, ctx, ixs, ivs, I0, st, base + m, n)
+            end
+        end
+        dst[I0+i*st] = acc
+    end
+end
+
+@inline _sample_line(::Periodic, src, ctx, ixs, ivs, I0, st, j, n) =
+    @inbounds src[I0+mod1(j, n)*st]
+@inline _sample_line(bc, src, ctx, ixs, ivs, I0, st, j, n) =
+    1 <= j <= n ? (@inbounds src[I0+j*st]) : _sample(bc, src, ctx, ixs, ivs, j, n)
+
+function _lagrange_sweep!(dst, src, ctx, method, bc, exec)
+    if _constant_along_line(ctx)
+        k! = lagrange_line_kernel!(exec)
+        k!(dst, src, ctx, stencil_order(method), bc; ndrange = length(src) ÷ _line_length(ctx))
+    else
+        k! = lagrange_shift_kernel!(exec)
+        k!(dst, src, ctx, stencil_order(method), bc; ndrange = length(src))
+    end
+    KernelAbstractions.synchronize(exec)
+    return dst
 end
 
 # --- Direction drivers ----------------------------------------------------
@@ -301,6 +375,7 @@ function _x_context(
     dir,
     plan,
     geometry = Slab(),
+    orbit_window = 0,
 )
     DT = eltype(sp.dist.data)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
@@ -319,6 +394,7 @@ function _x_context(
         DT(electric_acceleration_scale(sp)),
         _mirror_flip(grid.Bdir, dir, Val(NV)),
         _spatial_geometry(geometry, sp, grid, DT),
+        DT(_orbit_factor(sp, grid, orbit_window)),
     )
 end
 
@@ -329,6 +405,7 @@ function _v_context(
     e::VectorField,
     dir,
     plan,
+    orbit_window = 0,
 )
     DT = eltype(sp.dist.data)
     NX = length(grid.xaxes)
@@ -344,6 +421,7 @@ function _v_context(
         DT(_effective_dt(simTime)),
         DT(grid.delta[NX+dir]),
         DT(electric_acceleration_scale(sp)),
+        DT(_orbit_factor(sp, grid, orbit_window)),
     )
 end
 
@@ -368,9 +446,7 @@ function _advect_dir!(f, ctx, plan, method::Lagrange, bc, _fwd_plan, _inv_plan)
         sym!(f.data, ctx; ndrange = length(f.data))
         KernelAbstractions.synchronize(exec)
     end
-    k! = lagrange_shift_kernel!(exec)
-    k!(plan.rbuf, f.data, ctx, stencil_order(method), bc; ndrange = length(f.data))
-    KernelAbstractions.synchronize(exec)
+    _lagrange_sweep!(plan.rbuf, f.data, ctx, method, bc, exec)
     copyto!(f.data, plan.rbuf)
     return nothing
 end
@@ -393,6 +469,19 @@ function _check_mirror_axes(grid::CartGrid, dir::Int, ::Val{W}) where {W}
     return nothing
 end
 
+# Largest |departure| in cells of an x-sweep, from the rotated velocity box.
+function _max_shift_cells(ctx::XShiftContext)
+    rot = R(ctx.grid.Bdir, -ctx.electric_scale * ctx.phi)
+    vmax = sum(abs(rot[ctx.dir, d]) * maximum(abs, ctx.vaxes[d]) for d = 1:length(ctx.sizes_v))
+    return abs(ctx.dt * ctx.vth * vmax / ctx.delta)
+end
+
+# Number of sub-sweeps so that no departure point lies more than `max_shift` cells
+# away. Walls only: a reflecting halo is unstable with fields once the shift exceeds
+# about two cells (bsl6d rejects >= 1 cell on mirror axes); periodic axes need none.
+_wall_subcycles(::Periodic, ctx, max_shift) = 1
+_wall_subcycles(bc, ctx, max_shift) = max(1, ceil(Int, _max_shift_cells(ctx) / max_shift))
+
 function _advect_x_dir!(
     sp::Species,
     grid::CartGrid,
@@ -402,21 +491,25 @@ function _advect_x_dir!(
     method,
     bc,
     geometry = Slab(),
+    orbit_window = 0,
+    max_wall_shift = 1.0,
 )
     NX = length(grid.xaxes)
     1 <= dir <= NX || throw(ArgumentError("advectX! direction $dir out of 1:$NX"))
-    bc isa Mirror &&
+    (bc isa Mirror || bc isa Specular) &&
         method isa Lagrange &&
         _check_mirror_axes(grid, dir, stencil_order(method))
-    _advect_dir!(
-        sp.dist,
-        _x_context(sp, grid, simTime, dir, plan, geometry),
-        plan,
-        method,
-        bc,
-        plan.fwd_x[dir],
-        plan.inv_x[dir],
-    )
+    ctx = _x_context(sp, grid, simTime, dir, plan, geometry, orbit_window)
+    nsub = _wall_subcycles(bc, ctx, max_wall_shift)
+    if nsub > 1
+        fraction = simTime.fraction_dt
+        simTime.fraction_dt = fraction / nsub
+        ctx = _x_context(sp, grid, simTime, dir, plan, geometry, orbit_window)
+        simTime.fraction_dt = fraction
+    end
+    for _ = 1:nsub
+        _advect_dir!(sp.dist, ctx, plan, method, bc, plan.fwd_x[dir], plan.inv_x[dir])
+    end
     return nothing
 end
 
@@ -429,6 +522,7 @@ function _advect_v_dir!(
     plan::AdvectionPlan,
     method,
     bc,
+    orbit_window = 0,
 )
     NV = length(grid.vaxes)
     1 <= dir <= NV || throw(ArgumentError("advectV! direction $dir out of 1:$NV"))
@@ -436,7 +530,7 @@ function _advect_v_dir!(
         "mirror boundaries apply to spatial axes only, as in bsl6d"))
     _advect_dir!(
         sp.dist,
-        _v_context(sp, grid, simTime, e, dir, plan),
+        _v_context(sp, grid, simTime, e, dir, plan, orbit_window),
         plan,
         method,
         bc,
@@ -453,10 +547,13 @@ function advectX!(
     method = Fourier(),
     boundary = Periodic(),
     geometry = Slab(),
+    orbit_window = 0,
+    max_wall_shift = 1.0,
 )
     plan = _get_plan(sp.dist, grid)
     for dir = 1:length(grid.xaxes)
-        _advect_x_dir!(sp, grid, simTime, dir, plan, method, boundary, geometry)
+        _advect_x_dir!(sp, grid, simTime, dir, plan, method, boundary, geometry, orbit_window,
+            max_wall_shift)
     end
 end
 
@@ -468,9 +565,11 @@ function advectX!(
     method = Fourier(),
     boundary = Periodic(),
     geometry = Slab(),
+    orbit_window = 0,
+    max_wall_shift = 1.0,
 )
-    _advect_x_dir!(
-        sp, grid, simTime, dir, _get_plan(sp.dist, grid), method, boundary, geometry)
+    _advect_x_dir!(sp, grid, simTime, dir, _get_plan(sp.dist, grid), method, boundary,
+        geometry, orbit_window, max_wall_shift)
 end
 
 function advectV!(
@@ -480,10 +579,11 @@ function advectV!(
     e::VectorField;
     method = Fourier(),
     boundary = Periodic(),
+    orbit_window = 0,
 )
     plan = _get_plan(sp.dist, grid)
     for dir = 1:length(grid.vaxes)
-        _advect_v_dir!(sp, grid, simTime, e, dir, plan, method, boundary)
+        _advect_v_dir!(sp, grid, simTime, e, dir, plan, method, boundary, orbit_window)
     end
 end
 
@@ -495,6 +595,8 @@ function advectV!(
     dir::Int;
     method = Fourier(),
     boundary = Periodic(),
+    orbit_window = 0,
 )
-    _advect_v_dir!(sp, grid, simTime, e, dir, _get_plan(sp.dist, grid), method, boundary)
+    _advect_v_dir!(sp, grid, simTime, e, dir, _get_plan(sp.dist, grid), method, boundary,
+        orbit_window)
 end

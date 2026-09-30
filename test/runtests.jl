@@ -6,6 +6,7 @@ using bslLD
     include("interpolation_test.jl")
     include("advection_test.jl")
     include("geometry_test.jl")
+    include("specular_orbit_test.jl")
     include("index_test.jl")
     include("differential_operators_test.jl")
     include("solvers_test.jl")

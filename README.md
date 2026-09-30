@@ -82,6 +82,21 @@ Wider stencils hold the spectrum flat out to larger `k`: over 200 steps the ampl
 `kh = 0.5π` is 0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24`. See
 `examples/interpolation_spectra.jl`.
 
+When the shift is constant along the advected line (all X/V shifts and the geometry shears), the
+Lagrange path runs one thread per line. It computes the weights once and walks the line by
+stride, which costs about 3–7 ns per point for `W = 8` on 4 CPU threads. Shifts that depend on the
+advected coordinate itself, such as the `CurvedPatch` u_z scaling, keep the per-point kernel.
+
+### Orbit window (rotating grid)
+
+The shift on the rotating logical grid uses `Q` at `simTime.phase`, which is the midpoint rule.
+`orbit_window = w` (`advectX!`, `advectV!`, `advect_geometry!`) instead averages `Q` exactly over
+a window `w` centred on that phase: the gyration-plane part is multiplied by `sin(Ω w/2)/(Ω w/2)`.
+Pass the time span that the substep represents. For a Strang step
+`V(h/2) X(h) V(h/2)`, that is phases `t + h/4`, `t + h/2`, `t + 3h/4` with windows `h/2`, `h`, `h/2`.
+This removes the O((Ω h)²) gyro-phase error of the midpoint rule. `w = 0` (the default) keeps
+the midpoint rule.
+
 ### Boundary conditions
 
 `advectX!` also takes `boundary`, either `Periodic()` (default) or `Mirror()`, the specular wall
@@ -99,10 +114,29 @@ the reflecting-domain norm (half weight on the two mirror nodes); the plain sum 
 drifts at `O(Δx²)` because it over-weights them.
 
 `Mirror()` requires a `Lagrange` method (the spectral path is periodic by construction), applies to
-spatial axes only, and needs velocity axes symmetric about zero — all three are checked. Note that
-the mirror planes sit at `x[1]` and `x[end]`, and bslLD's Cartesian x-axis excludes its upper
-endpoint, so the reflected domain spans `(n-1)·Δx` rather than `L`. The field solvers remain
-spectral and therefore still assume periodicity in `x`.
+spatial axes only, and needs velocity axes symmetric about zero — all three are checked. The mirror
+planes sit at `x[1]` and `x[end]` (node-type axis, as in bsl6d: `… N-1, N | N-1, N-2 …`).
+bslLD's Cartesian x-axis excludes its upper endpoint, so to put node `N` on the wall at `L`, pass
+`xmax = L + L/(N-1)` to `Grid`.
+
+**Wall sub-cycling.** With fields, a reflecting halo is unstable when a departure point lies
+several cells beyond the wall (γ ≈ 0.1 Ω for `Lagrange(8)` at shifts of about 2.5 cells, in bands
+of `(dt, Δx)`). bsl6d rejects shifts of one cell or more on mirror axes. bslLD instead sub-cycles
+wall axes automatically: `advectX!` splits the sweep into `ceil(max shift / max_wall_shift)`
+sub-sweeps, where `max_wall_shift = 1.0` cell by default and the maximum is taken over the
+rotated velocity box. Periodic axes are never sub-cycled. Pass `max_wall_shift = Inf` for the
+old single-sweep behaviour.
+
+**`Specular()`.** On an axis perpendicular to `B`, `Mirror()` reverses both gyration-plane
+components (u → −u). That is invariant under the rotating grid, but it is not the physical
+reflection. `Specular()` reflects `v_x → −v_x`. On the rotating grid that is `u' = R(2φ) F u`,
+with `F` the u_x index flip and the rotation done as three shears on the halo planes only. It uses
+the same node fold and wall-node symmetrisation. Along `B` it is identical to `Mirror()`. Mass in
+the reflecting-domain norm is conserved to the velocity-interpolation error of the rotated halo,
+not to roundoff. With sub-cycling, both walls are stable, and in the tests so far (passive wall
+layer, κ = 0 stability) they give the same result, so `Mirror()` remains the cheaper default.
+`AdiabaticSolver((Mirror(),))` or `AdiabaticSolver((Specular(),))` provides the matching
+even-extension field.
 
 ### Magnetic geometry
 

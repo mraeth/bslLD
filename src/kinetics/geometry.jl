@@ -155,6 +155,15 @@ Adapt.adapt_structure(to, c::LineShiftContext{S}) where {S} =
     index_combined_to_1d(Base.setindex(ixs, i, ctx.dir), ivs, ctx.sizes_x, ctx.sizes_v)
 @inline _line_linear_index(ctx::LineShiftContext{:v}, ixs, ivs, i) =
     index_combined_to_1d(ixs, Base.setindex(ivs, i, ctx.dir), ctx.sizes_x, ctx.sizes_v)
+@inline _line_stride(ctx::LineShiftContext{:x}) = prod(ctx.sizes_x[1:(ctx.dir-1)])
+@inline _line_stride(ctx::LineShiftContext{:v}) =
+    prod(ctx.sizes_x) * prod(ctx.sizes_v[1:(ctx.dir-1)])
+@inline _line_sizes(ctx::LineShiftContext{:x}) =
+    (Base.setindex(ctx.sizes_x, 1, ctx.dir), ctx.sizes_v)
+@inline _line_sizes(ctx::LineShiftContext{:v}) =
+    (ctx.sizes_x, Base.setindex(ctx.sizes_v, 1, ctx.dir))
+# The u_z scaling depends on the advected coordinate itself: per-point weights.
+@inline _constant_along_line(ctx::LineShiftContext) = _constant_along_line(ctx.shift)
 
 function _line_shift!(sp::Species, grid::CartGrid, ::Val{S}, dir, shift, method) where {S}
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
@@ -204,15 +213,18 @@ end
     return u * (1 - exp(s.wh[ixs[1]] * vx)) * s.inv_dv
 end
 
+@inline _constant_along_line(::CurvatureScaling) = false
+
 Adapt.@adapt_structure VelocityShear
 Adapt.@adapt_structure CurvatureKick
 Adapt.@adapt_structure CurvatureScaling
 
 """
-    advect_geometry!(sp, grid, simTime, geometry; method = Lagrange(8))
+    advect_geometry!(sp, grid, simTime, geometry; method = Lagrange(8), orbit_window = 0)
 
 Velocity-space part of the geometry over `dt * fraction_dt`, at the logical-grid
-phase `simTime.phase`. A no-op for `Slab` and `ShearedSlab`. For `CurvedPatch`:
+phase `simTime.phase` (the curvature kick averaged over `orbit_window`, as in
+`advectX!`). A no-op for `Slab` and `ShearedSlab`. For `CurvedPatch`:
 
 1. residual field `δB_z(x) = b0 (Rc/(Rc+x) - 1)`: an x-dependent rotation of
    `(u_x, u_y)`, done exactly as three shears `Sx(tan θ/2) Sy(-sin θ) Sx(tan θ/2)`;
@@ -220,7 +232,7 @@ phase `simTime.phase`. A no-op for `Slab` and `ShearedSlab`. For `CurvedPatch`:
    (half steps, depends on `u_z` only) around the exact scaling of `u_z`.
 """
 advect_geometry!(sp::Species, grid::CartGrid, simTime::SimulationTime, ::AbstractGeometry;
-    method = Lagrange(8)) = nothing
+    method = Lagrange(8), orbit_window = 0) = nothing
 
 function advect_geometry!(
     sp::Species,
@@ -228,6 +240,7 @@ function advect_geometry!(
     simTime::SimulationTime,
     g::CurvedPatch;
     method = Lagrange(8),
+    orbit_window = 0,
 )
     _check_geometry(grid)
     DT = eltype(sp.dist.data)
@@ -251,7 +264,7 @@ function advect_geometry!(
 
     # 2. curvature force at the physical phase: Q^T x̂ = (cos φ, sin φ)
     phi = DT(electric_acceleration_scale(sp) * simTime.phase)
-    c, s = cos(phi), sin(phi)
+    c, s = (cos(phi), sin(phi)) .* DT(_orbit_factor(sp, grid, orbit_window))
     kick = @. h / 2 * vth / (Rc + x)
     kx = CurvatureKick(backend_vector(kick .* (c / dv[1])), vaxes[3])
     ky = CurvatureKick(backend_vector(kick .* (s / dv[2])), vaxes[3])

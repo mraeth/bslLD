@@ -224,7 +224,8 @@ end
         # region changes while the interior stays a plain periodic-free shift
         f = seed((x, v1, v2) -> v2 * exp(-(v1^2 + v2^2) / 2))
         before = copy(f.data)
-        bslLD.advectX!(f, grid, simTime; method = lag, boundary = mirror)
+        # one sweep (no wall sub-cycling), so the halo reach is a single stencil
+        bslLD.advectX!(f, grid, simTime; method = lag, boundary = mirror, max_wall_shift = Inf)
         delta = abs.(f.data .- before)
         @test maximum(delta) > 0.1                      # the wall reacts
         @test maximum(delta[7:10, :, :]) < 1e-15        # the interior does not
