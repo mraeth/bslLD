@@ -143,10 +143,20 @@ velocity components. The rotating logical velocity grid is unchanged.
 |---|---|---|
 | `Slab()` (default) | `ẋ = Q u` | none |
 | `ShearedSlab(; Ls, R0, kcurv)` | `ẏ += (x/Ls) v_∥ − (v_∥² + v⊥²/2)/(Ω R0) cos(kcurv z)` | none |
-| `CurvedPatch(; Rc)` | `ż = Rc/(Rc+x) v_z` | residual field `B_z(x) = Rc/(Rc+x)` (exact three-shear rotation) and curvature force `a = (v_z², 0, −v_x v_z)/(Rc+x)` |
+| `CurvedPatch(; Rc, r0 = Inf, q0 = Inf, shat = 0, R0 = Rc − r0)` | `(ẏ, ż) = M(x) (v₂, v₃)`, `M` from `r0/(r0+x)`, `Rc/(Rc+x)` and the pitch angle `tan α = r0/(q0 R0)` | residual field `B(x) − B(0)`, `B_θ/B_φ = (r0+x)/(q(x) R0)`, `B_φ ∝ Rc/(Rc+x)` (exact rotation `R_z R_ê R_z` from line shears) and the curvature force `a_x = v_θ²/(r0+x) + v_φ²/(Rc+x)`, `a_θ = −v_x v_θ/(r0+x)`, `a_φ = −v_x v_φ/(Rc+x)` (per-point sweeps with RK4 departure points) |
+
+`CurvedPatch` is field-aligned at `x = 0`: velocity axis 3 is `B(0)`, axis 2 is
+`b0 × x̂`, and spatial axes 2 and 3 are the poloidal and toroidal arcs rotated by
+the pitch angle. A 2D `(x, y)` run therefore has `k_∥(0) = 0`, and the magnetic shear,
+`1/Ls = ∂_x k_∥/k_y = sin α cos α/Rc − cos²α ŝ/(q0 R0)` at `x = 0`, follows from `B(x)` and the metric; there is
+no reduced `x v_∥/Ls` term. The defaults `r0 = q0 = Inf` give the large-aspect-ratio
+patch `B = Rc/(Rc+x) e_z`, `a_g = (v_z², 0, −v_x v_z)/(Rc+x)`. The field solvers
+return the logical gradient; `apply_metric!(E, grid, g)` turns it into the physical
+field and must be called before `advectV!` and `add_kappaT!`.
 
 ```julia
-g = bslLD.CurvedPatch(Rc = 50.0)
+g = bslLD.CurvedPatch(Rc = 50.0, r0 = 25.0, q0 = 1.4, shat = 0.8)
+E = bslLD.apply_metric!(bslLD.solve_fields(bslLD.Moments(rho), grid, solver).E, grid, g)
 bslLD.advect_geometry!(f, grid, simTime, g; method = bslLD.Lagrange(8))
 bslLD.advectX!(f, grid, simTime, 1; method = bslLD.Lagrange(8), boundary = bslLD.Mirror(), geometry = g)
 ```
@@ -155,7 +165,7 @@ A drift that enters only the y-characteristic does no work against `E_y`.
 `add_drift_energy!(f, grid, dt, g::ShearedSlab, E)` adds the linearised
 `E_y v_My F_M` term, which recovers the gyrokinetic `(ω − ω*)/(ω − ω_D)` response.
 `CurvedPatch` needs no such term. Its characteristics conserve `f`, and mass
-is conserved in the measure `J dx dv` with `J = (Rc+x)/Rc`.
+is conserved in the measure `J dx dv` with `J = (r0+x)/r0 · (Rc+x)/Rc`.
 
 `add_kappaT!(f, grid, dt, kappa_T, E; kappa_n = 0)` is the local gradient drive
 `dt (E×B)_x (κ_n + κ_T (v²/2 − NV/2)) F_M`.

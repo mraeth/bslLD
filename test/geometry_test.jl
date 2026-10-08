@@ -63,17 +63,61 @@
         @test maximum(abs, f.data .- expected.data) < 1e-12
     end
 
+    @testset "CurvedPatch pitch metric" begin
+        grid = bslLD.Grid([-2.0, 0.0, 0.0, -1.5, -1.5, -1.5], [2.0, 2pi, 2pi, 1.5, 1.5, 1.5],
+            [4, 8, 8, 4, 4, 4], 3, 1.0, 3)
+        g = bslLD.CurvedPatch(; Rc = 8.0, r0 = 5.0, q0 = 1.5, shat = 0.6)
+        @test g.R0 == 3.0
+        t = bslLD.SimulationTime(0.3, 0.3)
+        t.phase = 0.7          # v_2 = -sin(φ) u_x + cos(φ) u_y
+        s, c = sincos(t.phase)
+        init((x, y, z), v) = sin(y + z) * (1 + 0.1v[3])
+        for dir in (2, 3)
+            expected = seed(grid, function ((x, y, z), v)
+                m22, m23, m33 = bslLD._patch_metric(g, x)
+                v2 = c * v[2] - s * v[1]
+                d = dir == 2 ? m22 * v2 + m23 * v[3] : m23 * v2 + m33 * v[3]
+                return init((x, dir == 2 ? y - t.dt * d : y, dir == 3 ? z - t.dt * d : z), v)
+            end)
+            f = seed(grid, init)
+            bslLD.advectX!(f, grid, t, dir; geometry = g)
+            @test maximum(abs, f.data .- expected.data) < 1e-12
+        end
+        # the metric matrix maps the logical gradient to the physical field
+        E = bslLD.VectorField([fill(0.0, 4, 8, 8), fill(1.0, 4, 8, 8), fill(0.5, 4, 8, 8)])
+        bslLD.apply_metric!(E, grid, g)
+        m = bslLD._patch_metric.(Ref(g), grid.xaxes[1])
+        @test E[2].data[:, 1, 1] ≈ getindex.(m, 1) .+ 0.5 .* getindex.(m, 2)
+        @test E[3].data[:, 1, 1] ≈ getindex.(m, 2) .+ 0.5 .* getindex.(m, 3)
+        # 2D grid: the logical E_3 is zero, whatever the reused buffer holds, so
+        # repeated solves + apply_metric! do not accumulate E_3
+        g2 = grid2x3v(; nx = 5, ny = 8)
+        rho = bslLD.ScalarField([0.1 * sin(y) for x in g2.xaxes[1], y in g2.xaxes[2]])
+        Es = map(1:3) do _
+            E = bslLD.solve_fields(bslLD.Moments(rho), g2, bslLD.AdiabaticSolver()).E
+            copy(bslLD.apply_metric!(E, g2, g)[3].data)
+        end
+        m2 = bslLD._patch_metric.(Ref(g), g2.xaxes[1])
+        @test Es[3] == Es[1]
+        @test Es[1] ≈ getindex.(m2, 2) .* [-0.1 * cos(y) for x in g2.xaxes[1], y in g2.xaxes[2]]
+        # r0 + x must stay positive; q0 needs a finite r0
+        @test_throws ArgumentError bslLD.advectX!(seed(grid, init), grid, t, 2;
+            geometry = bslLD.CurvedPatch(; Rc = 8.0, r0 = 1.0))
+        @test_throws ArgumentError bslLD.CurvedPatch(; Rc = 8.0, q0 = 2.0)
+    end
+
     @testset "CurvedPatch velocity-space forces" begin
         grid = grid2x3v(; nx = 5, ny = 1, nv = 40, vmax = 6.0)
         x = grid.xaxes[1]
-        dv3 = prod(grid.delta[3:5])
         mean_u(f, d) = [sum(f.data[i, :, :, :, :] .* reshape(collect(grid.vaxes[d]),
             ntuple(k -> k == d + 1 ? length(grid.vaxes[d]) : 1, 4))) /
                         sum(f.data[i, :, :, :, :]) for i in eachindex(x)]
+        lag = bslLD.Lagrange(8)
 
         t = bslLD.SimulationTime(0.5, 0.5)
         Rc = 5.0
         g = bslLD.CurvedPatch(; Rc)
+        gp = bslLD.CurvedPatch(; Rc = 15.0, r0 = 10.0, q0 = 1.5, shat = 0.8)
 
         # no-op for the slab geometries
         f = seed(grid, (xs, v) -> maxwellian(v...))
@@ -83,24 +127,59 @@
         @test f.data == before
 
         # an isotropic Maxwellian is an equilibrium of both forces; what is left
-        # is the O(h^3 / Rc^2) splitting error of kick-scaling-kick
-        bslLD.advect_geometry!(f, grid, t, g)
-        @test maximum(abs, f.data .- before) < 5e-4
+        # is the O(h^3 / R^2) splitting error of the curvature sweeps
+        for geo in (g, gp)
+            f = seed(grid, (xs, v) -> maxwellian(v...))
+            bslLD.advect_geometry!(f, grid, t, geo)
+            @test maximum(abs, f.data .- before) < 5e-4
+        end
 
-        # residual field: rotation of (u_x, u_y) by θ = (Rc/(Rc+x) - 1) h,
-        # u = (1, 0) -> u_y = -sin θ; the curvature only feeds u_x at phase 0
+        # residual field, no pitch: rotation of (u_x, u_y) by θ = (Rc/(Rc+x) - 1) h,
+        # u = (1, 0) -> u_y = -sin θ
         f = seed(grid, (xs, v) -> maxwellian(v[1] - 1, v[2], v[3]))
-        bslLD.advect_geometry!(f, grid, t, g)
+        bslLD._residual_rotation!(f, grid, g, t.dt, 1.0, 0.0, 1.0, lag)
         theta = @. (Rc / (Rc + x) - 1) * t.dt
         @test maximum(abs, mean_u(f, 2) .+ sin.(theta)) < 1e-5
 
+        # residual field with pitch: an exact rotation by ρ = -h (β2 ê + (β3 - 1) ẑ),
+        # ê = (-sin φ, cos φ, 0); compare the mean velocity with Rodrigues' formula
+        U = [1.0, 0.5, -0.5]
+        phi = 0.4
+        f = seed(grid, (xs, v) -> maxwellian(v[1] - U[1], v[2] - U[2], v[3] - U[3]))
+        bslLD._residual_rotation!(f, grid, gp, t.dt, cos(phi), sin(phi), 1.0, lag)
+        for (i, xi) in enumerate(x)
+            b2, b3 = bslLD._patch_field(gp, xi)
+            rho = -t.dt .* [-sin(phi) * b2, cos(phi) * b2, b3 - 1]
+            th = sqrt(sum(abs2, rho))
+            k = rho ./ th
+            Urot = U .* cos(th) .+ [k[2] * U[3] - k[3] * U[2], k[3] * U[1] - k[1] * U[3], k[1] * U[2] - k[2] * U[1]] .* sin(th) .+ k .* sum(k .* U) .* (1 - cos(th))
+            @test maximum(abs, [mean_u(f, d)[i] for d = 1:3] .- Urot) < 1e-5
+        end
+
         # curvature, advective form: f is constant along characteristics, so at
-        # fixed x the velocity flow is compressible (∂_u·a = -v_x/(Rc+x)) and
-        # d<u_x>/dt = (<u_z^2> - <u_x^2>)/(Rc+x). Mass balances only together with
-        # the x-advection, in the measure J = (Rc+x)/Rc.
+        # fixed x the velocity flow is compressible and, at phase 0,
+        # d<u_x>/dt = (<v_θ²> - <u_x²>)/(r0+x) + (<v_φ²> - <u_x²>)/(Rc+x).
+        # Mass balances only together with the x-advection, in the measure J.
         f = seed(grid, (xs, v) -> maxwellian(v[1], v[2], v[3] - 1))   # <u_z^2> = 2
         bslLD.advect_geometry!(f, grid, t, g)
         @test maximum(abs, mean_u(f, 1) ./ (t.dt ./ (Rc .+ x)) .- 1) < 0.05
+        # poloidal pair alone (no pitch, v_θ = u_y) is the toroidal pair with
+        # u_y and u_z swapped (L = 20: at small L the departure points of the
+        # scaling leave the periodic velocity box and wrap, differently per sweep)
+        f = seed(grid, (xs, v) -> maxwellian(v[1], v[2], v[3] - 1))
+        bslLD._curvature_force!(f, grid, bslLD.CurvedPatch(; Rc = 20.0), t.dt, 1.0, 0.0, lag)
+        tor = (mean_u(f, 1), mean_u(f, 3))
+        f = seed(grid, (xs, v) -> maxwellian(v[1], v[2] - 1, v[3]))
+        bslLD._curvature_force!(f, grid, bslLD.CurvedPatch(; Rc = 1e12, r0 = 20.0), t.dt, 1.0,
+            0.0, lag)
+        @test maximum(abs, mean_u(f, 1) .- tor[1]) < 1e-4
+        @test maximum(abs, mean_u(f, 2) .- tor[2]) < 1e-4
+        # with pitch, u_z has a poloidal part: <v_θ²> = 1 + sin²α, <v_φ²> = 1 + cos²α
+        sa, ca = sincos(atan(bslLD._pitch(gp)))
+        f = seed(grid, (xs, v) -> maxwellian(v[1], v[2], v[3] - 1))
+        bslLD._curvature_force!(f, grid, gp, t.dt, 1.0, 0.0, lag)
+        expected = @. t.dt * (sa^2 / (gp.r0 + x) + ca^2 / (gp.Rc + x))
+        @test maximum(abs, mean_u(f, 1) ./ expected .- 1) < 0.05
     end
 
     @testset "Adiabatic field with mirror x" begin
