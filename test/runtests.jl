@@ -5,6 +5,7 @@ using bslLD
     include("basics_test.jl")
     include("interpolation_test.jl")
     include("advection_test.jl")
+    include("lagrange_sweep_test.jl")
     include("index_test.jl")
     include("differential_operators_test.jl")
     include("solvers_test.jl")

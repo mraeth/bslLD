@@ -180,10 +180,8 @@ Lagrange(W::Integer) = Lagrange{Int(W)}()
 @inline stencil_order(::Lagrange{W}) where {W} = Val(W)
 
 # Departure-point displacement in cells along the advected axis. It is constant
-# along that axis -- it depends only on the *other* indices -- so every thread
-# on a line recomputes the same weights. Hoisting them into a per-line setup
-# kernel is the obvious next optimisation, and also removes the Float64
-# accumulation inside `lagrange_weights` from the per-point path.
+# along that axis -- it depends only on the *other* indices -- so the line and
+# cached sweeps below compute the weights once per line instead of once per point.
 @inline _shift_cells(ctx::XShiftContext, ixs, ivs) =
     ctx.dt * ctx.vth * _x_displacement(ctx, ivs) / ctx.delta
 @inline _shift_cells(ctx::VShiftContext, ixs, ivs) =
@@ -199,6 +197,28 @@ Lagrange(W::Integer) = Lagrange{Int(W)}()
     index_combined_to_1d(Base.setindex(ixs, i, ctx.dir), ivs, ctx.sizes_x, ctx.sizes_v)
 @inline _line_linear_index(ctx::VShiftContext, ixs, ivs, i) =
     index_combined_to_1d(ixs, Base.setindex(ivs, i, ctx.dir), ctx.sizes_x, ctx.sizes_v)
+
+# Linear-index stride between neighbours along the advected axis. The product of the
+# sizes before `dir` is written as a loop: slicing the tuple with a runtime length
+# allocates and does not compile for GPU kernels.
+@inline function _prod_before(sizes::Tuple, dir)
+    p = one(eltype(sizes))
+    for d = 1:length(sizes)
+        d < dir && (p *= sizes[d])
+    end
+    return p
+end
+@inline _line_stride(ctx::XShiftContext) = _prod_before(ctx.sizes_x, ctx.dir)
+@inline _line_stride(ctx::VShiftContext) =
+    prod(ctx.sizes_x) * _prod_before(ctx.sizes_v, ctx.dir)
+
+# The multi-index of line `L`, with the advected coordinate set to 1.
+@inline _line_sizes(ctx::XShiftContext) = (Base.setindex(ctx.sizes_x, 1, ctx.dir), ctx.sizes_v)
+@inline _line_sizes(ctx::VShiftContext) = (ctx.sizes_x, Base.setindex(ctx.sizes_v, 1, ctx.dir))
+
+# Whether the shift is constant along the advected line, so that the weights can be
+# computed once per line. True for every context defined here.
+@inline _constant_along_line(ctx) = true
 
 # --- Boundary conditions --------------------------------------------------
 
@@ -291,6 +311,139 @@ end
     @inbounds dst[I] = acc
 end
 
+# Stencil node `j` of a line under `bc`, for the line and cached sweeps. `I0 + j*st` is the
+# linear index of node `j`; nodes outside 1:n go through `_sample_index` (wrap or reflect).
+@inline _sample_line(::Periodic, src, ctx, ixs, ivs, I0, st, j, n) =
+    @inbounds src[I0+mod1(j, n)*st]
+@inline _sample_line(bc, src, ctx, ixs, ivs, I0, st, j, n) =
+    1 <= j <= n ? (@inbounds src[I0+j*st]) : @inbounds src[_sample_index(bc, ctx, ixs, ivs, j, n)]
+
+# One thread per line: weights once, then a strided sweep along the line. Interior
+# stencil nodes are read by stride arithmetic; only halo nodes go through `_sample_line`.
+# Fast when there are many lines; for few lines (e.g. 1D1V) it leaves the device idle.
+@kernel function lagrange_line_kernel!(dst, @Const(src), ctx, order::Val{W}, bc) where {W}
+    L = @index(Global, Linear)
+    lsx, lsv = _line_sizes(ctx)
+    ixs, ivs = index_1d_to_combined(L, lsx, lsv)
+
+    cells, alpha = shift_split(_shift_cells(ctx, ixs, ivs))
+    w = lagrange_weights(order, alpha, eltype(dst))
+
+    n = _line_length(ctx)
+    st = _line_stride(ctx)
+    I0 = _line_linear_index(ctx, ixs, ivs, 1) - st          # I0 + j*st is node j
+    off = -cells - W ÷ 2 - 1
+    @inbounds for i = 1:n
+        base = i + off
+        acc = zero(eltype(dst))
+        if base >= 0 && base + W <= n
+            for m = 1:W
+                acc += w[m] * src[I0+(base+m)*st]
+            end
+        else
+            for m = 1:W
+                acc += w[m] * _sample_line(bc, src, ctx, ixs, ivs, I0, st, base + m, n)
+            end
+        end
+        dst[I0+i*st] = acc
+    end
+end
+
+# Per-line tables (integer cell shift, W stencil weights) for the cached sweep, reused
+# between calls of the same size.
+_order_width(::Val{W}) where {W} = W
+const _LINE_TABLES = Dict{Any,Any}()
+function _line_tables(dst, W, nl, exec)
+    return get!(_LINE_TABLES, (typeof(dst), W, nl)) do
+        (
+            KernelAbstractions.allocate(exec, Int, nl),
+            KernelAbstractions.allocate(exec, eltype(dst), W, nl),
+        )
+    end
+end
+
+# Setup of the cached sweep: one thread per line computes its cell shift and weights.
+@kernel function lagrange_line_setup_kernel!(cells, wts, ctx, order::Val{W}) where {W}
+    L = @index(Global, Linear)
+    lsx, lsv = _line_sizes(ctx)
+    ixs, ivs = index_1d_to_combined(L, lsx, lsv)
+    c, alpha = shift_split(_shift_cells(ctx, ixs, ivs))
+    w = lagrange_weights(order, alpha, eltype(wts))
+    cells[L] = c
+    for m = 1:W
+        wts[m, L] = w[m]
+    end
+end
+
+# Cached sweep: one thread per point (coalesced access, full parallelism), weights read
+# from the per-line table. Same arithmetic, in the same order, as the other kernels.
+@kernel function lagrange_cached_kernel!(
+    dst,
+    @Const(src),
+    @Const(cells),
+    @Const(wts),
+    ctx,
+    order::Val{W},
+    bc,
+    st::Int,
+    n::Int,
+) where {W}
+    p = @index(Global, Linear)
+    q = p - 1
+    j = (q ÷ st) % n + 1
+    L = q % st + st * (q ÷ (st * n)) + 1
+    I0 = p - j * st
+    base = j - @inbounds(cells[L]) - W ÷ 2 - 1
+    acc = zero(eltype(dst))
+    if base >= 0 && base + W <= n
+        @inbounds for m = 1:W
+            acc += wts[m, L] * src[I0+(base+m)*st]
+        end
+    else
+        lsx, lsv = _line_sizes(ctx)
+        ixs, ivs = index_1d_to_combined(L, lsx, lsv)
+        @inbounds for m = 1:W
+            acc += wts[m, L] * _sample_line(bc, src, ctx, ixs, ivs, I0, st, base + m, n)
+        end
+    end
+    @inbounds dst[p] = acc
+end
+
+"""
+Kernel used by the Lagrange sweeps, `bslLD._SWEEP_MODE[]`:
+
+  * `:auto` (default): `:line` if the sweep has at least `_AUTO_MIN_LINES[]` lines, `:cached` otherwise;
+  * `:cached`: per-line weight table, one thread per point;
+  * `:line`: one thread per line;
+  * `:point`: weights recomputed for every point.
+
+All modes give bit-identical results.
+"""
+const _SWEEP_MODE = Ref(:auto)
+const _AUTO_MIN_LINES = Ref(100_000)
+
+function _lagrange_sweep!(dst, src, ctx, method, bc, exec)
+    order = stencil_order(method)
+    n = _line_length(ctx)
+    nl = length(src) ÷ n
+    mode = _SWEEP_MODE[]
+    if mode === :auto
+        mode = nl >= _AUTO_MIN_LINES[] ? :line : :cached
+    end
+    if mode === :cached && _constant_along_line(ctx)
+        cells, wts = _line_tables(dst, _order_width(order), nl, exec)
+        lagrange_line_setup_kernel!(exec)(cells, wts, ctx, order; ndrange = nl)
+        lagrange_cached_kernel!(exec)(
+            dst, src, cells, wts, ctx, order, bc, _line_stride(ctx), n; ndrange = length(src))
+    elseif mode === :line && _constant_along_line(ctx)
+        lagrange_line_kernel!(exec)(dst, src, ctx, order, bc; ndrange = nl)
+    else
+        lagrange_shift_kernel!(exec)(dst, src, ctx, order, bc; ndrange = length(src))
+    end
+    KernelAbstractions.synchronize(exec)
+    return dst
+end
+
 # --- Direction drivers ----------------------------------------------------
 
 function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, plan)
@@ -359,9 +512,7 @@ function _advect_dir!(f, ctx, plan, method::Lagrange, bc, _fwd_plan, _inv_plan)
         sym!(f.data, ctx; ndrange = length(f.data))
         KernelAbstractions.synchronize(exec)
     end
-    k! = lagrange_shift_kernel!(exec)
-    k!(plan.rbuf, f.data, ctx, stencil_order(method), bc; ndrange = length(f.data))
-    KernelAbstractions.synchronize(exec)
+    _lagrange_sweep!(plan.rbuf, f.data, ctx, method, bc, exec)
     copyto!(f.data, plan.rbuf)
     return nothing
 end

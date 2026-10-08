@@ -82,6 +82,24 @@ Wider stencils hold the spectrum flat out to larger `k`: over 200 steps the ampl
 `kh = 0.5π` is 0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24`. See
 `examples/interpolation_spectra.jl`.
 
+#### Sweep kernels
+
+The shift and the stencil weights are constant along the advected axis, so a Lagrange sweep can
+compute them once per line instead of once per point. Four kernels are available and give
+bit-identical results; `bslLD._SWEEP_MODE[]` selects one:
+
+| mode | kernel | best when |
+|---|---|---|
+| `:auto` (default) | `:line` with at least `bslLD._AUTO_MIN_LINES[]` (10⁵) lines, `:cached` otherwise | always |
+| `:cached` | a per-line setup kernel fills a table of cell shifts and weights, then one thread per point | few lines (1D1V) |
+| `:line` | one thread per line, weights once, strided walk | many lines (2D2V, 3D3V) |
+| `:point` | weights recomputed for every point | reference |
+
+On one H100 (Float64, `Lagrange(8)`, periodic; minimum over repeats of a single advection sweep)
+the best kernel is 13–22× faster than `:point` for 2D2V `n = 64`, about 9× for 3D3V `n = 24` and
+1.6–1.7× for 1D1V `n = 4096`. In 1D1V `:line` is slower than `:point` (12× for x-sweeps, 2× for
+v-sweeps) because there are only `n` lines to run in parallel; `:auto` avoids that.
+
 ### Boundary conditions
 
 `advectX!` also takes `boundary`, either `Periodic()` (default) or `Mirror()`, the specular wall
