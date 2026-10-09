@@ -18,3 +18,6 @@ end
 @inline thermal_velocity(s::Species) = inv(sqrt(s.m))
 @inline electric_acceleration_scale(s::Species) = s.q / sqrt(s.m)
 gyro_frequency(s::Species, grid::Grid) = abs(s.q) / s.m * grid.b0
+
+import PlasmaCore: backend_copy
+backend_copy(sp::Species) = Species(sp.m, sp.q, backend_copy(sp.dist))
