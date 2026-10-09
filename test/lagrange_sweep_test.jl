@@ -3,7 +3,7 @@ using Test
 import bslLD
 
 @testset "Lagrange sweep kernels are bit-identical" begin
-    modes = (:point, :line, :cached, :auto)
+    modes = (:point, :line, :cached, :tiled, :auto)
     old_mode, old_min = bslLD._SWEEP_MODE[], bslLD._AUTO_MIN_LINES[]
 
     # rough, non-smooth input: a bad stencil index would show up immediately
@@ -35,7 +35,7 @@ import bslLD
             counts = vcat(fill(12, nx), fill(10, nv))
             grid = bslLD.Grid(eta_min, eta_max, counts, nx)
             ref = run_sweeps(:point, grid, nv, W, bslLD.Periodic())
-            for mode in (:line, :cached, :auto)
+            for mode in (:line, :cached, :tiled, :auto)
                 @test run_sweeps(mode, grid, nv, W, bslLD.Periodic()) == ref
             end
         end
@@ -44,7 +44,7 @@ import bslLD
             nx, nvx = 16, 6
             grid = bslLD.Grid([0.0, -1.5, -1.5], [2pi, 1.5, 1.5], [nx, nvx, nvx], 1)
             ref = run_sweeps(:point, grid, 2, W, bslLD.Mirror(); vsweep = false)
-            for mode in (:line, :cached, :auto)
+            for mode in (:line, :cached, :tiled, :auto)
                 @test run_sweeps(mode, grid, 2, W, bslLD.Mirror(); vsweep = false) == ref
             end
         end

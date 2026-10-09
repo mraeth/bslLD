@@ -91,31 +91,25 @@ end
     return cis(-ctx.dt * ctx.k[ivs[ctx.dir]] * ctx.electric_scale * _v_displacement(ctx, ixs))
 end
 
-# --- AdvectionPlan: pre-allocated buffers and cached data for zero-allocation advection ---
+# --- AdvectionPlan: cached data and lazily allocated buffers for advection ---
+#
+# The FFT work buffer (complex, twice the size of f) and its plans are only needed by
+# `Fourier()`, the real work buffer only by Lagrange sweeps that cannot run in place. Both
+# are created on first use, so a Lagrange run with the tiled sweep holds no copy of f.
 
-struct AdvectionPlan{FB,RB,PXF,PXI,PVF,PVI,KXT,KVT,VAT,BK}
-    ff_buf::FB   # Complex{Float64} work buffer, same shape as f.data
-    rbuf::RB  # real work buffer for out-of-place gathers (Lagrange path)
-    fwd_x::PXF  # ntuple of in-place forward FFT plans, one per x-dim
-    inv_x::PXI  # ntuple of in-place inverse FFT plans, one per x-dim
-    fwd_v::PVF  # ntuple of in-place forward FFT plans, one per v-dim
-    inv_v::PVI  # ntuple of in-place inverse FFT plans, one per v-dim
+struct AdvectionPlan{KXT,KVT,VAT,BK}
     kx::KXT  # ntuple of wavenumber arrays for x-dims (on backend)
     kv::KVT  # ntuple of wavenumber arrays for v-dims (on backend)
     vaxes::VAT  # ntuple of velocity axes already copied to backend
     backend::BK
+    spectral::Base.RefValue{Any}  # (ff_buf, fwd plans, inv plans), one plan per axis; or nothing
+    work::Base.RefValue{Any}      # real work buffer, same shape as f.data; or nothing
 end
 
 function AdvectionPlan(
     f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
 ) where {DT,NX,NV,NXNV}
-    ff_buf = similar(f.data, Complex{DT})
-    rbuf = similar(f.data)
-    fwd_x = ntuple(d -> plan_fft!(ff_buf, d), Val(NX))
-    inv_x = ntuple(d -> plan_ifft!(ff_buf, d), Val(NX))
-    fwd_v = ntuple(d -> plan_fft!(ff_buf, NX + d), Val(NV))
-    inv_v = ntuple(d -> plan_ifft!(ff_buf, NX + d), Val(NV))
     kx = ntuple(Val(NX)) do d
         n = size(f.data, d)
         k = similar(f.data, DT, n)
@@ -129,8 +123,43 @@ function AdvectionPlan(
         k
     end
     vaxes = map(backend_vector, grid.vaxes)
-    return AdvectionPlan(
-        ff_buf, rbuf, fwd_x, inv_x, fwd_v, inv_v, kx, kv, vaxes, bslLD.backend())
+    return AdvectionPlan(kx, kv, vaxes, bslLD.backend(), Ref{Any}(nothing), Ref{Any}(nothing))
+end
+
+# Complex work buffer and in-place FFT plans along every axis (x axes first, then v).
+function _spectral_buffers(plan::AdvectionPlan, f::DistributionGrid{DT,NX,NV,NXNV}) where {DT,NX,NV,NXNV}
+    lock(_plan_cache_lock) do
+        if plan.spectral[] === nothing
+            ff_buf = similar(f.data, Complex{DT})
+            plan.spectral[] = (
+                ff_buf,
+                ntuple(d -> plan_fft!(ff_buf, d), Val(NXNV)),
+                ntuple(d -> plan_ifft!(ff_buf, d), Val(NXNV)),
+            )
+        end
+        plan.spectral[]
+    end
+end
+
+function _work_buffer(plan::AdvectionPlan, f)
+    lock(_plan_cache_lock) do
+        plan.work[] === nothing && (plan.work[] = similar(f.data))
+        plan.work[]
+    end::typeof(f.data)
+end
+
+"""
+    bslLD.release_advection_buffers!(f)
+
+Drop the cached advection plans of distribution `f` (wavenumbers, FFT and work buffers), so
+that their device memory can be reclaimed once `f` is no longer used. They are rebuilt on the
+next advection of `f`.
+"""
+function release_advection_buffers!(f)
+    lock(_plan_cache_lock) do
+        delete!(_plan_cache, f.data)
+    end
+    return nothing
 end
 
 const _plan_cache = IdDict{Any,Dict{Any,AdvectionPlan}}()
@@ -409,10 +438,184 @@ end
     @inbounds dst[p] = acc
 end
 
+
+# --- Tiled sweeps (periodic): shared-memory staging, weights once per line ------------
+# One workgroup loads a tile of whole lines into shared memory with coalesced reads, the
+# line weights are computed once per line into shared memory (no global table), and the
+# output is written coalesced. Same arithmetic, in the same order, as the other kernels.
+const _TILE_WG = 256                        # threads per workgroup
+const _TILE_LINES = 32                      # lines per workgroup
+const _TILE_MAX_N = 192                     # tile of _TILE_LINES*n Float64 must fit in shared memory
+
+# The shift of an x-sweep depends only on the velocity indices, that of a v-sweep only on
+# the position indices (see `_shift_cells`). The tiled sweep therefore computes the cell
+# shift and weights once per distinct key -- prod(sizes_v) or prod(sizes_x) values instead
+# of one per line -- and looks them up by the linear index `q` (0-based) of any node.
+@inline _shift_nkeys(ctx::XShiftContext) = prod(ctx.sizes_v)
+@inline _shift_nkeys(ctx::VShiftContext) = prod(ctx.sizes_x)
+@inline _shift_key(ctx::XShiftContext, q, nxtot) = q ÷ nxtot
+@inline _shift_key(ctx::VShiftContext, q, nxtot) = q % nxtot
+@inline _key_node(ctx::XShiftContext, k, nxtot) = k * nxtot + 1    # 1-based node of key k (0-based)
+@inline _key_node(ctx::VShiftContext, k, nxtot) = k + 1
+
+@kernel function lagrange_key_setup_kernel!(cells, wts, ctx, order::Val{W}, nxtot::Int) where {W}
+    k = @index(Global, Linear)
+    ixs, ivs = index_1d_to_combined(_key_node(ctx, k - 1, nxtot), ctx.sizes_x, ctx.sizes_v)
+    c, alpha = shift_split(_shift_cells(ctx, ixs, ivs))
+    w = lagrange_weights(order, alpha, eltype(wts))
+    @inbounds cells[k] = c
+    @inbounds for m = 1:W
+        wts[m, k] = w[m]
+    end
+end
+
+# Copy the cell shifts and weights of the tile's lines from the key table to shared memory;
+# `node0(c)` is the 0-based linear index of node 0 of tile line `c` (0-based), or -1 if absent.
+@inline function _tile_stage!(wsh, csh, cells, wts, ctx, lid, nxtot, node0, ::Val{W}) where {W}
+    idx = lid
+    while idx < _TILE_LINES * W
+        c = idx % _TILE_LINES
+        m = idx ÷ _TILE_LINES + 1
+        q = node0(c)
+        if q >= 0
+            key = _shift_key(ctx, q, nxtot) + 1
+            @inbounds wsh[c+1, m] = wts[m, key]
+            m == 1 && (@inbounds csh[c+1] = cells[key])
+        end
+        idx += _TILE_WG
+    end
+    return nothing
+end
+
+# Stencil sum for node `j` (0-based) of a line held in shared memory; `tile_at(k)` reads node `k`.
+@inline function _tile_stencil(wsh, c, cells, j, order::Val{W}, ::Val{N}, tile_at, ::Type{T}) where {W,N,T}
+    k0 = mod(j - cells - W ÷ 2, N)                        # node of the stencil start, 0-based
+    acc = zero(T)
+    @inbounds for m = 1:W
+        k = k0 + m
+        k = k > N ? k - N : k
+        acc += wsh[c, m] * tile_at(k)
+    end
+    return acc
+end
+
+# Every workgroup reads all nodes of its lines into shared memory before the barrier and
+# writes only those nodes after it, so the tiled sweep may run in place (`dst === src`).
+
+# Axis with stride 1 (lines contiguous): the tile is `_TILE_LINES` consecutive lines.
+# (KernelAbstractions rule: `@index` only as `x = @index(...)`, and nothing computed
+# before `@synchronize` is visible after it, so the indices are rebuilt in each phase.)
+@kernel function lagrange_tile_contig_kernel!(
+    dst, src, @Const(cells), @Const(wts), ctx, order::Val{W}, nodes::Val{N},
+    nl::Int, nxtot::Int,
+) where {W,N}
+    tile = @localmem eltype(dst) (_TILE_LINES * N)
+    wsh = @localmem eltype(dst) (_TILE_LINES, W)
+    csh = @localmem Int (_TILE_LINES)
+    I1 = @index(Global, Linear)
+    let lid = (I1 - 1) % _TILE_WG, L0 = (I1 - 1) ÷ _TILE_WG * _TILE_LINES
+        _tile_stage!(wsh, csh, cells, wts, ctx, lid, nxtot,
+            c -> L0 + c < nl ? (L0 + c) * N : -1, order)
+        e = lid
+        while e < _TILE_LINES * N
+            if L0 + e ÷ N < nl
+                @inbounds tile[e+1] = src[L0*N+e+1]
+            end
+            e += _TILE_WG
+        end
+    end
+    @synchronize
+    I2 = @index(Global, Linear)
+    let lid = (I2 - 1) % _TILE_WG, L0 = (I2 - 1) ÷ _TILE_WG * _TILE_LINES
+        e = lid
+        while e < _TILE_LINES * N
+            l = e ÷ N
+            if L0 + l < nl
+                j = e - l * N
+                acc = _tile_stencil(wsh, l + 1, @inbounds(csh[l+1]), j, order, nodes,
+                    k -> @inbounds(tile[l*N+k]), eltype(dst))
+                @inbounds dst[L0*N+e+1] = acc
+            end
+            e += _TILE_WG
+        end
+    end
+end
+
+# Axis with stride `A > 1`: the tile is `_TILE_LINES` neighbouring lines (consecutive in
+# memory at every node of the line), all `N` nodes; rows are walked by the thread rows.
+@kernel function lagrange_tile_strided_kernel!(
+    dst, src, @Const(cells), @Const(wts), ctx, order::Val{W}, nodes::Val{N},
+    A::Int, tiles_per_b::Int, nxtot::Int,
+) where {W,N}
+    tile = @localmem eltype(dst) (_TILE_LINES, N)
+    wsh = @localmem eltype(dst) (_TILE_LINES, W)
+    csh = @localmem Int (_TILE_LINES)
+    I1 = @index(Global, Linear)
+    let lid = (I1 - 1) % _TILE_WG, g = (I1 - 1) ÷ _TILE_WG
+        b = g ÷ tiles_per_b
+        a0 = (g - b * tiles_per_b) * _TILE_LINES           # first line of the tile in the fast block
+        _tile_stage!(wsh, csh, cells, wts, ctx, lid, nxtot,
+            c -> a0 + c < A ? a0 + c + A * N * b : -1, order)
+        ta = lid % _TILE_LINES
+        a = a0 + ta
+        if a < A
+            p0 = a + A * N * b + 1                       # linear index of node 0 of the line
+            j = lid ÷ _TILE_LINES
+            while j < N
+                @inbounds tile[ta+1, j+1] = src[p0+j*A]
+                j += _TILE_WG ÷ _TILE_LINES
+            end
+        end
+    end
+    @synchronize
+    I2 = @index(Global, Linear)
+    let lid = (I2 - 1) % _TILE_WG, g = (I2 - 1) ÷ _TILE_WG
+        ta = lid % _TILE_LINES
+        b = g ÷ tiles_per_b
+        a = (g - b * tiles_per_b) * _TILE_LINES + ta
+        if a < A
+            p0 = a + A * N * b + 1
+            j = lid ÷ _TILE_LINES
+            while j < N
+                acc = _tile_stencil(wsh, ta + 1, @inbounds(csh[ta+1]), j, order, nodes,
+                    k -> @inbounds(tile[ta+1, k]), eltype(dst))
+                @inbounds dst[p0+j*A] = acc
+                j += _TILE_WG ÷ _TILE_LINES
+            end
+        end
+    end
+end
+
+function _tile_sweep!(dst, src, ctx, order::Val{W}, exec) where {W}
+    n = _line_length(ctx)
+    nl = length(src) ÷ n
+    st = _line_stride(ctx)
+    nxtot = prod(ctx.sizes_x)
+    nkeys = _shift_nkeys(ctx)
+    cells, wts = _line_tables(dst, W, nkeys, exec)
+    lagrange_key_setup_kernel!(exec)(cells, wts, ctx, order, nxtot; ndrange = nkeys)
+    if st == 1
+        ngroups = cld(nl, _TILE_LINES)
+        lagrange_tile_contig_kernel!(exec, _TILE_WG)(
+            dst, src, cells, wts, ctx, order, Val(n), nl, nxtot; ndrange = ngroups * _TILE_WG)
+    else
+        tpb = cld(st, _TILE_LINES)
+        ngroups = tpb * (nl ÷ st)
+        lagrange_tile_strided_kernel!(exec, _TILE_WG)(
+            dst, src, cells, wts, ctx, order, Val(n), st, tpb, nxtot; ndrange = ngroups * _TILE_WG)
+    end
+    return dst
+end
+
+@inline _tile_ok(::Periodic, ::Val{W}, n) where {W} = W <= n <= _TILE_MAX_N
+@inline _tile_ok(bc, ::Val{W}, n) where {W} = false
+
 """
 Kernel used by the Lagrange sweeps, `bslLD._SWEEP_MODE[]`:
 
-  * `:auto` (default): `:line` if the sweep has at least `_AUTO_MIN_LINES[]` lines, `:cached` otherwise;
+  * `:auto` (default): `:tiled` for periodic axes of up to `_TILE_MAX_N` nodes, else `:line` if the sweep
+    has at least `_AUTO_MIN_LINES[]` lines, `:cached` otherwise;
+  * `:tiled`: shared-memory tiles of lines, weights once per line (periodic only, else falls back);
   * `:cached`: per-line weight table, one thread per point;
   * `:line`: one thread per line;
   * `:point`: weights recomputed for every point.
@@ -422,15 +625,30 @@ All modes give bit-identical results.
 const _SWEEP_MODE = Ref(:auto)
 const _AUTO_MIN_LINES = Ref(100_000)
 
+function _sweep_mode(ctx, order, bc)
+    n = _line_length(ctx)
+    nl = prod(ctx.sizes_x) * prod(ctx.sizes_v) ÷ n
+    mode = _SWEEP_MODE[]
+    if mode === :auto
+        mode = _tile_ok(bc, order, n) ? :tiled : nl >= _AUTO_MIN_LINES[] ? :line : :cached
+    elseif mode === :tiled && !_tile_ok(bc, order, n)
+        mode = nl >= _AUTO_MIN_LINES[] ? :line : :cached
+    end
+    return mode
+end
+
+# Whether this sweep runs in place (the tiled kernel), so no work buffer or copy is needed.
+_sweep_in_place(ctx, method, bc) =
+    _sweep_mode(ctx, stencil_order(method), bc) === :tiled && _constant_along_line(ctx)
+
 function _lagrange_sweep!(dst, src, ctx, method, bc, exec)
     order = stencil_order(method)
     n = _line_length(ctx)
     nl = length(src) ÷ n
-    mode = _SWEEP_MODE[]
-    if mode === :auto
-        mode = nl >= _AUTO_MIN_LINES[] ? :line : :cached
-    end
-    if mode === :cached && _constant_along_line(ctx)
+    mode = _sweep_mode(ctx, order, bc)
+    if mode === :tiled && _constant_along_line(ctx)
+        _tile_sweep!(dst, src, ctx, order, exec)
+    elseif mode === :cached && _constant_along_line(ctx)
         cells, wts = _line_tables(dst, _order_width(order), nl, exec)
         lagrange_line_setup_kernel!(exec)(cells, wts, ctx, order; ndrange = nl)
         lagrange_cached_kernel!(exec)(
@@ -440,7 +658,9 @@ function _lagrange_sweep!(dst, src, ctx, method, bc, exec)
     else
         lagrange_shift_kernel!(exec)(dst, src, ctx, order, bc; ndrange = length(src))
     end
-    KernelAbstractions.synchronize(exec)
+    # No synchronize: every kernel and copy of the advection runs on the same stream, so
+    # they are ordered already. A synchronize per sweep cost several ms of host wake-up
+    # latency (CUDA.jl's default synchronize is non-blocking) on top of a ~6 ms sweep.
     return dst
 end
 
@@ -491,11 +711,18 @@ function _v_context(
     )
 end
 
-function _advect_dir!(f, ctx, plan, ::Fourier, ::Periodic, fwd_plan, inv_plan)
+function _advect_dir!(f, ctx, plan, ::Fourier, ::Periodic, axis)
     exec = plan.backend
+    ff_buf, fwd, inv = _spectral_buffers(plan, f)
+    _fourier_dir!(f, ff_buf, fwd[axis], inv[axis], ctx, exec)
+    return nothing
+end
+
+# Function barrier: the spectral buffers come out of an untyped cache.
+function _fourier_dir!(f, ff_buf, fwd_plan, inv_plan, ctx, exec)
     _apply_phase_shift!(
         f,
-        plan.ff_buf,
+        ff_buf,
         fwd_plan,
         inv_plan,
         spectral_multiply_kernel!(exec),
@@ -505,19 +732,45 @@ function _advect_dir!(f, ctx, plan, ::Fourier, ::Periodic, fwd_plan, inv_plan)
     return nothing
 end
 
-function _advect_dir!(f, ctx, plan, method::Lagrange, bc, _fwd_plan, _inv_plan)
+function _advect_dir!(f, ctx, plan, method::Lagrange, bc, _axis)
     exec = plan.backend
     if bc isa Mirror
         sym! = mirror_symmetrize_kernel!(exec)
         sym!(f.data, ctx; ndrange = length(f.data))
-        KernelAbstractions.synchronize(exec)
     end
-    _lagrange_sweep!(plan.rbuf, f.data, ctx, method, bc, exec)
-    copyto!(f.data, plan.rbuf)
+    if _sweep_in_place(ctx, method, bc)
+        _lagrange_sweep!(f.data, f.data, ctx, method, bc, exec)
+    else
+        buf = _work_buffer(plan, f)
+        _lagrange_sweep!(buf, f.data, ctx, method, bc, exec)
+        copyto!(f.data, buf)
+    end
     return nothing
 end
 
-_advect_dir!(f, ctx, plan, ::Fourier, bc, fwd, inv) = throw(
+# All directions of one advectX!/advectV! call in sequence. In-place (tiled) sweeps stay in
+# their array; the others ping-pong between `f.data` and the plan's work buffer (allocated
+# on first need), so at most one copy back is made at the end instead of one per direction.
+function _advect_lagrange_dirs!(f, plan, method::Lagrange, bc, contexts)
+    exec = plan.backend
+    src = f.data
+    for ctx in contexts
+        if bc isa Mirror
+            mirror_symmetrize_kernel!(exec)(src, ctx; ndrange = length(src))
+        end
+        if _sweep_in_place(ctx, method, bc)
+            _lagrange_sweep!(src, src, ctx, method, bc, exec)
+        else
+            dst = src === f.data ? _work_buffer(plan, f) : f.data
+            _lagrange_sweep!(dst, src, ctx, method, bc, exec)
+            src = dst
+        end
+    end
+    src === f.data || copyto!(f.data, src)
+    return nothing
+end
+
+_advect_dir!(f, ctx, plan, ::Fourier, bc, axis) = throw(
     ArgumentError("$(typeof(bc)) boundaries need a Lagrange method; Fourier is periodic"))
 
 # A mirror pairs v with -v by index, which is only the physical reflection when
@@ -555,8 +808,7 @@ function _advect_x_dir!(
         plan,
         method,
         bc,
-        plan.fwd_x[dir],
-        plan.inv_x[dir],
+        dir,
     )
     return nothing
 end
@@ -581,8 +833,7 @@ function _advect_v_dir!(
         plan,
         method,
         bc,
-        plan.fwd_v[dir],
-        plan.inv_v[dir],
+        length(grid.xaxes) + dir,
     )
     return nothing
 end
@@ -595,6 +846,15 @@ function advectX!(
     boundary = Periodic(),
 )
     plan = _get_plan(sp.dist, grid)
+    if method isa Lagrange
+        NX = length(grid.xaxes)
+        boundary isa Mirror && foreach(
+            dir -> _check_mirror_axes(grid, dir, stencil_order(method)), 1:NX)
+        _advect_lagrange_dirs!(
+            sp.dist, plan, method, boundary,
+            (_x_context(sp, grid, simTime, dir, plan) for dir = 1:NX))
+        return nothing
+    end
     for dir = 1:length(grid.xaxes)
         _advect_x_dir!(sp, grid, simTime, dir, plan, method, boundary)
     end
@@ -620,6 +880,14 @@ function advectV!(
     boundary = Periodic(),
 )
     plan = _get_plan(sp.dist, grid)
+    if method isa Lagrange
+        boundary isa Periodic || throw(ArgumentError(
+            "mirror boundaries apply to spatial axes only, as in bsl6d"))
+        _advect_lagrange_dirs!(
+            sp.dist, plan, method, boundary,
+            (_v_context(sp, grid, simTime, e, dir, plan) for dir = 1:length(grid.vaxes)))
+        return nothing
+    end
     for dir = 1:length(grid.vaxes)
         _advect_v_dir!(sp, grid, simTime, e, dir, plan, method, boundary)
     end

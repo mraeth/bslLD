@@ -85,12 +85,13 @@ Wider stencils hold the spectrum flat out to larger `k`: over 200 steps the ampl
 #### Sweep kernels
 
 The shift and the stencil weights are constant along the advected axis, so a Lagrange sweep can
-compute them once per line instead of once per point. Four kernels are available and give
+compute them once per line instead of once per point. Five kernels are available and give
 bit-identical results; `bslLD._SWEEP_MODE[]` selects one:
 
 | mode | kernel | best when |
 |---|---|---|
-| `:auto` (default) | `:line` with at least `bslLD._AUTO_MIN_LINES[]` (10⁵) lines, `:cached` otherwise | always |
+| `:auto` (default) | `:tiled` for periodic axes of `W ≤ n ≤ 192` nodes; else `:line` with at least `bslLD._AUTO_MIN_LINES[]` (10⁵) lines, `:cached` otherwise | always |
+| `:tiled` | 32 lines per workgroup staged in shared memory (coalesced reads and writes); shift and weights computed once per distinct key -- the velocity index for x-sweeps, the position index for v-sweeps -- and staged with the tile | periodic, moderate `n` (2D2V, 3D3V) |
 | `:cached` | a per-line setup kernel fills a table of cell shifts and weights, then one thread per point | few lines (1D1V) |
 | `:line` | one thread per line, weights once, strided walk | many lines (2D2V, 3D3V) |
 | `:point` | weights recomputed for every point | reference |
@@ -99,6 +100,18 @@ On one H100 (Float64, `Lagrange(8)`, periodic; minimum over repeats of a single 
 the best kernel is 13–22× faster than `:point` for 2D2V `n = 64`, about 9× for 3D3V `n = 24` and
 1.6–1.7× for 1D1V `n = 4096`. In 1D1V `:line` is slower than `:point` (12× for x-sweeps, 2× for
 v-sweeps) because there are only `n` lines to run in parallel; `:auto` avoids that.
+
+`:tiled` reads all nodes of its lines before writing any of them, so it runs in place: no work
+buffer and no copy. For the other modes, `advectX!`/`advectV!` without a direction argument
+alternate between the distribution and one work buffer, so at most one copy is made per call.
+
+At 3D3V `n = 32` (32³·33³ ≈ 1.18·10⁹ points, H100, Float64) a full `advectX!`/`advectV!` call
+costs 10.8–16.5 ms per direction for `W = 4…12` (median of 10), against 54–65 ms for `:line` at
+`W = 8` and 35–67 ms for bsl6d on the same device (3.3–4.2× faster than bsl6d).
+
+The Lagrange sweeps do not synchronise the device: all their kernels run on one stream. When
+timing them, or whenever a synchronisation is needed, prefer `CUDA.synchronize(; blocking = true)`:
+CUDA.jl's default, non-blocking `synchronize` can add several milliseconds of wake-up latency.
 
 ### Boundary conditions
 
