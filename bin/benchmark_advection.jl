@@ -1,22 +1,34 @@
 #!/usr/bin/env julia
 
 using Pkg
-Pkg.activate(joinpath(@__DIR__, "."); io = devnull)
-Pkg.develop(path = joinpath(@__DIR__, ".."); io = devnull)
-
+Pkg.activate(@__DIR__; io = devnull)
 
 using Statistics
-using CUDA
-using bslLD
-using KernelAbstractions
+
+# Detects the GPU (is_cuda, ...), loads its package and bslLD, so the CPU benchmark also runs
+# without a GPU.
+include("../scripts/select_backend.jl")
 
 const DEFAULTS = (nx = 1024, nv = 1024, samples = 50, warmup = 5, dt = 0.05, epsilon = 0.01)
 
+# Each routine receives (f, grid, e, simTime, plan). The plain variants look the plan up in
+# bslLD's cache, which is keyed on the identity of f.data and is therefore rebuilt for every
+# fresh clone; the (plan) variants reuse one prebuilt plan and time the advection alone.
 const ROUTINES = (
-    ("advectX!      ", (f, grid, _, _plan) -> bslLD.advectX!(f, grid)),
-    ("advectV!      ", (f, grid, e, _plan) -> bslLD.advectV!(f, grid, e)),
-    ("advectX!(plan)", (f, grid, _, plan) -> bslLD.advectX!(f, grid, plan)),
-    ("advectV!(plan)", (f, grid, e, plan) -> bslLD.advectV!(f, grid, e, plan)),
+    ("advectX!      ", (f, grid, _, st, _plan) -> bslLD.advectX!(f, grid, st)),
+    ("advectV!      ", (f, grid, e, st, _plan) -> bslLD.advectV!(f, grid, st, e)),
+    (
+        "advectX!(plan)",
+        (f, grid, _, st, plan) -> for dir = 1:length(grid.xaxes)
+            bslLD._advect_x_dir!(f, grid, st, dir, plan)
+        end,
+    ),
+    (
+        "advectV!(plan)",
+        (f, grid, e, st, plan) -> for dir = 1:length(grid.vaxes)
+            bslLD._advect_v_dir!(f, grid, st, e, dir, plan)
+        end,
+    ),
 )
 
 function parse_args(args)
@@ -36,12 +48,14 @@ function parse_args(args)
 end
 
 function make_inputs(nx, nv, dt, epsilon)
-    grid = bslLD.Grid([0.0, -6.0], [10.0, 6.0], [nx, nv], dt, 4, 1)
+    # 4th Grid argument is the number of spatial dimensions (1 for 1D1V).
+    grid = bslLD.Grid([0.0, -6.0], [10.0, 6.0], [nx, nv], 1)
     f = bslLD.Distribution(grid, epsilon)
     ex = @. 0.05 * sin(2pi * grid.xaxes[1] / grid.max[1])
     e = bslLD.VectorField([collect(ex)])
-    plan = bslLD.AdvectionPlan(f, grid)
-    return grid, f, e, plan
+    simTime = bslLD.SimulationTime(dt, 10.0 * dt)
+    plan = bslLD.AdvectionPlan(f.dist, grid)
+    return grid, f, e, simTime, plan
 end
 
 function clone_inputs(f, e)
@@ -73,6 +87,7 @@ function benchmark_routine!(
     f_template,
     grid,
     e_template,
+    simTime,
     plan,
     samples,
     warmup;
@@ -80,7 +95,7 @@ function benchmark_routine!(
 )
     for _ = 1:warmup
         f, e = clone_inputs(f_template, e_template)
-        routine!(f, grid, e, plan)
+        routine!(f, grid, e, simTime, plan)
         sync!()
     end
 
@@ -88,7 +103,7 @@ function benchmark_routine!(
     for _ = 1:samples
         f, e = clone_inputs(f_template, e_template)
         elapsed = @elapsed begin
-            routine!(f, grid, e, plan)
+            routine!(f, grid, e, simTime, plan)
             sync!()
         end
         push!(times, elapsed)
@@ -98,7 +113,7 @@ end
 
 function bench(device, use_backend!, make_inputs, samples, warmup; sync! = (() -> nothing))
     use_backend!()
-    grid, f_template, e_template, plan = make_inputs()
+    grid, f_template, e_template, simTime, plan = make_inputs()
 
     println(device, " benchmarks")
     stats = Dict(
@@ -107,6 +122,7 @@ function bench(device, use_backend!, make_inputs, samples, warmup; sync! = (() -
             f_template,
             grid,
             e_template,
+            simTime,
             plan,
             samples,
             warmup;
@@ -138,7 +154,7 @@ function main(args)
 
     cpu_stats = bench("CPU", bslLD.use_cpu!, make_case, opts["samples"], opts["warmup"])
 
-    if bslLD.cuda_available()
+    if is_cuda && bslLD.cuda_available()
         println()
         gpu_stats = bench(
             "GPU",
