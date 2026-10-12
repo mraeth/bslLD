@@ -1,25 +1,9 @@
 using Pkg
-Pkg.activate(".")
-Pkg.develop(path = "..")
+Pkg.activate(@__DIR__)
+include("../scripts/select_backend.jl")
 
-isCuda = try
-    success(`nvidia-smi`)
-catch
-    false
-end
-if isCuda
-    println("CUDA is available, using GPU acceleration.")
-    using CUDA
-end
-
-using bslLD
-
-if isCuda
-    println("Setting backend to CUDA.")
-    bslLD.use_cuda!()
-else
-    println("CUDA not available, using CPU.")
-end
+# Loaded up front so a missing plotting package fails before the long runs, not after them.
+using CairoMakie
 
 # 1D2V grid with 32x32x32 grid points
 grid = bslLD.Grid([0.0, -4.0, -4.0], [20.0, 4.0, 4.0], [32, 32, 32], 1, 1.0, 3)
@@ -110,26 +94,33 @@ rates_Strang = [
 println("Lie splitting:    ", round.(rates_Lie, digits = 3))
 println("Strang splitting: ", round.(rates_Strang, digits = 3))
 
-using Plots
-
-plot(dts, error_Lie, label = "Lie", xscale = :log10, yscale = :log10, marker = :o)
-plot!(dts, error_Strang, label = "Strang", xscale = :log10, yscale = :log10, marker = :o)
-plot!(
+fig = Figure()
+ax = Axis(
+    fig[1, 1],
+    xlabel = "Time step size (dt)",
+    ylabel = "Error in density",
+    title = "Convergence of Lie vs Strang Splitting",
+    xscale = log10,
+    yscale = log10,
+)
+scatterlines!(ax, dts, error_Lie, label = "Lie")
+scatterlines!(ax, dts, error_Strang, label = "Strang")
+lines!(
+    ax,
     dts,
-    dts/maximum(dts) * maximum(error_Lie),
+    dts / maximum(dts) * maximum(error_Lie),
     label = "O(dt)",
     linestyle = :dash,
     color = :black,
 )
-plot!(
+lines!(
+    ax,
     dts,
-    dts .^ 2/maximum(dts) .^ 2 * maximum(error_Strang),
+    dts .^ 2 / maximum(dts) .^ 2 * maximum(error_Strang),
     label = "O(dt^2)",
     linestyle = :dashdot,
     color = :black,
 )
-xlabel!("Time step size (dt)")
-ylabel!("Error in density")
-title!("Convergence of Lie vs Strang Splitting")
+axislegend(ax, position = :rb)
 
-savefig("convergence.png")
+save("convergence.png", fig)
