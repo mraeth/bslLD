@@ -290,29 +290,6 @@ Mirror
     return ntuple(d -> ctx.vflip[d] ? ctx.sizes_v[d] + 1 - ivs[d] : ivs[d], Val(NV))
 end
 
-# Linear index of the stencil node `i` along the advected axis, under `bc`.
-@inline function _sample_index(::Mirror, ctx::XShiftContext, ixs, ivs, i, n)
-    if i < 1
-        j = min(2 - i, n)                       # reflect about node 1
-        return index_combined_to_1d(
-            Base.setindex(ixs, j, ctx.dir),
-            _flip_v(ctx, ivs),
-            ctx.sizes_x,
-            ctx.sizes_v,
-        )
-    elseif i > n
-        j = max(2n - i, 1)                      # reflect about node n
-        return index_combined_to_1d(
-            Base.setindex(ixs, j, ctx.dir),
-            _flip_v(ctx, ivs),
-            ctx.sizes_x,
-            ctx.sizes_v,
-        )
-    else
-        return _line_linear_index(ctx, ixs, ivs, i)
-    end
-end
-
 # f(x_b, v) <- (f(x_b, v) + f(x_b, R v)) / 2 at both end nodes of every line, one thread
 # per line. Each velocity pair is handled once, by the thread holding its lower linear
 # index, so the in-place update needs no scratch buffer.
@@ -331,22 +308,26 @@ end
     end
 end
 
-# Stencil node `j` of a line under `bc`, for the general sweep. `I0 + j*st` is the
-# linear index of node `j`; nodes outside 1:n go through `_sample_index` (wrap or reflect).
-@inline _sample_line(::Periodic, src, ctx, ixs, ivs, I0, st, j, n) =
-    @inbounds src[I0+mod1(j, n)*st]
-@inline _sample_line(bc, src, ctx, ixs, ivs, I0, st, j, n) =
-    1 <= j <= n ? (@inbounds src[I0+j*st]) :
-    @inbounds src[_sample_index(bc, ctx, ixs, ivs, j, n)]
+# Stencil node `i` of line `L` under `bc`, for the general sweep; `I0 + i*st` is the linear
+# index of node `i` for 1 <= i <= n. Periodic wraps. Mirror reads nodes outside 1:n from the
+# halo buffer `hb[L, h]` filled by `mirror_halo_kernel!` (node 1-h at h, node n+h at H+h).
+@inline _sample_line(::Periodic, src, hb, L, I0, st, i, n) = @inbounds src[I0+mod1(i, n)*st]
+@inline function _sample_line(::Mirror, src, hb, L, I0, st, i, n)
+    i < 1 && return @inbounds hb[L, 1-i]
+    i > n && return @inbounds hb[L, size(hb, 2)÷2+i-n]
+    return @inbounds src[I0+i*st]
+end
 
 # General sweep, for any axis and boundary: one thread per point (coalesced access, full
-# parallelism), cell shift and weights read from the key table (see `_shift_key`). Same
-# arithmetic, in the same order, as the tiled kernels, so results are bit-identical.
+# parallelism), cell shift and weights read from the key table (see `_shift_key`), mirror
+# halo nodes from `hb` (`nothing` for periodic). Same arithmetic, in the same order, as the
+# tiled kernels, so results are bit-identical.
 @kernel function lagrange_cached_kernel!(
     dst,
     @Const(src),
     @Const(cells),
     @Const(wts),
+    @Const(hb),
     ctx,
     order::Val{W},
     bc,
@@ -367,9 +348,8 @@ end
         end
     else
         L = q % st + st * (q ÷ (st * n)) + 1    # line index, as enumerated by `_line_sizes`
-        ixs, ivs = index_1d_to_combined(L, _line_sizes(ctx)...)
         @inbounds for m = 1:W
-            acc += wts[m, k] * _sample_line(bc, src, ctx, ixs, ivs, I0, st, base + m, n)
+            acc += wts[m, k] * _sample_line(bc, src, hb, L, I0, st, base + m, n)
         end
     end
     @inbounds dst[p] = acc
@@ -595,13 +575,14 @@ end
     end
 end
 
-# --- Mirror on a contiguous spatial axis: tiles with reflected halos -------------------
+# --- Mirror: reflected halos; tiles on a contiguous spatial axis -----------------------
 # A mirror halo node of a line is a node of a *different* line (velocity components
-# reversed), so the periodic wrap inside the tile does not apply and an in-place sweep
-# must read the partner line before any workgroup writes. A halo kernel therefore copies,
-# for every line, the `H` reflected nodes on each side into a small buffer
-# `hb[nl, 2H]` first; the tile kernel then holds `H + N + H` nodes per line and needs no
-# wrap and no per-tap boundary test. `H = W/2 + ceil(smax)` halo nodes per side cover every
+# reversed), so the periodic wrap does not apply, and an in-place sweep must read the
+# partner line before any workgroup writes. A halo kernel therefore copies, for every line
+# and any stride, the `H` reflected nodes on each side into a small buffer `hb[nl, 2H]`
+# first. The tile kernel then holds `H + N + H` nodes per line and needs no wrap and no
+# per-tap boundary test; the general kernel reads its out-of-range taps from `hb` instead of
+# locating the partner line per tap (which made it 9-19x slower than periodic on GPU). `H = W/2 + ceil(smax)` halo nodes per side cover every
 # stencil for a cell shift of at most `smax` (a bound from the host velocity grid and dt).
 # Same arithmetic, in the same order, as the other kernels, so results are bit-identical.
 
@@ -611,17 +592,44 @@ _mirror_shift_bound(ctx::XShiftContext) =
 _mirror_halo(ctx, ::Val{W}) where {W} =
     W ÷ 2 + max(1, ceil(Int, _mirror_shift_bound(ctx) + 1e-9))
 
-@kernel function mirror_halo_kernel!(hb, @Const(src), ctx, ::Val{H}, ::Val{N}) where {H,N}
+@kernel function mirror_halo_kernel!(
+    hb,
+    @Const(src),
+    ctx,
+    ::Val{H},
+    ::Val{N},
+    st::Int,
+) where {H,N}
     L = @index(Global, Linear)                 # one thread per line; hb[L, h2] is coalesced over L
     lsx, lsv = _line_sizes(ctx)
     ixs, ivs = index_1d_to_combined(L, lsx, lsv)
     fv = _flip_v(ctx, ivs)
-    P0 = _line_linear_index(ctx, ixs, fv, 1) - 1      # partner line, node j at P0 + j (stride 1)
+    P0 = _line_linear_index(ctx, ixs, fv, 1) - st     # partner line, node j at P0 + j*st
     # left halo node 1-h reflects to min(1+h, N); right halo node N+h to max(N-h, 1)
     @inbounds for h = 1:H
-        hb[L, h] = src[P0+min(1+h, N)]
-        hb[L, H+h] = src[P0+max(N-h, 1)]
+        hb[L, h] = src[P0+min(1+h, N)*st]
+        hb[L, H+h] = src[P0+max(N-h, 1)*st]
     end
+end
+
+# Fill the reflected halo of every line of a mirror sweep (tiled or general) from `src`.
+function _mirror_halo!(plan, src, ctx, order::Val{W}) where {W}
+    n = _line_length(ctx)
+    nl = length(src) ÷ n
+    H = _mirror_halo(ctx, order)
+    hb = _buffer!(plan, (:halo, H, nl)) do
+        KernelAbstractions.allocate(plan.backend, eltype(src), nl, 2H)
+    end
+    mirror_halo_kernel!(plan.backend)(
+        hb,
+        src,
+        ctx,
+        Val(H),
+        Val(n),
+        _line_stride(ctx);
+        ndrange = nl,
+    )
+    return hb
 end
 
 @kernel function lagrange_tile_mirror_kernel!(
@@ -739,12 +747,14 @@ function _lagrange_sweep!(dst, src, ctx, order::Val{W}, bc, plan, tiled::Bool) w
     nkeys = _shift_nkeys(ctx)
     cells, wts = _shift_tables(plan, src, ctx, order)
     lagrange_key_setup_kernel!(exec)(cells, wts, ctx, order, nxtot; ndrange = nkeys)
+    hb = bc isa Mirror ? _mirror_halo!(plan, src, ctx, order) : nothing
     if !tiled
         lagrange_cached_kernel!(exec)(
             dst,
             src,
             cells,
             wts,
+            hb,
             ctx,
             order,
             bc,
@@ -754,11 +764,7 @@ function _lagrange_sweep!(dst, src, ctx, order::Val{W}, bc, plan, tiled::Bool) w
             ndrange = length(src),
         )
     elseif bc isa Mirror
-        H = _mirror_halo(ctx, order)
-        hb = _buffer!(plan, (:halo, H, nl)) do
-            KernelAbstractions.allocate(exec, eltype(src), nl, 2H)
-        end
-        mirror_halo_kernel!(exec)(hb, src, ctx, Val(H), Val(n); ndrange = nl)
+        H = size(hb, 2) ÷ 2
         lagrange_tile_mirror_kernel!(exec, _TILE_WG)(
             dst,
             src,
