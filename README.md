@@ -8,8 +8,7 @@ This package is a testing ground for numerical methods intended for [BSL6D](http
 
 - **Grid systems**: Cartesian and polar coordinate support
 - **Distribution functions**: 1D1v, 1D2v, and 2D2v phase-space configurations
-- **Advection**: Fourier (default) or arbitrary-order Lagrange interpolation, selected per call via `method = Lagrange(W)`; polar advection uses splines (Dierckx)
-- **Interpolation primitives**: arbitrary even-order Lagrange stencil weights (`lagrange_weights`), allocation-free and usable inside KernelAbstractions kernels
+- **Advection**: Fourier (default) or arbitrary-order Lagrange interpolation, selected per call via `method = Lagrange(W)`, with periodic or mirror (specular wall) boundaries; polar advection uses splines (Dierckx)
 - **Field solvers**: electrostatic (Poisson), Darwin/hybrid-kinetic (DK), and vacuum Maxwell — see [Field Solvers](#field-solvers) below
 - **Optional GPU acceleration**: KernelAbstractions-based kernels, switchable at runtime via a CUDA weak dependency
 
@@ -69,86 +68,64 @@ end
 
 ### Interpolation method
 
-`advectX!`/`advectV!` take a `method` keyword. The default `Fourier()` is spectrally exact but
-imposes periodicity; `Lagrange(W)` performs the shift with a centred Lagrange stencil of even
-width `W`, which is a dispatch parameter (each `W` compiles its own unrolled kernel):
+`advectX!`/`advectV!` take a `method` keyword:
+
+- `Fourier()` (default): spectral shift, exact for periodic data.
+- `Lagrange(W)`: centred Lagrange stencil of even width `W ≥ 2`; required for non-periodic boundaries.
 
 ```julia
 bslLD.advectX!(f, grid, simTime; method = bslLD.Lagrange(24))
 bslLD.advectV!(f, grid, simTime, sol.E; method = bslLD.Lagrange(24))
 ```
 
-Wider stencils hold the spectrum flat out to larger `k`: over 200 steps the amplitude retained at
-`kh = 0.5π` is 0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24` (derivation and script in the
-kinetics knowledge base, `Notes/numerical-methods/interpolation-kernel-spectral-response-in-bsl.md`).
+Wider stencils damp short wavelengths less: over 200 steps the amplitude retained at `kh = 0.5π` is
+0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24`.
 
-#### Sweep kernels
-
-The shift and the stencil weights are constant along the advected axis, so they are computed
-once per distinct shift (per velocity index for x-sweeps, per position index for v-sweeps), not
-once per point. Two kernels, with bit-identical results, are chosen automatically:
-
-- **tiled**: 32 lines per workgroup staged in shared memory, coalesced reads and writes, run in
-  place (no work buffer, no copy). Used for periodic axes and for `Mirror()` x-sweeps along the
-  first axis, whenever the tile fits in 48 KiB of shared memory (Float64, `W = 8`: `W ≤ n ≤ 183`).
-- **general**: one thread per point, for every other case. `advectX!`/`advectV!` without a
-  direction argument then alternate between the distribution and one work buffer, so at most one
-  copy is made per call.
-
-At 3D3V `n = 32` (H100, Float64) the tiled sweep costs 10.8–16.5 ms per direction for `W = 4…12`,
-3.3–4.2× faster than bsl6d on the same device (measured October 2026).
-
-The Lagrange sweeps do not synchronise the device: all their kernels run on one stream. When
-timing them, or whenever a synchronisation is needed, prefer `CUDA.synchronize(; blocking = true)`:
-CUDA.jl's default, non-blocking `synchronize` can add several milliseconds of wake-up latency.
+The advection runs on the active backend (see [Backend Selection](#backend-selection)) and does not
+synchronise the device; synchronise before timing it. Buffers are cached per distribution;
+`bslLD.release_advection_buffers!(f)` frees them once `f` is no longer advected.
 
 ### Boundary conditions
 
-`advectX!` also takes `boundary`, either `Periodic()` (default) or `Mirror()`, the specular wall
-ported from bsl6d's `105-implement-mirror-boundary-conditions`:
+`advectX!` takes `boundary = Periodic()` (default) or `Mirror()`, a specular wall at the first and
+last grid node of each spatial axis:
 
 ```julia
-bslLD.advectX!(f, grid, simTime, 1; method = bslLD.Lagrange(8), boundary = bslLD.Mirror())
+bslLD.advectX!(f, grid, simTime; method = bslLD.Lagrange(8), boundary = bslLD.Mirror())
+bslLD.advectX!(f, grid, simTime, 1; method = bslLD.Lagrange(8), boundary = bslLD.Mirror())  # one direction
 ```
 
-The halo is filled by reflecting the interior about the first and last grid node while reversing
-the velocity components the reflection flips — with `B` along `grid.Bdir`, a mirror perpendicular
-to `B` reverses both gyration-plane velocities, a mirror along `B` the field-aligned one — and the
-boundary nodes are symmetrised so `f(x_b, v) == f(x_b, R v)`. Mass is then conserved to roundoff in
-the reflecting-domain norm (half weight on the two mirror nodes); the plain sum over grid points
-drifts at `O(Δx²)` because it over-weights them.
-
-`Mirror()` requires a `Lagrange` method (the spectral path is periodic by construction), applies to
-spatial axes only, and needs velocity axes symmetric about zero — all three are checked.
+- At the wall, particles are reflected with the velocity components the reflection reverses: with
+  `B` along `grid.Bdir`, a wall perpendicular to `B` reverses both gyration-plane velocities, a wall
+  along `B` the field-aligned one. The wall nodes are symmetrised, `f(x_b, v) == f(x_b, R v)`.
+- Mass is conserved to roundoff in the reflecting-domain norm (half weight on the two wall nodes);
+  the plain sum over grid points drifts at `O(Δx²)`.
+- `Mirror()` needs a `Lagrange` method, applies to spatial axes only (`advectV!` is periodic), and
+  needs velocity axes symmetric about zero. All three are checked.
 
 #### Grid for a mirror domain
 
-The mirror planes sit at the first and last node, `x[1]` and `x[end]`. `Grid` builds every
-x-axis as `range(etaMin, step = (etaMax - etaMin)/N, length = N)`, i.e. it excludes `etaMax`
-(the periodic convention), while v-axes have `N + 1` nodes and include both ends. For walls at
-`0` and `Lx`, with the `N` nodes `0, Δx, …, Lx-Δx, Lx`, pass `etaMax = Lx + Δx`, `Δx = Lx/(N-1)`:
+`Grid` excludes the upper bound `etaMax` from x-axes (the periodic convention) and includes it in
+v-axes. For walls at `0` and `Lx` on the `N` nodes `0, Δx, …, Lx`, pass `etaMax = Lx + Δx` with
+`Δx = Lx/(N-1)`:
 
 ```julia
-Lx, N  = 2pi, 65                        # N nodes including both walls
-dx     = Lx / (N - 1)
-grid   = bslLD.Grid([0.0, -vmax, -vmax], [Lx + dx, vmax, vmax], [N, Nv, Nv], 1)
-# grid.xaxes[1] == 0:dx:Lx (to roundoff), grid.delta[1] == dx
-# velocity axes: -vmax:2vmax/Nv:vmax, Nv + 1 nodes, symmetric about 0 as Mirror() requires
+Lx, N = 2pi, 65                         # N nodes including both walls
+dx    = Lx / (N - 1)
+grid  = bslLD.Grid([0.0, -vmax, -vmax], [Lx + dx, vmax, vmax], [N, Nv, Nv], 1)
+# grid.xaxes[1] == 0:dx:Lx; velocity axes have Nv + 1 nodes, symmetric about 0
 ```
 
-With `etaMax = Lx` instead, the walls sit at `0` and `Lx - Δx` with `Δx = Lx/N`.
+#### Field solve on a mirror domain
 
-**Field solve.** The spectral solvers assume `x` periodic with period `N·Δx`, which a mirror grid
-is not. `AdiabaticSolver` takes the boundary per spatial axis and differentiates `Mirror()` axes by
-a centred finite difference with ghosts folded about the walls, so that `E_x = 0` there:
+The spectral field solvers assume periodic `x`. `AdiabaticSolver` takes a boundary per spatial axis:
+`Mirror()` axes are differentiated by a centred finite difference of even `order` with ghosts
+mirrored about the walls (so `E = 0` there), `Periodic()` axes spectrally.
 
 ```julia
 solver = bslLD.AdiabaticSolver((bslLD.Mirror(), bslLD.Periodic()); order = 8)   # x mirror, y periodic
+sol = bslLD.solve_fields(bslLD.Moments(rho), grid, solver)
 ```
-
-`order` is any even number (default 8, bsl6d's 9-point stencil); the stencil is PlasmaCore's
-`FD(order, Mirror())` (PlasmaCore ≥ 0.1.1), and periodic axes stay spectral. `Periodic()` and
-`Mirror()` themselves are defined in PlasmaCore and shared by advection and field solve.
 
 ## Field Solvers
 
