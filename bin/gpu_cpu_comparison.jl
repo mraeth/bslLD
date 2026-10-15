@@ -9,13 +9,13 @@ using Statistics
 is_cuda = try
     success(`nvidia-smi`)
 catch
-    ;
+
     false
 end
 is_amdgpu = !is_cuda && try
     success(`rocm-smi`)
 catch
-    ;
+
     false
 end
 is_metal = !is_cuda && !is_amdgpu && Sys.isapple() && Sys.ARCH === :aarch64

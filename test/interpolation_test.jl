@@ -2,7 +2,7 @@ using Test, bslLD, StaticArrays
 
 "Textbook O(W^2) Lagrange weights, as an independent reference."
 function naive_weights(W, alpha)
-    off = -W÷2:W÷2-1
+    off = (-W÷2):(W÷2-1)
     [prod((-alpha - k) / (l - k) for k in off if k != l) for l in off]
 end
 
@@ -38,9 +38,9 @@ gather_periodic(data, j, w) =
 
     @testset "exact on polynomials of degree < W" begin
         for W in (4, 8, 12), alpha in (0.2, 0.6)
-            off = collect(-W÷2:W÷2-1)
+            off = collect((-W÷2):(W÷2-1))
             w = bslLD.lagrange_weights(Val(W), alpha)
-            for d = 0:W-1
+            for d = 0:(W-1)
                 @test sum(w[m] * float(off[m])^d for m = 1:W) ≈ (-alpha)^d atol = 1e-8
             end
         end
@@ -60,7 +60,7 @@ gather_periodic(data, j, w) =
                 abs(got - f(xs[j] - s * step(xs)))
             end
         end
-        rates = log2.(errs[1:end-1] ./ errs[2:end])
+        rates = log2.(errs[1:(end-1)] ./ errs[2:end])
         @test all(rates .> W - 1)                      # ~ h^W
     end
 

@@ -292,12 +292,12 @@ function _make_em_dk_no_pol_workspace(
     k2_tot = f_arr()
     @. k2_tot = k2_perp + kz_view^2
 
-    a31_pre = f_arr();
+    a31_pre = f_arr()
     @. a31_pre = kz_view * k1_view
-    a32_pre = f_arr();
+    a32_pre = f_arr()
     @. a32_pre = kz_view * k2_view
     lambda = DT((solver.beta_i / 2) * (1 + 1 / solver.mu))
-    a33_pre = f_arr();
+    a33_pre = f_arr()
     @. a33_pre = -k2_perp - lambda
 
     return EMDKNoPolWorkspace(

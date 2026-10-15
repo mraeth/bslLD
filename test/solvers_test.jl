@@ -117,7 +117,11 @@ end
             # cos(pi x/Lx) is even about both walls, as the density of a mirrored distribution
             rho = bslLD.ScalarField([cos(pi * xi / Lx) + sin(yi) for xi in x, yi in y])
             solver = bslLD.AdiabaticSolver((bslLD.Mirror(), bslLD.Periodic()); order)
-            sol = bslLD.solve_fields(bslLD.Moments(rho, zero_current_field(grid)), grid, solver)
+            sol = bslLD.solve_fields(
+                bslLD.Moments(rho, zero_current_field(grid)),
+                grid,
+                solver,
+            )
             ex = [pi / Lx * sin(pi * xi / Lx) for xi in x, yi in y]
             ey = [-cos(yi) for xi in x, yi in y]
             return sol.E, ex, ey

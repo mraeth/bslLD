@@ -253,21 +253,37 @@ end
             @test f.data[i, j1, j2] ≈
                   (before[i, j1, j2] + before[i, nv1+1-j1, nv2+1-j2]) / 2
         end
-        @test f.data[2:end-1, :, :] ≈ before[2:end-1, :, :]
+        @test f.data[2:(end-1), :, :] ≈ before[2:(end-1), :, :]
     end
 
     @testset "rejected combinations" begin
         f = seed((x, v1, v2) -> 1.0)
         e_field = bslLD.VectorField([fill(0.1, nx) for _ = 1:2])
         @test_throws ArgumentError bslLD.advectX!(
-            f, grid, simTime; method = bslLD.Fourier(), boundary = mirror)
+            f,
+            grid,
+            simTime;
+            method = bslLD.Fourier(),
+            boundary = mirror,
+        )
         @test_throws ArgumentError bslLD.advectV!(
-            f, grid, simTime, e_field; method = lag, boundary = mirror)
+            f,
+            grid,
+            simTime,
+            e_field;
+            method = lag,
+            boundary = mirror,
+        )
 
         # a velocity axis that is not symmetric about zero cannot pair v with -v
         skew = bslLD.Grid([0.0, -1.0, -1.5], [2pi, 2.0, 1.5], [nx, nvx, nvx], 1)
         g = bslLD.Distribution(skew, 0.01)
         @test_throws ArgumentError bslLD.advectX!(
-            g, skew, simTime; method = lag, boundary = mirror)
+            g,
+            skew,
+            simTime;
+            method = lag,
+            boundary = mirror,
+        )
     end
 end

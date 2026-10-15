@@ -22,14 +22,18 @@ import bslLD
         bslLD._advect!(sp.dist, plan, method, bc, ctxs, xdirs; tiled)
         if vsweep
             n = size(sp.data)[xdirs]
-            e = bslLD.VectorField([0.3 .+ 0.1 .* sin.(1:prod(n)) |> x -> reshape(x, n) for _ = 1:nv])
+            e = bslLD.VectorField([
+                0.3 .+ 0.1 .* sin.(1:prod(n)) |> x -> reshape(x, n) for _ = 1:nv
+            ])
             vctxs = [bslLD._v_context(sp, grid, simTime, e, d, plan) for d = 1:nv]
             bslLD._advect!(sp.dist, plan, method, bc, vctxs, length(xdirs) .+ (1:nv); tiled)
         end
         return copy(sp.data)
     end
 
-    @testset "periodic, $(nx)D$(nv)V, W=$W" for (nx, nv) in ((1, 1), (1, 2), (2, 2)), W in (4, 8)
+    @testset "periodic, $(nx)D$(nv)V, W=$W" for (nx, nv) in ((1, 1), (1, 2), (2, 2)),
+        W in (4, 8)
+
         eta_min = vcat(fill(0.0, nx), fill(-2.0, nv))
         eta_max = vcat(fill(2pi, nx), fill(2.0, nv))
         counts = vcat(fill(12, nx), fill(10, nv))

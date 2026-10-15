@@ -17,8 +17,9 @@ struct AdiabaticSolver{BC<:Tuple,O} <: AbstractFieldSolver
     boundaries::BC
     mirror_op::O    # FD(order, Mirror()), applied on Mirror() axes
     function AdiabaticSolver(boundaries::Tuple = (); order::Integer = 8)
-        all(b -> b isa Periodic || b isa Mirror, boundaries) ||
-            throw(ArgumentError("AdiabaticSolver boundaries must be Periodic() or Mirror()"))
+        all(b -> b isa Periodic || b isa Mirror, boundaries) || throw(
+            ArgumentError("AdiabaticSolver boundaries must be Periodic() or Mirror()"),
+        )
         op = FD(order, Mirror())
         return new{typeof(boundaries),typeof(op)}(boundaries, op)
     end
@@ -194,7 +195,14 @@ function solve_fields(moments::Moments, grid::Grid, solver::AdiabaticSolver)
     ws = _get_adiabatic_workspace(moments.rho, grid)
     ndims_x = spatial_ndims(grid)
     for dir = 1:ndims_x
-        differentiate!(ws.E_vf[dir], moments.rho, grid, dir, _derivative_op(solver, dir); negate = true)
+        differentiate!(
+            ws.E_vf[dir],
+            moments.rho,
+            grid,
+            dir,
+            _derivative_op(solver, dir);
+            negate = true,
+        )
     end
     return FieldSolution{typeof(ws.E_vf),typeof(ws.zero_phi)}(
         ws.E_vf,
