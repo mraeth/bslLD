@@ -120,3 +120,24 @@ GPU checks:
   halo kernel alone against the former symmetrise (18–26 ms) + halo fill;
 - if the fused kernel is still slow, the six-dimensional line-index decomposition with Int64
   division per thread is the next suspect.
+
+### Result on the GPU (booster H100 SXM, SLURM job 2685542, `8c7f9d2` vs `7d8c2e5`)
+
+These are SXM numbers and are not comparable with the PCIe numbers above: periodic tiled 32⁶ x
+is 9.63 ms here against 12.35 ms there. Two interleaved rounds agree to ≤ 0.3 %.
+
+| 32⁶, Float64, W = 8, `advectX!` one direction (ms) | `8c7f9d2` | `7d8c2e5` |
+|---|---|---|
+| mirror x1, tiled | 52.96 | 46.08 (−13 %) |
+| mirror x2 / x3, general | 62.55 / 56.98 | 48.51 / 42.99 (−22 / −25 %) |
+| periodic tiled advectX / advectV | 9.63 / 10.42 | unchanged |
+| 2D2V x = 256 mirror x1, not tileable | 36.50 | 36.82 (+0.8 %) |
+
+- The fused halo kernel saves 14 ms per sweep on x2/x3 but only 6.4 ms on x1, where it costs
+  33.9 ms (34 of the 46 ms of a tiled x1 mirror sweep). A likely but unverified cause:
+  neighbouring threads touch line ends N nodes apart on the contiguous axis, so the accesses are
+  uncoalesced.
+- Correctness on CUDA: `lagrange_sweep_test.jl` 35/35; the 26 extra cases pass.
+- Possible follow-up, not part of PR #8: a contiguous-axis thread mapping (one thread per line
+  pair, end and halo node) with a transposed `hb[h, L]`. Clamped halo reads (`H ≥ N − 1`) read
+  wall nodes and need the average computed on the fly, or must stay on the per-line kernel.

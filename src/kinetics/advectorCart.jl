@@ -731,7 +731,8 @@ _shift_tables(plan, src, ctx, ::Val{W}) where {W} =
         )
     end
 
-# One Lagrange sweep of `src` into `dst`; `dst === src` is allowed only if `tiled`.
+# One Lagrange sweep of `src` into `dst`; `dst === src` is allowed only if `tiled`. For `Mirror`
+# it also symmetrises the wall nodes of `src` in place (see `mirror_halo_kernel!`).
 function _lagrange_sweep!(dst, src, ctx, order::Val{W}, bc, plan, tiled::Bool) where {W}
     exec = plan.backend
     n = _line_length(ctx)
