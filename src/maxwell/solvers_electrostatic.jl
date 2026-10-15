@@ -4,24 +4,43 @@ end
 PoissonSolver() = PoissonSolver(1.0)
 PoissonSolver(factor::Real) = PoissonSolver(float(factor))
 
-struct AdiabaticSolver <: AbstractFieldSolver end
+"""
+    AdiabaticSolver(boundaries = (); order = 8)
+
+`E = -∇ρ` (adiabatic electrons, no Poisson inversion). `boundaries[d]` selects the
+treatment of spatial axis `d`: `Periodic()` (default for missing entries), differentiated
+spectrally, or `Mirror()`, differentiated by PlasmaCore's `FD(order, Mirror())`, a centred
+finite difference whose ghosts are folded about the first and last node, so that `E_d = 0`
+on both walls. `order = 8` is bsl6d's 9-point stencil.
+"""
+struct AdiabaticSolver{BC<:Tuple,O} <: AbstractFieldSolver
+    boundaries::BC
+    mirror_op::O    # FD(order, Mirror()), applied on Mirror() axes
+    function AdiabaticSolver(boundaries::Tuple = (); order::Integer = 8)
+        all(b -> b isa Periodic || b isa Mirror, boundaries) ||
+            throw(ArgumentError("AdiabaticSolver boundaries must be Periodic() or Mirror()"))
+        op = FD(order, Mirror())
+        return new{typeof(boundaries),typeof(op)}(boundaries, op)
+    end
+end
+
+_derivative_op(s::AdiabaticSolver, d) =
+    d <= length(s.boundaries) && s.boundaries[d] isa Mirror ? s.mirror_op : Spectral()
 
 # ── AdiabaticSolver workspace ────────────────────────────────────────────────
 
-struct AdiabaticSolverWorkspace{SW,EVF,ZVF,ZSF}
-    sw::SW      # SpectralWorkspace (shared with other solvers on the same grid)
+struct AdiabaticSolverWorkspace{EVF,ZVF,ZSF}
     E_vf::EVF   # pre-allocated VectorField written in-place each step
     zero_vf3::ZVF
     zero_phi::ZSF  # zero ScalarField used for the FieldSolution.phi slot
 end
 
 function _make_adiabatic_workspace(rho::ScalarField, grid::Grid)
-    sw = _get_spectral_workspace(rho.data, grid)
     DT = eltype(rho.data)
     E_vf = VectorField([ScalarField(fill!(similar(rho.data), zero(DT))) for _ = 1:3])
     zero_vf3 = zero_vectorfield3(grid)
     zero_phi = ScalarField(fill!(similar(rho.data), zero(DT)))
-    return AdiabaticSolverWorkspace(sw, E_vf, zero_vf3, zero_phi)
+    return AdiabaticSolverWorkspace(E_vf, zero_vf3, zero_phi)
 end
 
 function _get_adiabatic_workspace(rho::ScalarField, grid::Grid)
@@ -49,7 +68,7 @@ struct PoissonSolverWorkspace{SW,K2,PHI,EVF,ZVF}
 end
 
 function _make_poisson_workspace(rho::ScalarField, grid::Grid)
-    sw = _get_spectral_workspace(rho.data, grid)
+    sw = spectral_workspace(rho.data, grid)
     ndims_x = spatial_ndims(grid)
     # Pre-compute |k|² on the backend
     DT = eltype(rho.data)
@@ -158,7 +177,7 @@ function solve_fields(moments::Moments, grid::Grid, solver::PoissonSolver)
     phi_sf = ScalarField(ws.phi_buf)
     ndims_x = spatial_ndims(grid)
     for dir = 1:ndims_x
-        _differentiate_impl!(ws.E_vf[dir].data, phi_sf, ws.sw, dir, true)
+        differentiate!(ws.E_vf[dir].data, phi_sf, ws.sw, dir; negate = true)
     end
     for dir = (ndims_x+1):3
         fill!(ws.E_vf[dir].data, zero(eltype(ws.E_vf[dir].data)))
@@ -171,11 +190,11 @@ function solve_fields(moments::Moments, grid::Grid, solver::PoissonSolver)
     )
 end
 
-function solve_fields(moments::Moments, grid::Grid, ::AdiabaticSolver)
+function solve_fields(moments::Moments, grid::Grid, solver::AdiabaticSolver)
     ws = _get_adiabatic_workspace(moments.rho, grid)
     ndims_x = spatial_ndims(grid)
     for dir = 1:ndims_x
-        _differentiate_impl!(ws.E_vf[dir].data, moments.rho, ws.sw, dir, true)
+        differentiate!(ws.E_vf[dir], moments.rho, grid, dir, _derivative_op(solver, dir); negate = true)
     end
     return FieldSolution{typeof(ws.E_vf),typeof(ws.zero_phi)}(
         ws.E_vf,

@@ -66,7 +66,13 @@ using PlasmaCore:
     SpectralWorkspace,
     DifferentiateContext,
     differentiate,
+    differentiate!,
     grad,
+    # Derivative operators and boundary conditions
+    FD,
+    Spectral,
+    Periodic,
+    Mirror,
     div,
     curl,
     spatial_ndims,
@@ -77,19 +83,13 @@ using PlasmaCore:
     spectral_wavenumbers,
     spectral_wavenumber_squared,
     spectral_wavenumber_views,
-    # Spectral operators (private, needed by solver files)
-    _solver_workspace_cache,
-    _solver_workspace_cache_lock,
-    _spectral_ws_cache,
-    _spectral_ws_cache_lock,
-    _get_spectral_workspace,
-    _spectral_ws_key,
-    _differentiate_impl!,
-    _spectral_curl_hat!,
-    _fwd_fft_to!,
-    _inv_fft_from!,
-    _apply_div!,
-    _apply_curl!,
+    # Spectral workspace forms (allocation-free, used by the solvers)
+    spectral_workspace,
+    div!,
+    curl!,
+    fft_spatial!,
+    ifft_spatial!,
+    curl_hat!,
     # Field solver interface
     AbstractFieldSolver,
     Moments,
@@ -115,6 +115,10 @@ include("kinetics/advectorPolar.jl")
 include("kinetics/initialization.jl")
 include("kinetics/moments.jl")
 include("kinetics/moment_response.jl")
+# Workspaces of the field solvers, keyed by (solver tag, shape, eltype, spacing, ...).
+const _solver_workspace_cache = Dict{Any,Any}()
+const _solver_workspace_cache_lock = ReentrantLock()
+
 include("maxwell/solvers_electrostatic.jl")
 include("maxwell/solvers_vacuum.jl")
 include("maxwell/solvers_hybrid.jl")

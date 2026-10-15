@@ -106,6 +106,36 @@ end
         @test maximum(abs.(B0[2].data)) < 1e-12
         @test maximum(abs.(B0[3].data)) < 1e-12
     end
+
+    @testset "Adiabatic with a mirror axis" begin
+        # x: mirror grid 0:dx:Lx (walls on the end nodes), y: periodic
+        Lx = 2.0
+        function mirror_E(Nx, order)
+            dx = Lx / (Nx - 1)
+            grid = bslLD.Grid([0.0, 0.0], [Lx + dx, 2pi], [Nx, 12], 2)
+            x, y = grid.xaxes
+            # cos(pi x/Lx) is even about both walls, as the density of a mirrored distribution
+            rho = bslLD.ScalarField([cos(pi * xi / Lx) + sin(yi) for xi in x, yi in y])
+            solver = bslLD.AdiabaticSolver((bslLD.Mirror(), bslLD.Periodic()); order)
+            sol = bslLD.solve_fields(bslLD.Moments(rho, zero_current_field(grid)), grid, solver)
+            ex = [pi / Lx * sin(pi * xi / Lx) for xi in x, yi in y]
+            ey = [-cos(yi) for xi in x, yi in y]
+            return sol.E, ex, ey
+        end
+
+        for order in (2, 4, 8)
+            errs = map((17, 33)) do Nx
+                E, ex, ey = mirror_E(Nx, order)
+                @test maximum(abs.(E[2].data .- ey)) < 1e-12    # periodic axis stays spectral
+                @test all(iszero, E[1].data[[1, end], :])       # E_x = 0 on both walls
+                maximum(abs.(E[1].data .- ex))
+            end
+            @test log2(errs[1] / errs[2]) > order - 0.2          # convergence at the stencil order
+        end
+        @test bslLD.AdiabaticSolver().mirror_op === bslLD.FD(8, bslLD.Mirror())
+        @test_throws ArgumentError bslLD.AdiabaticSolver(order = 3)
+        @test_throws ArgumentError bslLD.AdiabaticSolver((bslLD.Fourier(),))
+    end
 end
 
 @testset "EMSolverDKPol" begin

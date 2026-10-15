@@ -6,6 +6,10 @@ function naive_weights(W, alpha)
     [prod((-alpha - k) / (l - k) for k in off if k != l) for l in off]
 end
 
+"Periodic stencil sum of `w` for target node `j` (stencil starts at node j - W/2)."
+gather_periodic(data, j, w) =
+    sum(w[m] * data[mod1(j - length(w) ÷ 2 - 1 + m, length(data))] for m in eachindex(w))
+
 @testset "Lagrange interpolation" begin
     widths = (2, 4, 6, 8, 12, 16, 24)
 
@@ -52,8 +56,7 @@ end
             cells, alpha = bslLD.shift_split(s)
             w = bslLD.lagrange_weights(Val(W), alpha)
             maximum(1:n) do j
-                base = bslLD.lagrange_base_index(j - cells, Val(W))
-                got = bslLD.lagrange_gather_periodic(data, base, w)
+                got = gather_periodic(data, j - cells, w)
                 abs(got - f(xs[j] - s * step(xs)))
             end
         end
@@ -61,12 +64,8 @@ end
         @test all(rates .> W - 1)                      # ~ h^W
     end
 
-    @testset "gather and weights are allocation-free" begin
-        w = bslLD.lagrange_weights(Val(8), 0.3)
-        src = collect(1.0:32.0)
+    @testset "weights are allocation-free" begin
         @test (@allocated bslLD.lagrange_weights(Val(8), 0.3)) == 0
-        @test (@allocated bslLD.lagrange_gather(src, 4, w)) == 0
-        @test (@allocated bslLD.lagrange_gather_periodic(src, 4, w)) == 0
         @test bslLD.lagrange_weights(Val(8), 0.3, Float32) isa SVector{8,Float32}
     end
 
@@ -80,9 +79,7 @@ end
             c = cos.(k .* xs)
             s = sin.(k .* xs)
             j = n ÷ 4 + 1
-            base = bslLD.lagrange_base_index(j, Val(W))
-            g = (bslLD.lagrange_gather_periodic(c, base, w) +
-                 im * bslLD.lagrange_gather_periodic(s, base, w)) / cis(k * xs[j])
+            g = (gather_periodic(c, j, w) + im * gather_periodic(s, j, w)) / cis(k * xs[j])
             @test abs(g) <= 1 + 1e-12
         end
     end

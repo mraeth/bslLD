@@ -190,6 +190,8 @@ end
     @test maximum(abs, f_default.data .- expected_x) < 1e-10
 
     @test bslLD.Lagrange(8) === bslLD.Lagrange{8}()
+    @test_throws ArgumentError bslLD.Lagrange(7)
+    @test_throws ArgumentError bslLD.Lagrange(0)
 end
 
 @testset "Mirror boundary conditions" begin

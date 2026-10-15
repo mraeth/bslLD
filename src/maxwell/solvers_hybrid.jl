@@ -38,7 +38,7 @@ function _make_em_dk_pol_workspace(
     d1, d2, pz = perp_dirs[1], perp_dirs[2], grid.Bdir
     spatial_perp_dirs = [d for d in perp_dirs if d <= ndims_x]
 
-    sw = _get_spectral_workspace(arr, grid)
+    sw = spectral_workspace(arr, grid)
 
     DT = eltype(arr)
     curl_buf = ntuple(_ -> fill!(similar(arr), zero(DT)), 3)
@@ -113,13 +113,13 @@ function _step_dk_pol!(
     _dt = DT(dt)
 
     # Explicit Faraday: B^{n-1/2} -> B^{n+1/2}
-    _apply_curl!(ws.curl_buf, E, ws.temp3, ws.sw, grid)
+    curl!(ws.curl_buf, E, ws.sw, ws.temp3)
     for d = 1:ncomponents(B)
         B[d].data .-= _dt .* ws.curl_buf[d]
     end
 
     # Implicit E_⊥ update: [I - (dt/μ)R] E_⊥^{n+1} = RHS_⊥
-    _apply_curl!(ws.curl_buf, B, ws.temp3, ws.sw, grid)
+    curl!(ws.curl_buf, B, ws.sw, ws.temp3)
     α = DT(dt / solver.mu)
     c = DT(2 / solver.beta_i)
     @. ws.temp1 = E[d1].data + α * (c * ws.curl_buf[d1] - J_i_perp[1].data)  # rhs1
@@ -131,28 +131,22 @@ function _step_dk_pol!(
 
     # Helmholtz solve for E_z
     # div_Pi → temp1
-    _apply_div!(ws.temp1, Pi_diff, ws.temp3, ws.sw, grid)
+    div!(ws.temp1, Pi_diff, ws.sw, ws.temp3)
 
     # div_E_perp → temp2
     if isempty(ws.spatial_perp_dirs)
         fill!(ws.temp2, 0)
     else
-        _differentiate_impl!(
-            ws.temp2,
-            E[ws.spatial_perp_dirs[1]],
-            ws.sw,
-            ws.spatial_perp_dirs[1],
-            false,
-        )
+        differentiate!(ws.temp2, E[ws.spatial_perp_dirs[1]], ws.sw, ws.spatial_perp_dirs[1])
         for d in ws.spatial_perp_dirs[2:end]
-            _differentiate_impl!(ws.temp3, E[d], ws.sw, d, false)
+            differentiate!(ws.temp3, E[d], ws.sw, d)
             ws.temp2 .+= ws.temp3
         end
     end
 
     # dz_div_E_perp → temp3
     if ws.have_z_curl
-        _differentiate_impl!(ws.temp3, ScalarField(ws.temp2), ws.sw, pz, false)
+        differentiate!(ws.temp3, ScalarField(ws.temp2), ws.sw, pz)
     else
         fill!(ws.temp3, 0)
     end
@@ -210,7 +204,7 @@ end
 
 struct EMDKNoPolWorkspace{SW,CA,FA,K1V,K2V,KZV,KV}
     sw::SW
-    kviews::KV       # NTuple{ndims_x} reshaped k views for _spectral_curl_hat!
+    kviews::KV       # NTuple{ndims_x} reshaped k views for curl_hat!
     k1_view::K1V     # reshaped k for d1 direction (or zero-filled)
     k2_view::K2V     # reshaped k for d2 direction (or zero-filled)
     kz_view::KZV     # reshaped k for pz direction (or zero-filled)
@@ -272,7 +266,7 @@ function _make_em_dk_no_pol_workspace(
     perp_dirs = [d for d = 1:ncomp if d != grid.Bdir]
     d1, d2, pz = perp_dirs[1], perp_dirs[2], grid.Bdir
 
-    sw = _get_spectral_workspace(arr, grid)
+    sw = spectral_workspace(arr, grid)
 
     kviews = ntuple(
         d -> reshape(sw.k[d], ntuple(i -> i == d ? length(sw.k[d]) : 1, ndims_data)),
@@ -391,17 +385,17 @@ function _step_dk_no_pol!(
 
     # Forward FFT inputs
     for d = 1:3
-        _fwd_fft_to!(sw, B[d].data, ws.Bhat[d], ndims_x)
+        fft_spatial!(ws.Bhat[d], B[d].data, sw)
     end
     for d = 1:2
-        _fwd_fft_to!(sw, J_i_perp[d].data, ws.Jhat[d], ndims_x)
+        fft_spatial!(ws.Jhat[d], J_i_perp[d].data, sw)
     end
     for d = 1:ndims_x
-        _fwd_fft_to!(sw, Pi_diff[d].data, ws.Pihat_buf[d], ndims_x)
+        fft_spatial!(ws.Pihat_buf[d], Pi_diff[d].data, sw)
     end
 
     # curlBhat (in-place into ws.curlBhat)
-    _spectral_curl_hat!(ws.curlBhat, ws.Bhat, ws.kviews, ndims_x)
+    curl_hat!(ws.curlBhat, ws.Bhat, ws.kviews)
 
     # div_Pi_hat
     fill!(ws.div_Pi_hat, 0)
@@ -454,17 +448,17 @@ function _step_dk_no_pol!(
 
     # Inverse FFT E always
     for d = 1:3
-        _inv_fft_from!(sw, ws.Ehat[d], E[d].data, ndims_x)
+        ifft_spatial!(E[d].data, ws.Ehat[d], sw)
     end
 
     # Faraday and B IFFT only when dt_faraday != 0
     if !iszero(_dt_faraday)
-        _spectral_curl_hat!(ws.curlBhat, ws.Ehat, ws.kviews, ndims_x)
+        curl_hat!(ws.curlBhat, ws.Ehat, ws.kviews)
         for d = 1:3
             @. ws.Bhat[d] -= _dt_faraday * ws.curlBhat[d]
         end
         for d = 1:3
-            _inv_fft_from!(sw, ws.Bhat[d], B[d].data, ndims_x)
+            ifft_spatial!(B[d].data, ws.Bhat[d], sw)
         end
     end
 

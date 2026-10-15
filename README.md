@@ -9,7 +9,7 @@ This package is a testing ground for numerical methods intended for [BSL6D](http
 - **Grid systems**: Cartesian and polar coordinate support
 - **Distribution functions**: 1D1v, 1D2v, and 2D2v phase-space configurations
 - **Advection**: Fourier (default) or arbitrary-order Lagrange interpolation, selected per call via `method = Lagrange(W)`; polar advection uses splines (Dierckx)
-- **Interpolation primitives**: arbitrary even-order Lagrange stencils (`lagrange_weights`, `lagrange_gather`), allocation-free and usable inside KernelAbstractions kernels
+- **Interpolation primitives**: arbitrary even-order Lagrange stencil weights (`lagrange_weights`), allocation-free and usable inside KernelAbstractions kernels
 - **Field solvers**: electrostatic (Poisson), Darwin/hybrid-kinetic (DK), and vacuum Maxwell — see [Field Solvers](#field-solvers) below
 - **Optional GPU acceleration**: KernelAbstractions-based kernels, switchable at runtime via a CUDA weak dependency
 
@@ -84,30 +84,19 @@ Wider stencils hold the spectrum flat out to larger `k`: over 200 steps the ampl
 
 #### Sweep kernels
 
-The shift and the stencil weights are constant along the advected axis, so a Lagrange sweep can
-compute them once per line instead of once per point. Five kernels are available and give
-bit-identical results; `bslLD._SWEEP_MODE[]` selects one:
+The shift and the stencil weights are constant along the advected axis, so they are computed
+once per distinct shift (per velocity index for x-sweeps, per position index for v-sweeps), not
+once per point. Two kernels, with bit-identical results, are chosen automatically:
 
-| mode | kernel | best when |
-|---|---|---|
-| `:auto` (default) | `:tiled` for periodic axes of `W ≤ n ≤ 192` nodes; else `:line` with at least `bslLD._AUTO_MIN_LINES[]` (10⁵) lines, `:cached` otherwise | always |
-| `:tiled` | 32 lines per workgroup staged in shared memory (coalesced reads and writes); shift and weights computed once per distinct key -- the velocity index for x-sweeps, the position index for v-sweeps -- and staged with the tile | periodic, moderate `n` (2D2V, 3D3V) |
-| `:cached` | a per-line setup kernel fills a table of cell shifts and weights, then one thread per point | few lines (1D1V) |
-| `:line` | one thread per line, weights once, strided walk | many lines (2D2V, 3D3V) |
-| `:point` | weights recomputed for every point | reference |
+- **tiled**: 32 lines per workgroup staged in shared memory, coalesced reads and writes, run in
+  place (no work buffer, no copy). Used for periodic axes and for `Mirror()` x-sweeps along the
+  first axis, whenever the tile fits in 48 KiB of shared memory (Float64, `W = 8`: `W ≤ n ≤ 183`).
+- **general**: one thread per point, for every other case. `advectX!`/`advectV!` without a
+  direction argument then alternate between the distribution and one work buffer, so at most one
+  copy is made per call.
 
-On one H100 (Float64, `Lagrange(8)`, periodic; minimum over repeats of a single advection sweep)
-the best kernel is 13–22× faster than `:point` for 2D2V `n = 64`, about 9× for 3D3V `n = 24` and
-1.6–1.7× for 1D1V `n = 4096`. In 1D1V `:line` is slower than `:point` (12× for x-sweeps, 2× for
-v-sweeps) because there are only `n` lines to run in parallel; `:auto` avoids that.
-
-`:tiled` reads all nodes of its lines before writing any of them, so it runs in place: no work
-buffer and no copy. For the other modes, `advectX!`/`advectV!` without a direction argument
-alternate between the distribution and one work buffer, so at most one copy is made per call.
-
-At 3D3V `n = 32` (32³·33³ ≈ 1.18·10⁹ points, H100, Float64) a full `advectX!`/`advectV!` call
-costs 10.8–16.5 ms per direction for `W = 4…12` (median of 10), against 54–65 ms for `:line` at
-`W = 8` and 35–67 ms for bsl6d on the same device (3.3–4.2× faster than bsl6d).
+At 3D3V `n = 32` (H100, Float64) the tiled sweep costs 10.8–16.5 ms per direction for `W = 4…12`,
+3.3–4.2× faster than bsl6d on the same device (measured October 2026).
 
 The Lagrange sweeps do not synchronise the device: all their kernels run on one stream. When
 timing them, or whenever a synchronisation is needed, prefer `CUDA.synchronize(; blocking = true)`:
@@ -130,10 +119,36 @@ the reflecting-domain norm (half weight on the two mirror nodes); the plain sum 
 drifts at `O(Δx²)` because it over-weights them.
 
 `Mirror()` requires a `Lagrange` method (the spectral path is periodic by construction), applies to
-spatial axes only, and needs velocity axes symmetric about zero — all three are checked. Note that
-the mirror planes sit at `x[1]` and `x[end]`, and bslLD's Cartesian x-axis excludes its upper
-endpoint, so the reflected domain spans `(n-1)·Δx` rather than `L`. The field solvers remain
-spectral and therefore still assume periodicity in `x`.
+spatial axes only, and needs velocity axes symmetric about zero — all three are checked.
+
+#### Grid for a mirror domain
+
+The mirror planes sit at the first and last node, `x[1]` and `x[end]`. `Grid` builds every
+x-axis as `range(etaMin, step = (etaMax - etaMin)/N, length = N)`, i.e. it excludes `etaMax`
+(the periodic convention), while v-axes have `N + 1` nodes and include both ends. For walls at
+`0` and `Lx`, with the `N` nodes `0, Δx, …, Lx-Δx, Lx`, pass `etaMax = Lx + Δx`, `Δx = Lx/(N-1)`:
+
+```julia
+Lx, N  = 2pi, 65                        # N nodes including both walls
+dx     = Lx / (N - 1)
+grid   = bslLD.Grid([0.0, -vmax, -vmax], [Lx + dx, vmax, vmax], [N, Nv, Nv], 1)
+# grid.xaxes[1] == 0:dx:Lx (to roundoff), grid.delta[1] == dx
+# velocity axes: -vmax:2vmax/Nv:vmax, Nv + 1 nodes, symmetric about 0 as Mirror() requires
+```
+
+With `etaMax = Lx` instead, the walls sit at `0` and `Lx - Δx` with `Δx = Lx/N`.
+
+**Field solve.** The spectral solvers assume `x` periodic with period `N·Δx`, which a mirror grid
+is not. `AdiabaticSolver` takes the boundary per spatial axis and differentiates `Mirror()` axes by
+a centred finite difference with ghosts folded about the walls, so that `E_x = 0` there:
+
+```julia
+solver = bslLD.AdiabaticSolver((bslLD.Mirror(), bslLD.Periodic()); order = 8)   # x mirror, y periodic
+```
+
+`order` is any even number (default 8, bsl6d's 9-point stencil); the stencil is PlasmaCore's
+`FD(order, Mirror())` (PlasmaCore ≥ 0.1.1), and periodic axes stay spectral. `Periodic()` and
+`Mirror()` themselves are defined in PlasmaCore and shared by advection and field solve.
 
 ## Field Solvers
 
@@ -144,7 +159,7 @@ All solvers implement the `AbstractFieldSolver` interface via `solve_fields` / `
 | Solver | Equation solved | Required moments |
 |--------|----------------|-----------------|
 | `PoissonSolver(factor=1.0)` | $-\nabla^2\phi = \text{factor}\cdot\rho$, $\mathbf{E}=-\nabla\phi$ | `rho` |
-| `AdiabaticSolver()` | $\mathbf{E} = -\nabla\rho$ (adiabatic electrons, no Poisson inversion) | `rho` |
+| `AdiabaticSolver(boundaries = (); order = 8)` | $\mathbf{E} = -\nabla\rho$ (adiabatic electrons, no Poisson inversion); `Mirror()` axes by finite differences of `order` | `rho` |
 
 Both are FFT-based and support arbitrary 1D/2D periodic domains. A 2/3-rule dealiasing filter is applied.
 
@@ -220,7 +235,7 @@ bslLD/
 │   │   └── fields.jl                  # ScalarField, VectorField, MatrixField
 │   ├── kinetics/
 │   │   ├── distribution.jl            # DistributionGrid, compute_density/current/Pi
-│   │   ├── interpolation.jl           # arbitrary-order Lagrange weights/gather (uniform grid)
+│   │   ├── interpolation.jl           # arbitrary-order Lagrange weights (uniform grid)
 │   │   ├── advectorCart.jl            # BSL advection (Cartesian, KernelAbstractions)
 │   │   └── advectorPolar.jl           # BSL advection (polar coordinates)
 │   ├── maxwell/

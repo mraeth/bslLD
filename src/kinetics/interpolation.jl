@@ -6,8 +6,8 @@
 # uniform-grid function at -alpha cells from a node. The centred stencil of
 # even width W covers offsets -W/2 ... W/2-1, which brackets [-1,0] for every W.
 #
-# Weights are computed in O(W) with no divisions except a single final
-# normalisation, via prefix/suffix products of the node differences:
+# Weights are computed in O(W) via prefix/suffix products of the node differences,
+# with the binomial factors by recurrence and one final normalisation:
 #
 #   w_m = c_m * prod_{k != m} (u - k),   u = W/2 - alpha,  k = 0 ... W-1
 #
@@ -70,40 +70,3 @@ Split a displacement of `s` cells into an integer cell count and a fraction
     cells = floor(Int, s)
     return cells, s - cells
 end
-
-"""
-    lagrange_gather(src, base, w)
-
-Contract stencil weights `w` with `src[base+1] ... src[base+W]`. The caller is
-responsible for `base` being in range; use [`lagrange_gather_periodic`](@ref)
-for wrap-around, or fill a halo for open boundaries.
-"""
-@inline function lagrange_gather(src, base::Integer, w::SVector{W,T}) where {W,T}
-    acc = zero(T)
-    @inbounds for m = 1:W
-        acc += w[m] * src[base+m]
-    end
-    return acc
-end
-
-"""
-    lagrange_gather_periodic(src, base, w)
-
-As [`lagrange_gather`](@ref), wrapping indices into `axes(src, 1)`.
-"""
-@inline function lagrange_gather_periodic(src, base::Integer, w::SVector{W,T}) where {W,T}
-    n = length(src)
-    acc = zero(T)
-    @inbounds for m = 1:W
-        acc += w[m] * src[mod1(base + m, n)]
-    end
-    return acc
-end
-
-"""
-    lagrange_base_index(j, Val(W)) -> base
-
-Index preceding the first stencil node for target node `j`, such that
-`lagrange_gather(src, base, w)` evaluates the interpolant belonging to `j`.
-"""
-@inline lagrange_base_index(j::Integer, ::Val{W}) where {W} = j - W ÷ 2 - 1

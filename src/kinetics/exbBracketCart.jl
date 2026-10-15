@@ -5,7 +5,7 @@
 #
 #   ∂f/∂t = {f, g} = ∂f/∂x1 ∂g/∂x2 − ∂g/∂x1 ∂f/∂x2 ,   g = φ / B_0 ,
 #
-# for B_0 = grid.b0 along x3. Derivatives are spectral (`_differentiate_impl!` from
+# for B_0 = grid.b0 along x3. Derivatives are spectral (`differentiate!` from
 # spectral_operators.jl), so the bracket is skew-symmetric by construction and no
 # Arakawa-style averaging of finite-difference forms is needed. The bracket is batched
 # over x3 (when NX == 3) and over all velocity dimensions purely by broadcasting.
@@ -16,7 +16,7 @@
 struct ExBBracketPlan{FB,DGX,DG,WF,WP}
     df_buf1::FB  # ∂f/∂x1, phase-space sized
     df_buf2::FB  # ∂f/∂x2, phase-space sized
-    dg_x::DGX    # (∂g/∂x1, ∂g/∂x2), x-shaped, written by _differentiate_impl!
+    dg_x::DGX    # (∂g/∂x1, ∂g/∂x2), x-shaped, written by differentiate!
     dg::DG       # same memory reshaped to full phase-space rank for broadcasting
     ws_f::WF     # spectral workspace for the phase-space array
     ws_phi::WP   # spectral workspace for the potential
@@ -38,8 +38,8 @@ function ExBBracketPlan(
         similar(f.data, Float64),
         dg_x,
         dg,
-        _get_spectral_workspace(f.data, grid),
-        _get_spectral_workspace(dg_x[1], grid),
+        spectral_workspace(f.data, grid),
+        spectral_workspace(dg_x[1], grid),
     )
 end
 
@@ -89,12 +89,12 @@ function _exb_setup!(
     grid.b0 == 0.0 && error("ExB bracket requires nonzero b0")
     inv_b0 = inv(grid.b0)
     for d = 1:2
-        _differentiate_impl!(plan.dg_x[d], phi.data, plan.ws_phi, d)
+        differentiate!(plan.dg_x[d], phi.data, plan.ws_phi, d)
         plan.dg_x[d] .*= inv_b0
     end
 
-    _differentiate_impl!(plan.df_buf1, f.data, plan.ws_f, 1)
-    _differentiate_impl!(plan.df_buf2, f.data, plan.ws_f, 2)
+    differentiate!(plan.df_buf1, f.data, plan.ws_f, 1)
+    differentiate!(plan.df_buf2, f.data, plan.ws_f, 2)
     return nothing
 end
 
