@@ -79,3 +79,19 @@ Re-time on the GPU (same method as above):
 - 2D2V x = 256 advectX x1 mirror (non-tileable), against 359.7 ms now and 69.1 ms with old `:line`;
 - memory: the halo buffer is now also allocated for non-tiled mirror sweeps (x2/x3), one
   `nl × 2H` array per (H, line count).
+
+### Result on the GPU (H100 PCIe, `8c7f9d2`)
+
+| case (ms, median) | `87ce55e` | `668adb4` | `8c7f9d2` |
+|---|---|---|---|
+| 2D2V x = 256 mirror, advectX x1 (not tileable) | 69.1 | 359.7 | 44.9 |
+| 2D2V x = 256 mirror, advectX x2 | 344.7 | 324.9 | 27.8 |
+| 32⁶ mirror advectX x1 (tiled) | 62.4 | 62.0 | 62.5 |
+| 32⁶ mirror advectX x2 / x3 | 526 / 525 | 516 / 521 | 75.1 / 69.3 |
+| 32⁶ periodic tiled x / v | 12.35 / 13.46 | 12.35 / 13.46 | 12.35 / 13.43 |
+
+- General Mirror sweep against general Periodic, kernels alone: 0.95–1.8×, previously 9–19×.
+- The review regression is removed: the non-tileable contiguous mirror is now 1.5× faster than the old `:line`.
+- Correctness: the 26 extra cases are unchanged and bit-identical between tiled and general. The plain-loop reference test differs from the host loop by 1 ulp at 24–28 % of points on CUDA, because the GPU fuses multiply-adds (FMA). It now compares with `rtol = 1e-13`, which still fails on a one-node halo shift.
+- Memory: unchanged.
+- Still open: Metal's threadgroup limit. Mirror on x2/x3 costs about 6× a tiled periodic sweep, because it has no tiled path.

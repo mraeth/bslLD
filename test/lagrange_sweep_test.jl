@@ -1,5 +1,5 @@
 # The tiled Lagrange sweeps and the general (one thread per point) sweep must agree bit for bit,
-# and the general mirror sweep must match a plain-loop reference.
+# and the general mirror sweep must match a plain-loop reference (to rounding: FMA on GPU).
 using Test
 import bslLD
 
@@ -88,7 +88,10 @@ import bslLD
         src = copy(sp.data)
         dst = similar(src)
         bslLD._lagrange_sweep!(dst, src, ctx, Val(W), bslLD.Mirror(), plan, false)
-        @test dst == mirror_reference(src, ctx, W)
+        # host reference; on GPU backends FMA contraction changes the last bit, so compare with
+        # a tolerance (a wrong halo node would give O(1) differences, the sweep changes f by ~1)
+        ref = mirror_reference(Array(src), bslLD.Adapt.adapt(Array, ctx), W)   # host copies
+        @test isapprox(Array(dst), ref; rtol = 1e-13)
     end
 
     @testset "tiles respect the 48 KiB shared-memory limit" begin
