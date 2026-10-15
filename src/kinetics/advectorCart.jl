@@ -607,6 +607,138 @@ function _tile_sweep!(dst, src, ctx, order::Val{W}, exec) where {W}
     return dst
 end
 
+# --- Mirror on a contiguous spatial axis: tiles with reflected halos -------------------
+# A mirror halo node of a line is a node of a *different* line (velocity components
+# reversed), so the periodic wrap inside the tile does not apply and an in-place sweep
+# must read the partner line before any workgroup writes. A halo kernel therefore copies,
+# for every line, the `H` reflected nodes on each side into a small buffer
+# `hb[nl, 2H]` first; the tile kernel then holds `H + N + H` nodes per line and needs no
+# wrap and no per-tap boundary test. `H = W/2 + ceil(smax)` halo nodes per side cover every
+# stencil for a cell shift of at most `smax` (a bound from the host velocity grid and dt).
+# Same arithmetic, in the same order, as the other kernels, so results are bit-identical.
+const _MIRROR_TILE_MAX_N = 128
+# Upper bound of the cell shift of an x-sweep, from the extent of the velocity grid.
+_mirror_shift_bound(ctx::XShiftContext) =
+    abs(ctx.dt) * ctx.vth * sqrt(sum(ax -> maximum(abs, ax)^2, ctx.grid.vaxes)) / ctx.delta
+_mirror_halo(ctx, ::Val{W}) where {W} = W ÷ 2 + max(1, ceil(Int, _mirror_shift_bound(ctx) + 1e-9))
+
+@kernel function mirror_halo_kernel!(hb, @Const(src), ctx, ::Val{H}, ::Val{N}) where {H,N}
+    L = @index(Global, Linear)                 # one thread per line; hb[L, h2] is coalesced over L
+    lsx, lsv = _line_sizes(ctx)
+    ixs, ivs = index_1d_to_combined(L, lsx, lsv)
+    fv = _flip_v(ctx, ivs)
+    P0 = _line_linear_index(ctx, ixs, fv, 1) - 1      # partner line, node j at P0 + j (stride 1)
+    # left halo node 1-h reflects to min(1+h, N); right halo node N+h to max(N-h, 1)
+    @inbounds for h = 1:H
+        hb[L, h] = src[P0+min(1 + h, N)]
+        hb[L, H+h] = src[P0+max(N - h, 1)]
+    end
+end
+
+# f(x_b, v) <- (f(x_b, v) + f(x_b, R v)) / 2 at both end nodes of every line (one thread
+# per line, instead of a pass over the whole array).
+@kernel function mirror_symmetrize_lines_kernel!(fdata, ctx, ::Val{N}) where {N}
+    L = @index(Global, Linear)
+    lsx, lsv = _line_sizes(ctx)
+    ixs, ivs = index_1d_to_combined(L, lsx, lsv)
+    fv = _flip_v(ctx, ivs)
+    for i in (1, N)
+        I = _line_linear_index(ctx, ixs, ivs, i)
+        J = _line_linear_index(ctx, ixs, fv, i)
+        if I <= J
+            @inbounds mean = (fdata[I] + fdata[J]) / 2
+            @inbounds fdata[I] = mean
+            @inbounds fdata[J] = mean
+        end
+    end
+end
+
+@kernel function lagrange_tile_mirror_kernel!(
+    dst, src, @Const(hb), @Const(cells), @Const(wts), ctx, order::Val{W}, nodes::Val{N},
+    halo::Val{H0}, nl::Int, nxtot::Int,
+) where {W,N,H0}
+    tile = @localmem eltype(dst) (_TILE_LINES * (N + 2 * H0))
+    wsh = @localmem eltype(dst) (_TILE_LINES, W)
+    csh = @localmem Int (_TILE_LINES)
+    I1 = @index(Global, Linear)
+    let lid = (I1 - 1) % _TILE_WG, L0 = (I1 - 1) ÷ _TILE_WG * _TILE_LINES,
+        H = H0, NT = N + 2 * H0
+        _tile_stage!(wsh, csh, cells, wts, ctx, lid, nxtot,
+            c -> L0 + c < nl ? (L0 + c) * N : -1, order)
+        e = lid
+        while e < _TILE_LINES * NT
+            l = e ÷ NT
+            if L0 + l < nl
+                p = e - l * NT                       # 0-based tile position; node p - H + 1
+                if p < H
+                    @inbounds tile[e+1] = hb[L0+l+1, H-p]          # node 1-h, h = H-p
+                elseif p < H + N
+                    @inbounds tile[e+1] = src[(L0 + l) * N + (p - H) + 1]
+                else
+                    @inbounds tile[e+1] = hb[L0+l+1, H+(p-H-N)+1]  # node N+h, h = p-H-N+1
+                end
+            end
+            e += _TILE_WG
+        end
+    end
+    @synchronize
+    I2 = @index(Global, Linear)
+    let lid = (I2 - 1) % _TILE_WG, L0 = (I2 - 1) ÷ _TILE_WG * _TILE_LINES,
+        H = H0, NT = N + 2 * H0                      # (locals do not survive the barrier)
+        e = lid
+        while e < _TILE_LINES * N
+            l = e ÷ N
+            if L0 + l < nl
+                j = e - l * N                        # 0-based node
+                c = @inbounds csh[l+1]
+                acc = zero(eltype(dst))
+                @inbounds for m = 1:W
+                    acc += wsh[l+1, m] * tile[l*NT+H+(j-c-W÷2+m)]
+                end
+                @inbounds dst[L0*N+e+1] = acc
+            end
+            e += _TILE_WG
+        end
+    end
+end
+
+const _MIRROR_HALOS = Dict{Any,Any}()
+function _tile_sweep_mirror!(dst, src, ctx, order::Val{W}, exec) where {W}
+    n = _line_length(ctx)
+    nl = length(src) ÷ n
+    nxtot = prod(ctx.sizes_x)
+    nkeys = _shift_nkeys(ctx)
+    H = _mirror_halo(ctx, order)
+    cells, wts = _line_tables(dst, W, nkeys, exec)
+    hb = get!(_MIRROR_HALOS, (typeof(dst), H, nl)) do
+        KernelAbstractions.allocate(exec, eltype(dst), nl, 2H)
+    end
+    lagrange_key_setup_kernel!(exec)(cells, wts, ctx, order, nxtot; ndrange = nkeys)
+    mirror_halo_kernel!(exec)(hb, src, ctx, Val(H), Val(n); ndrange = nl)
+    ngroups = cld(nl, _TILE_LINES)
+    lagrange_tile_mirror_kernel!(exec, _TILE_WG)(
+        dst, src, hb, cells, wts, ctx, order, Val(n), Val(H), nl, nxtot; ndrange = ngroups * _TILE_WG)
+    return dst
+end
+
+# Mirror tiles: x-sweeps along the contiguous axis, if a tile of N + 2H nodes per line fits.
+function _mirror_tile_ok(ctx::XShiftContext, order::Val{W}, n) where {W}
+    (_line_stride(ctx) == 1 && W <= n) || return false
+    return _TILE_LINES * (n + 2 * _mirror_halo(ctx, order)) * 8 <= 48 * 1024
+end
+_mirror_tile_ok(ctx, order, n) = false
+
+# f(x_b, v) <- (f(x_b, v) + f(x_b, R v)) / 2 at the boundary nodes before a mirror sweep.
+function _mirror_symmetrize!(f, ctx, exec)
+    if ctx isa XShiftContext && _line_stride(ctx) == 1
+        n = _line_length(ctx)
+        mirror_symmetrize_lines_kernel!(exec)(f, ctx, Val(n); ndrange = length(f) ÷ n)
+    else
+        mirror_symmetrize_kernel!(exec)(f, ctx; ndrange = length(f))
+    end
+    return nothing
+end
+
 @inline _tile_ok(::Periodic, ::Val{W}, n) where {W} = W <= n <= _TILE_MAX_N
 @inline _tile_ok(bc, ::Val{W}, n) where {W} = false
 
@@ -629,9 +761,10 @@ function _sweep_mode(ctx, order, bc)
     n = _line_length(ctx)
     nl = prod(ctx.sizes_x) * prod(ctx.sizes_v) ÷ n
     mode = _SWEEP_MODE[]
+    tok = bc isa Mirror ? _mirror_tile_ok(ctx, order, n) : _tile_ok(bc, order, n)
     if mode === :auto
-        mode = _tile_ok(bc, order, n) ? :tiled : nl >= _AUTO_MIN_LINES[] ? :line : :cached
-    elseif mode === :tiled && !_tile_ok(bc, order, n)
+        mode = tok ? :tiled : nl >= _AUTO_MIN_LINES[] ? :line : :cached
+    elseif mode === :tiled && !tok
         mode = nl >= _AUTO_MIN_LINES[] ? :line : :cached
     end
     return mode
@@ -647,7 +780,8 @@ function _lagrange_sweep!(dst, src, ctx, method, bc, exec)
     nl = length(src) ÷ n
     mode = _sweep_mode(ctx, order, bc)
     if mode === :tiled && _constant_along_line(ctx)
-        _tile_sweep!(dst, src, ctx, order, exec)
+        bc isa Mirror ? _tile_sweep_mirror!(dst, src, ctx, order, exec) :
+            _tile_sweep!(dst, src, ctx, order, exec)
     elseif mode === :cached && _constant_along_line(ctx)
         cells, wts = _line_tables(dst, _order_width(order), nl, exec)
         lagrange_line_setup_kernel!(exec)(cells, wts, ctx, order; ndrange = nl)
@@ -735,8 +869,7 @@ end
 function _advect_dir!(f, ctx, plan, method::Lagrange, bc, _axis)
     exec = plan.backend
     if bc isa Mirror
-        sym! = mirror_symmetrize_kernel!(exec)
-        sym!(f.data, ctx; ndrange = length(f.data))
+        _mirror_symmetrize!(f.data, ctx, exec)
     end
     if _sweep_in_place(ctx, method, bc)
         _lagrange_sweep!(f.data, f.data, ctx, method, bc, exec)
@@ -756,7 +889,7 @@ function _advect_lagrange_dirs!(f, plan, method::Lagrange, bc, contexts)
     src = f.data
     for ctx in contexts
         if bc isa Mirror
-            mirror_symmetrize_kernel!(exec)(src, ctx; ndrange = length(src))
+            _mirror_symmetrize!(src, ctx, exec)
         end
         if _sweep_in_place(ctx, method, bc)
             _lagrange_sweep!(src, src, ctx, method, bc, exec)
