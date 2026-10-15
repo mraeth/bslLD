@@ -40,7 +40,7 @@ end
 function _make_em_vacuum_workspace(arr::AbstractArray, grid::Grid, ncomp::Int)
     ndims_x = spatial_ndims(grid)
     ndims_data = ndims(arr)
-    sw = _get_spectral_workspace(arr, grid)
+    sw = spectral_workspace(arr, grid)
 
     Ehat = ntuple(_ -> similar(arr, Complex{Float64}), ncomp)
     Bhat = ntuple(_ -> similar(arr, Complex{Float64}), ncomp)
@@ -124,8 +124,8 @@ function _step_maxwell_cn!(
     @. ws.prefac_buf = 1.0 / (1.0 + ws.alpha2)
     @. ws.diagonal_buf = 1.0 - ws.alpha2
 
-    _spectral_curl_hat!(ws.curlEhat, ws.Ehat, ws.kviews, ndims_x)
-    _spectral_curl_hat!(ws.curlBhat, ws.Bhat, ws.kviews, ndims_x)
+    curl_hat!(ws.curlEhat, ws.Ehat, ws.kviews)
+    curl_hat!(ws.curlBhat, ws.Bhat, ws.kviews)
 
     for d = 1:ncomp
         @. ws.scratch_c =

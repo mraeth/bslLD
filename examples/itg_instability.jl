@@ -81,7 +81,7 @@ initFuncx(x) = 1 + 0.0001 * randn()
 if abspath(PROGRAM_FILE) == @__FILE__
     println("Running Simulation")
 
-    f = bslLD.Distribution(grid, 0.0, initFuncx = initFuncx);
+    f = bslLD.Distribution(grid, 0.0, initFuncx = initFuncx)
     simTime = bslLD.SimulationTime(0.1, 10000.0)
 
     function diags!(rho, simTime)

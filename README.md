@@ -8,7 +8,7 @@ This package is a testing ground for numerical methods intended for [BSL6D](http
 
 - **Grid systems**: Cartesian and polar coordinate support
 - **Distribution functions**: 1D1v, 1D2v, and 2D2v phase-space configurations
-- **Advection**: Fourier-based and spline (Dierckx) interpolation, threaded over velocity slices
+- **Advection**: Fourier (default) or arbitrary-order Lagrange interpolation, selected per call via `method = Lagrange(W)`, with periodic or mirror (specular wall) boundaries; polar advection uses splines (Dierckx)
 - **Field solvers**: electrostatic (Poisson), Darwin/hybrid-kinetic (DK), and vacuum Maxwell — see [Field Solvers](#field-solvers) below
 - **Optional GPU acceleration**: KernelAbstractions-based kernels, switchable at runtime via a CUDA weak dependency
 
@@ -66,6 +66,67 @@ while bslLD.continue_advection(simTime, true)
 end
 ```
 
+### Interpolation method
+
+`advectX!`/`advectV!` take a `method` keyword:
+
+- `Fourier()` (default): spectral shift, exact for periodic data.
+- `Lagrange(W)`: centred Lagrange stencil of even width `W ≥ 2`; required for non-periodic boundaries.
+
+```julia
+bslLD.advectX!(f, grid, simTime; method = bslLD.Lagrange(24))
+bslLD.advectV!(f, grid, simTime, sol.E; method = bslLD.Lagrange(24))
+```
+
+Wider stencils damp short wavelengths less: over 200 steps the amplitude retained at `kh = 0.5π` is
+0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24`.
+
+The advection runs on the active backend (see [Backend Selection](#backend-selection)) and does not
+synchronise the device; synchronise before timing it. Buffers are cached per distribution;
+`bslLD.release_advection_buffers!(f)` frees them once `f` is no longer advected.
+
+### Boundary conditions
+
+`advectX!` takes `boundary = Periodic()` (default) or `Mirror()`, a specular wall at the first and
+last grid node of each spatial axis:
+
+```julia
+bslLD.advectX!(f, grid, simTime; method = bslLD.Lagrange(8), boundary = bslLD.Mirror())
+bslLD.advectX!(f, grid, simTime, 1; method = bslLD.Lagrange(8), boundary = bslLD.Mirror())  # one direction
+```
+
+- At the wall, particles are reflected with the velocity components the reflection reverses: with
+  `B` along `grid.Bdir`, a wall perpendicular to `B` reverses both gyration-plane velocities, a wall
+  along `B` the field-aligned one. The wall nodes are symmetrised, `f(x_b, v) == f(x_b, R v)`.
+- Mass is conserved to roundoff in the reflecting-domain norm (half weight on the two wall nodes);
+  the plain sum over grid points drifts at `O(Δx²)`.
+- `Mirror()` needs a `Lagrange` method, applies to spatial axes only (`advectV!` is periodic), and
+  needs velocity axes symmetric about zero. All three are checked.
+
+#### Grid for a mirror domain
+
+`Grid` excludes the upper bound `etaMax` from x-axes (the periodic convention) and includes it in
+v-axes. For walls at `0` and `Lx` on the `N` nodes `0, Δx, …, Lx`, pass `etaMax = Lx + Δx` with
+`Δx = Lx/(N-1)`:
+
+```julia
+Lx, N = 2pi, 65                         # N nodes including both walls
+dx    = Lx / (N - 1)
+grid  = bslLD.Grid([0.0, -vmax, -vmax], [Lx + dx, vmax, vmax], [N, Nv, Nv], 1)
+# grid.xaxes[1] == 0:dx:Lx; velocity axes have Nv + 1 nodes, symmetric about 0
+```
+
+#### Field solve on a mirror domain
+
+The spectral field solvers assume periodic `x`. `AdiabaticSolver` takes a boundary per spatial axis:
+`Mirror()` axes are differentiated by a centred finite difference of even `order` with ghosts
+mirrored about the walls (so `E = 0` there), `Periodic()` axes spectrally.
+
+```julia
+solver = bslLD.AdiabaticSolver((bslLD.Mirror(), bslLD.Periodic()); order = 8)   # x mirror, y periodic
+sol = bslLD.solve_fields(bslLD.Moments(rho), grid, solver)
+```
+
 ## Field Solvers
 
 All solvers implement the `AbstractFieldSolver` interface via `solve_fields` / `solve_fields!`, which takes a `Moments` struct and returns a `FieldSolution` holding the updated `E` and `B` vector fields.
@@ -75,7 +136,7 @@ All solvers implement the `AbstractFieldSolver` interface via `solve_fields` / `
 | Solver | Equation solved | Required moments |
 |--------|----------------|-----------------|
 | `PoissonSolver(factor=1.0)` | $-\nabla^2\phi = \text{factor}\cdot\rho$, $\mathbf{E}=-\nabla\phi$ | `rho` |
-| `AdiabaticSolver()` | $\mathbf{E} = -\nabla\rho$ (adiabatic electrons, no Poisson inversion) | `rho` |
+| `AdiabaticSolver(boundaries = (); order = 8)` | $\mathbf{E} = -\nabla\rho$ (adiabatic electrons, no Poisson inversion); `Mirror()` axes by finite differences of `order` | `rho` |
 
 Both are FFT-based and support arbitrary 1D/2D periodic domains. A 2/3-rule dealiasing filter is applied.
 
@@ -151,6 +212,7 @@ bslLD/
 │   │   └── fields.jl                  # ScalarField, VectorField, MatrixField
 │   ├── kinetics/
 │   │   ├── distribution.jl            # DistributionGrid, compute_density/current/Pi
+│   │   ├── interpolation.jl           # arbitrary-order Lagrange weights (uniform grid)
 │   │   ├── advectorCart.jl            # BSL advection (Cartesian, KernelAbstractions)
 │   │   └── advectorPolar.jl           # BSL advection (polar coordinates)
 │   ├── maxwell/
