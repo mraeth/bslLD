@@ -79,8 +79,8 @@ bslLD.advectV!(f, grid, simTime, sol.E; method = bslLD.Lagrange(24))
 ```
 
 Wider stencils hold the spectrum flat out to larger `k`: over 200 steps the amplitude retained at
-`kh = 0.5π` is 0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24`. See
-`examples/interpolation_spectra.jl`.
+`kh = 0.5π` is 0.03 for `W = 8`, 0.85 for `W = 16` and 0.99 for `W = 24` (derivation and script in the
+kinetics knowledge base, `Notes/numerical-methods/interpolation-kernel-spectral-response-in-bsl.md`).
 
 #### Sweep kernels
 
