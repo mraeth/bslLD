@@ -95,3 +95,28 @@ Re-time on the GPU (same method as above):
 - Correctness: the 26 extra cases are unchanged and bit-identical between tiled and general. The plain-loop reference test differs from the host loop by 1 ulp at 24–28 % of points on CUDA, because the GPU fuses multiply-adds (FMA). It now compares with `rtol = 1e-13`, which still fails on a one-node halo shift.
 - Memory: unchanged.
 - Still open: Metal's threadgroup limit. Mirror on x2/x3 costs about 6× a tiled periodic sweep, because it has no tiled path.
+
+## Follow-up: wall symmetrisation folded into the halo kernel
+
+On the H100 the separate symmetrisation pass cost 18–26 ms per 32⁶ mirror sweep. That pass
+touches only 2 of 32 nodes per line (~1 GB of traffic, ~1 ms), so something other than memory
+traffic dominated it.
+
+Change: `mirror_symmetrize_kernel!` is removed. `mirror_halo_kernel!` now runs one thread per
+pair of mirror-partner lines (line `L` and its velocity-flipped partner `P`, taken by the
+thread with `L <= P`). That thread averages the wall nodes of both lines in place, then fills
+both lines' halos. A line's halo reads only its partner, so no other thread touches either
+line and there is no race. The averaging uses the same operands and order as before.
+
+CPU checks:
+- full mirror `advectX!` is bit-identical to `7ed8b41` in six configurations: 1D2V x1 tiled and
+  general, 2D2V x1+x2 with shifts up to ~5 cells (W = 4, 8; tiled and general), 2D2V x2 only,
+  and `dt = 0` (symmetrisation only);
+- the full suite passes (608; the 2 known ExB allocation failures).
+
+GPU checks:
+- correctness: `test/lagrange_sweep_test.jl` on CUDA, and `t27` (tiled == general, GPU vs CPU);
+- timing, against `8c7f9d2`: 32⁶ mirror advectX x1 / x2 / x3 (62.5 / 75.1 / 69.3 ms), and the
+  halo kernel alone against the former symmetrise (18–26 ms) + halo fill;
+- if the fused kernel is still slow, the six-dimensional line-index decomposition with Int64
+  division per thread is the next suspect.
