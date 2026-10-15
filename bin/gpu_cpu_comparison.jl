@@ -1,35 +1,13 @@
 #!/usr/bin/env julia
 
 using Pkg
-Pkg.activate(joinpath(@__DIR__, "."); io = devnull)
-Pkg.develop(path = joinpath(@__DIR__, ".."); io = devnull)
+Pkg.activate(@__DIR__; io = devnull)
 
 using Statistics
 
-is_cuda = try
-    success(`nvidia-smi`)
-catch
-
-    false
-end
-is_amdgpu = !is_cuda && try
-    success(`rocm-smi`)
-catch
-
-    false
-end
-is_metal = !is_cuda && !is_amdgpu && Sys.isapple() && Sys.ARCH === :aarch64
+# Detects the GPU (is_cuda, is_amdgpu, is_metal), loads its package and bslLD.
+include("../scripts/select_backend.jl")
 has_gpu = is_cuda || is_amdgpu || is_metal
-
-if is_cuda
-    using CUDA
-elseif is_amdgpu
-    using AMDGPU
-elseif is_metal
-    using Metal
-end
-
-using bslLD
 
 const DEFAULTS = (nx = 256, nv = 256, samples = 30, warmup = 5, dt = 0.05, epsilon = 0.01)
 
