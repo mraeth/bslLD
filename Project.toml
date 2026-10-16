@@ -1,7 +1,7 @@
 name = "bslLD"
 uuid = "21b943fe-774f-48dd-8390-10604a0548ba"
-authors = ["Mario Raeth <mario.raeth@ipp.mpg.de>"]
 version = "0.1.0"
+authors = ["Mario Raeth <mario.raeth@ipp.mpg.de>"]
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
@@ -26,11 +26,15 @@ ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
 RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
 RemoteREPL = "1bd9f7bb-701c-4338-bec7-ac987af7c555"
 Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 SpecialPolynomials = "a25cea48-d430-424a-8ee7-0d3ad3742e9e"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 TaylorSeries = "6aa5eb33-94cf-58f4-a9d0-e4b2c4fc25ea"
+
+[sources]
+PlasmaCore = {path = "/home/mraeth@ipp.mpg.de/project_trees/kinetics/projects/usability_update/scripts/_deps/PlasmaCore.jl"}
 
 [compat]
 AbstractFFTs = "1.5.0"
@@ -62,8 +66,7 @@ Symbolics = "7.24.0"
 TaylorSeries = "0.21.9"
 
 [extras]
-Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Serialization", "Test"]
+test = ["Test"]

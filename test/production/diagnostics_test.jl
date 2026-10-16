@@ -1,26 +1,15 @@
 using Serialization
 
-# The diagnostics block of the ITG mirror template is tested as it stands in the example: its
-# text between the markers is evaluated into a module, and the example is run once on a tiny grid.
-const ITG_MIRROR = joinpath(@__DIR__, "..", "examples", "itg_mirror.jl")
+const ITG_MIRROR = joinpath(@__DIR__, "..", "..", "examples", "itg_mirror.jl")
 
-function load_diagnostics_block()
-    lines = readlines(ITG_MIRROR)
-    first_line = findfirst(startswith("# ---- BEGIN diagnostics block"), lines)
-    last_line = findfirst(startswith("# ---- END diagnostics block"), lines)
-    mod = Module(:DiagnosticsBlock)
-    Core.eval(mod, :(using bslLD, Serialization))
-    Core.eval(mod, :(import PlasmaCore))
-    include_string(mod, join(lines[first_line:last_line], "\n"))
-    return mod
-end
+# Diagnostics live in bslLD.Production; the template example is run once at the end.
+const D = bslLD.Production
 
 # Fields every chunk header must carry; the post-processing reader of the `bslLD` format
 # tests the same list against a chunk it writes from the documented format.
 const CHUNK_HEADER_FIELDS = (:version, :meta, :grid, :time, :kind)
 
-@testset "Template diagnostics block" begin
-    D = load_diagnostics_block()
+@testset "Production diagnostics" begin
     grid = bslLD.Grid([0.0, -2.0], [2pi, 2.0], [4, 6], 1)
     simTime = bslLD.SimulationTime(0.1, 1.0)
     n = Ref(1.0)
@@ -108,8 +97,7 @@ const CHUNK_HEADER_FIELDS = (:version, :meta, :grid, :time, :kind)
 end
 
 @testset "ITG mirror template runs (tiny grid, CPU)" begin
-    D = load_diagnostics_block()
-    root = dirname(@__DIR__)
+    root = dirname(dirname(@__DIR__))
     mktempdir() do dir
         # Pkg.test restricts JULIA_LOAD_PATH to the test environment; the child needs its own
         env = merge(ENV, Dict("BSLLD_TINY" => "1", "BSLLD_OUTPUT" => dir))

@@ -2,7 +2,6 @@ module bslLD
 
 using AbstractFFTs, Adapt, FFTW, KernelAbstractions
 using Dierckx, Base.Threads, StaticArrays, ProgressMeter
-using SpecialFunctions: erf
 
 using PlasmaCore:
     # Backend infrastructure
@@ -126,5 +125,6 @@ include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
 include("kinetics/exbBracketCart.jl")
 include("sources.jl")
+include("production/Production.jl")
 
 end # module bslLD

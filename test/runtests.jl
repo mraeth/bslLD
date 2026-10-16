@@ -3,7 +3,8 @@ using bslLD
 
 @testset "bslLD" begin
     include("basics_test.jl")
-    include("diagnostics_template_test.jl")
+    include("production/initialization_test.jl")
+    include("production/diagnostics_test.jl")
     include("interpolation_test.jl")
     include("advection_test.jl")
     include("lagrange_sweep_test.jl")

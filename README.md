@@ -138,23 +138,24 @@ copy it and edit. It shows, in this order: parameters, `Grid`, `Distribution` (s
 Build `f` from a source, or set an initial condition, with one function:
 
 ```julia
-ramp = bslLD.gaussian_ramp(15.0, 3.0)        # weight on [0, 30), integral 1
+using bslLD.Production: gaussian_ramp, deposit!
+ramp = gaussian_ramp(15.0, 3.0)              # weight on [0, 30), integral 1
 # target(grid, t) returns an array of the size of f.data
-bslLD.deposit!(f, grid, target, t; weight = ramp(t), dt = DT / 2)   # in the loop: f += weight*dt*target
-bslLD.deposit!(f, grid, target, 0.0; weight = 1, dt = 1)           # once, before the loop: initial condition
+deposit!(f, grid, target, t; weight = ramp(t), dt = DT / 2)   # in the loop: f += weight*dt*target
+deposit!(f, grid, target, 0.0; weight = 1, dt = 1)           # once, before the loop: initial condition
 ```
 
 `deposit!` does not evaluate `target` when `weight * dt` is zero. Sub-stepping of a mirror sweep, the
 flux-surface average and any filter (`PlasmaCore.fourier_filter!` for periodic axes) are written in the
 script, not hidden in the library.
 
-**Output** is written by the diagnostics block at the top of the template (not part of the library, so that
-it stays slim; it may move to a small separate package later). One `Diagnostic` per field, with explicit
-`every` and `buffer`; chunk files `<dir>/<name>_<firststep>.jls` (`Serialization`, format version 1:
-header `(version, meta, grid, time = (step, t, phase), kind)` then the data, one host array per record).
-`BSL6DPostProcessing.bslLD()` reads them. There is no restart; up to `buffer` records are lost if a run is
-interrupted. The block is tested in `test/diagnostics_template_test.jl`, which also runs the template once on a
-tiny grid.
+**Output** is written by `bslLD.Production.Diagnostic` (`src/production/`; the submodule depends on the core, the core
+does not refer to it, and nothing is exported: `using bslLD.Production: Diagnostic, write!, close!`). One `Diagnostic`
+per field, with explicit `every` and `buffer`; chunk files `<dir>/<name>_<firststep>.jls` (`Serialization`, format
+version 1: header `(version, meta, grid, time = (step, t, phase), kind)` then the data, one host array per record).
+The header's `meta["code"]` holds the git state of the script, bslLD and PlasmaCore. `BSL6DPostProcessing.bslLD()`
+reads the files. There is no restart yet; up to `buffer` records are lost if a run is interrupted. Tests:
+`test/production/`, including one run of the template on a tiny grid.
 
 ## Field Solvers
 
@@ -237,7 +238,8 @@ Grids, fields, `SimulationTime` and the derivative operators live in
 bslLD/
 ├── src/
 │   ├── bslLD.jl                       # module entry point, imports from PlasmaCore, backend selection
-│   ├── sources.jl                     # add_kappaT!, deposit!, gaussian_ramp
+│   ├── sources.jl                     # add_kappaT!
+│   ├── production/                    # submodule bslLD.Production: gaussian_ramp, deposit!, Diagnostic, chunk I/O
 │   ├── kinetics/
 │   │   ├── species.jl                 # Species, thermal velocity, gyro frequency
 │   │   ├── initialization.jl          # Distribution (outer-product initial condition)
