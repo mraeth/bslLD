@@ -46,7 +46,7 @@ Interpolations = "0.16.2"
 KernelAbstractions = "0.9"
 LaTeXStrings = "1.4.0"
 Latexify = "0.16.10"
-PlasmaCore = "0.1.1"
+PlasmaCore = "0.2"
 Polynomials = "4.1.0"
 Profile = "1.11.0"
 ProgressBars = "1.5.1"
@@ -54,6 +54,7 @@ ProgressMeter = "1.11.0"
 RecipesBase = "1"
 RemoteREPL = "0.3.1"
 Revise = "3.12.3"
+Serialization = "1.11.0"
 SpecialFunctions = "2.6.1"
 SpecialPolynomials = "0.5.0"
 StaticArrays = "1.9.15"
@@ -61,7 +62,8 @@ Symbolics = "7.24.0"
 TaylorSeries = "0.21.9"
 
 [extras]
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test"]
+test = ["Serialization", "Test"]

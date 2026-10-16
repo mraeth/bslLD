@@ -2,6 +2,7 @@ module bslLD
 
 using AbstractFFTs, Adapt, FFTW, KernelAbstractions
 using Dierckx, Base.Threads, StaticArrays, ProgressMeter
+using SpecialFunctions: erf
 
 using PlasmaCore:
     # Backend infrastructure
