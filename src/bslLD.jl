@@ -125,5 +125,6 @@ include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
 include("kinetics/exbBracketCart.jl")
 include("sources.jl")
+include("production/Production.jl")
 
 end # module bslLD
