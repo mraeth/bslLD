@@ -274,6 +274,6 @@ The CUDA extension is loaded automatically by Julia's extension mechanism when `
 
 - **BSL6D** — full 6D Boltzmann solver this package feeds into
 
-## Author
+## License
 
-Mario Raeth
+ISC, see [LICENSE](LICENSE). Part of the [BSL6D](https://gitlab.mpcdf.mpg.de/bsl6d/bsl6d) project; authors in [AUTHORS.md](AUTHORS.md).
