@@ -1,7 +1,7 @@
 name = "bslLD"
 uuid = "21b943fe-774f-48dd-8390-10604a0548ba"
 authors = ["Mario Raeth <mario.raeth@ipp.mpg.de>"]
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
@@ -46,7 +46,7 @@ Interpolations = "0.16.2"
 KernelAbstractions = "0.9"
 LaTeXStrings = "1.4.0"
 Latexify = "0.16.10"
-PlasmaCore = "0.1.1"
+PlasmaCore = "0.1.1, 0.2"
 Polynomials = "4.1.0"
 Profile = "1.11.0"
 ProgressBars = "1.5.1"
