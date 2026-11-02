@@ -255,6 +255,7 @@ bslLD/
 | `CairoMakie.jl` | Plotting in example notebooks |
 | `FFTW.jl` | Spectral diagnostics in notebooks (already a core dep) |
 | `DSP.jl` | Window functions (Kaiser) for ω–k spectra |
+| `KineticDR.jl` | Analytic dispersion references (BSLRegistry) in `field_solver_tests.jmd` |
 
 **PlasmaCore.jl status:** this package depends on `PlasmaCore.jl` via a remote git URL declared in `Project.toml`/`Manifest.toml`, not a local vendored copy, even though `PlasmaCore.jl` sits right next to this repo on disk. If full separation between development streams is later required, the recommended approach is to vendor a copy into `vendor/PlasmaCore.jl` within this project and repoint the dependency to that local path.
 

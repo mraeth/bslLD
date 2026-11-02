@@ -3,18 +3,17 @@ title: "Electromagnetic waves and time integration in the hybrid kinetic-Darwin 
 author: "Mario Raeth"
 ---
 
-```julia; echo=false
+```julia; echo=false, results="hidden"
 import Pkg
 Pkg.activate(joinpath(@__DIR__))
 Pkg.instantiate()
 ```
 
-```julia; echo=false
-ENV["OMP_NUM_THREADS"] = "4"
+```julia; echo=false, results="hidden"
 include(joinpath(@__DIR__, "..", "scripts", "select_backend.jl"))
-bslLD.use_cpu!()
 
-using Random, FFTW, DSP, Statistics, SpecialFunctions, NLsolve, LinearAlgebra, CairoMakie
+using Random, FFTW, DSP, Statistics, LinearAlgebra, CairoMakie
+import KineticDR as KDR
 
 set_theme!(Theme(
     backgroundcolor = :white,
@@ -32,14 +31,7 @@ const WONG = [:black, "#E69F00", "#56B4E9", "#009E73",
               "#F0E442", "#0072B2", "#D55E00", "#CC79A7"];
 ```
 
-
-```julia
-plot(4:10)
-
-
-```
-
-```julia; echo=false
+```julia; echo=false, results="hidden"
 # ── Steppers ──────────────────────────────────────────────────────────────────
 mutable struct Diag
     Ey::Vector; Bz::Vector; ni::Vector; t::Vector
@@ -68,9 +60,6 @@ function step!(f_i, sol, grid, simTime, solver)
     n_i    = bslLD.compute_density(f_i, grid)
     J_perp = bslLD.compute_current(f_i, grid, simTime.phase)
     bslLD.solve_fields!(sol, bslLD.Moments(n_i, J_perp, Pi_zero), grid, solver, dt)
-    for (ind, Ec) in enumerate(sol.Enew)
-        sol.Enew[ind].data .= bslLD.fourier_filter(Ec, grid, 0.7).data
-    end
 
     simTime.phase = phase_start + 0.75Ω*dt
     bslLD.advectX!(f_i, grid, simTime)
@@ -80,63 +69,45 @@ function step!(f_i, sol, grid, simTime, solver)
     simTime.phase = phase_start; simTime.fraction_dt = 1.0
 end
 
+# X–C–X midpoint step. `coupling` sets the number of kinetic corrections of the stage current:
+# :predictor_only 0, :moment_kinetic_corrector 1, :kinetic_picard until max|ΔEy| < picard_tol.
+# damping_rate κ > 0 moves the stage to θ = 1/2 + κ dt.
 function stepMidpoint!(f_i, sol, grid, simTime, solver;
-                       coupling=:moment_kinetic_corrector,
-                       field_solver=:midpoint, damping_rate=0.0,
+                       coupling=:moment_kinetic_corrector, damping_rate=0.0,
                        picard_tol=1e-8, picard_maxiter=20)
+    n_corr = coupling == :predictor_only           ? 0 :
+             coupling == :moment_kinetic_corrector ? 1 :
+             coupling == :kinetic_picard           ? picard_maxiter :
+             throw(ArgumentError("unknown coupling $coupling"))
     phase_start = simTime.phase
-    Ω = bslLD.gyro_frequency(f_i, grid)
+    Ω  = bslLD.gyro_frequency(f_i, grid)
     dt = simTime.dt
-    theta = field_solver == :damped_midpoint ? 0.5 + damping_rate * dt : 0.5
+    theta = 0.5 + damping_rate * dt
     @assert 0.5 <= theta <= 1.0
     Pi_zero = bslLD.zero_vectorfield3(grid)
 
     simTime.phase = phase_start + 0.25Ω*dt; simTime.fraction_dt = 0.5
     bslLD.advectX!(f_i, grid, simTime)
-
-    f_a_data = copy(f_i.data)
-    B_n = bslLD.VectorField([copy(sol.B[d].data) for d in 1:3])
+    f_a = copy(f_i.data)
 
     simTime.phase = phase_start + 0.5Ω*dt
     n_a = bslLD.compute_density(f_i, grid)
-    J_a = bslLD.compute_current(f_i, grid, simTime.phase)
+    # B is not modified by the stage solve; Faraday is applied once below.
+    solve_stage(J) = (bslLD.solve_fields_damped_midpoint!(
+        sol, bslLD.Moments(n_a, J, Pi_zero), grid, solver, dt, theta); sol.Enew)
 
-    J_theta_pred = bslLD.predict_stage_current(n_a, J_a, sol.E, f_i, grid, dt, theta)
-    copyto!(sol.B, B_n)
-    bslLD.solve_fields_damped_midpoint!(sol, bslLD.Moments(n_a, J_theta_pred, Pi_zero), grid, solver, dt, theta)
-    E_mid = sol.Enew
-
-    if coupling == :moment_kinetic_corrector
-        f_i.data .= f_a_data; simTime.fraction_dt = theta
+    J_a   = bslLD.compute_current(f_i, grid, simTime.phase)
+    E_mid = solve_stage(bslLD.predict_stage_current(n_a, J_a, sol.E, f_i, grid, dt, theta))
+    for _ in 1:n_corr
+        Ey_prev = copy(E_mid[2].data)
+        f_i.data .= f_a; simTime.fraction_dt = theta
         bslLD.advectV!(f_i, grid, simTime, E_mid)
-        J_theta_kin = bslLD.compute_current(f_i, grid, simTime.phase)
-        copyto!(sol.B, B_n)
-        bslLD.solve_fields_damped_midpoint!(sol, bslLD.Moments(n_a, J_theta_kin, Pi_zero), grid, solver, dt, theta)
-        E_mid = sol.Enew
-    elseif coupling == :implicit_midpoint_faraday
-        f_i.data .= f_a_data; simTime.fraction_dt = theta
-        bslLD.advectV!(f_i, grid, simTime, E_mid)
-        J_theta_kin = bslLD.compute_current(f_i, grid, simTime.phase)
-        copyto!(sol.B, B_n)
-        bslLD.solve_fields_damped_midpoint!(sol, bslLD.Moments(n_a, J_theta_kin, Pi_zero), grid, solver, dt, theta)
-        E_mid = sol.Enew
-    elseif coupling == :kinetic_picard
-        for _ in 1:picard_maxiter
-            E_prev = [copy(E_mid[d].data) for d in 1:3]
-            f_i.data .= f_a_data; simTime.fraction_dt = theta
-            bslLD.advectV!(f_i, grid, simTime, E_mid)
-            J_theta_kin = bslLD.compute_current(f_i, grid, simTime.phase)
-            copyto!(sol.B, B_n)
-            bslLD.solve_fields_damped_midpoint!(sol, bslLD.Moments(n_a, J_theta_kin, Pi_zero), grid, solver, dt, theta)
-            E_mid = sol.Enew
-            maximum(abs.(E_mid[2].data .- E_prev[2])) < picard_tol && break
-        end
+        E_mid = solve_stage(bslLD.compute_current(f_i, grid, simTime.phase))
+        maximum(abs.(E_mid[2].data .- Ey_prev)) < picard_tol && break
     end
 
-    f_i.data .= f_a_data; simTime.fraction_dt = 1.0
+    f_i.data .= f_a; simTime.fraction_dt = 1.0
     bslLD.advectV!(f_i, grid, simTime, E_mid)
-
-    copyto!(sol.B, B_n)
     bslLD.apply_faraday!(sol.B, E_mid, grid, dt)
 
     simTime.phase = phase_start + 0.75Ω*dt; simTime.fraction_dt = 0.5
@@ -146,83 +117,60 @@ function stepMidpoint!(f_i, sol, grid, simTime, solver;
 end
 
 # ── Simulation helpers ─────────────────────────────────────────────────────────
-function make_ics(grid, ε, T, Nx; random_E=false)
-    if random_E
-        E0 = bslLD.VectorField([bslLD.ScalarField(ε .* randn(Nx)) for _ in 1:3])
+# Zero-mean random seed of amplitude ε in Ey (seed=:Ey) or Bz (seed=:Bz); all other components zero.
+function seed_fields(Nx, ε, seed)
+    E = [zeros(Nx) for _ in 1:3]; B = [zeros(Nx) for _ in 1:3]
+    s = ε .* randn(Nx); s .-= mean(s)
+    seed == :Ey ? (E[2] .= s) : (B[3] .= s)
+    vf(c) = bslLD.VectorField([bslLD.ScalarField(x) for x in c])
+    return bslLD.FieldSolution(vf(E), vf(B))
+end
+
+# Uniform Maxwellian ions; vnoise > 0 shifts each velocity node by a random amount up to vnoise.
+maxwellian_ions(grid, T; vnoise=0.0) = bslLD.Distribution(grid, 0.0,
+    initFuncx = x -> 1.0,
+    initFuncv = v -> exp(-(v + vnoise*rand())^2 / (2T)) / sqrt(2π*T))
+
+# Kinetic ions (stepper(f, sol, grid, simTime, solver)) or, with stepper = bslLD.step_cold!, the cold-ion fluid.
+function run_sim(β, μ, dt, Tmax, grid; stepper=stepMidpoint!, ε=1e-4, T=1.0, seed=42, seed_field=:Bz, vnoise=0.0)
+    Random.seed!(seed)
+    sol = seed_fields(length(grid.xaxes[1]), ε, seed_field)
+    if stepper === bslLD.step_cold!
+        state = bslLD.ColdIonFluid(grid); Ω = grid.b0
+        density = s -> s.delta_n
     else
-        Ey = ε .* randn(Nx); Ey .-= mean(Ey)
-        E0 = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)),
-                                bslLD.ScalarField(Ey),
-                                bslLD.ScalarField(zeros(Nx))])
+        state = maxwellian_ions(grid, T; vnoise); Ω = bslLD.gyro_frequency(state, grid)
+        density = s -> bslLD.compute_density(s, grid)
     end
-    B0  = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)) for _ in 1:3])
-    sol = bslLD.FieldSolution(E0, B0)
-    f_i = bslLD.Distribution(grid, 0.0,
-        initFuncx = x -> 1.0,
-        initFuncv = v -> exp(-(v + ε*rand())^2 / (2T)) / sqrt(2π*T))
-    return f_i, sol
-end
-
-function make_ics_em(grid, ε, T, Nx)
-    E0 = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)) for _ in 1:3])
-    Bz = ε .* randn(Nx); Bz .-= mean(Bz)
-    B0 = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)),
-                            bslLD.ScalarField(zeros(Nx)),
-                            bslLD.ScalarField(Bz)])
-    sol = bslLD.FieldSolution(E0, B0)
-    f_i = bslLD.Distribution(grid, 0.0,
-        initFuncx = x -> 1.0,
-        initFuncv = v -> exp(-v^2 / (2T)) / sqrt(2π*T))
-    return f_i, sol
-end
-
-function run_sim(β, μ, dt, Tmax, grid; stepper=step!, ε=1e-4, T=1.0, seed=42, ic=make_ics_em)
-    Random.seed!(seed)
-    Nx = size(grid.xaxes[1], 1)
-    f_i, sol = ic(grid, ε, T, Nx)
-    solver = bslLD.EMSolverDKNoPol(β, μ)
+    solver  = bslLD.EMSolverDKNoPol(β, μ)
     simTime = bslLD.SimulationTime(dt, Tmax)
     diag = Diag()
     while bslLD.continue_advection(simTime, true)
-        stepper(f_i, sol, grid, simTime, solver)
-        bslLD.advance!(simTime, bslLD.gyro_frequency(f_i, grid))
-        record!(diag, sol, bslLD.compute_density(f_i, grid), simTime)
+        stepper(state, sol, grid, simTime, solver)
+        bslLD.advance!(simTime, Ω)
+        record!(diag, sol, density(state), simTime)
     end
     return diag
 end
 
-function run_sim_cold(β, μ, dt, Tmax, grid; ε=1e-7, seed=42)
-    Random.seed!(seed)
-    Nx = size(grid.xaxes[1], 1)
-    Bz = ε .* randn(Nx); Bz .-= mean(Bz)
-    B0 = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)),
-                            bslLD.ScalarField(zeros(Nx)),
-                            bslLD.ScalarField(Bz)])
-    E0 = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)) for _ in 1:3])
-    sol = bslLD.FieldSolution(E0, B0)
-    fluid = bslLD.ColdIonFluid(grid)
-    solver = bslLD.EMSolverDKNoPol(β, μ)
-    simTime = bslLD.SimulationTime(dt, Tmax)
-    diag = Diag()
-    while bslLD.continue_advection(simTime, true)
-        bslLD.step_cold!(fluid, sol, grid, simTime, solver)
-        bslLD.advance!(simTime, 1.0)
-        record!(diag, sol, fluid.delta_n, simTime)
-    end
-    return diag
+mean_sq(diag, field) = [mean(abs2, x) for x in getfield(diag, field)]
+
+# ‖Bz^n − Bz^{n−1} + dt ∂_{x1} Ey^n‖∞ per step; record! stores the stage field E^m of step n at index n.
+function faraday_residuals(diag, dt, grid)
+    k1 = fftfreq(length(grid.xaxes[1]), 1/grid.delta[1]) .* 2π
+    return [maximum(abs.(diag.Bz[n] .- diag.Bz[n-1] .+ dt .* real.(ifft(im .* k1 .* fft(diag.Ey[n])))))
+            for n in 2:length(diag.t)]
 end
 
 # ── Spectral helpers ───────────────────────────────────────────────────────────
 function make_spec(diag, dt, grid; field=:Bz)
-    data_vec = field == :Bz ? diag.Bz : (field == :Ey ? diag.Ey : diag.ni)
-    Nx   = size(grid.xaxes[1], 1)
-    ω    = fftfreq(length(diag.t), 1/dt) .* 2π
-    k    = fftfreq(Nx, 1/grid.delta[1]) .* 2π
-    nw   = length(diag.t) ÷ 2
-    nk   = Nx ÷ 2
-    w_win = kaiser(length(diag.t), 3)
-    data  = transpose(hcat(data_vec...))
-    spec  = log.(abs.(fft(data .* w_win))[1:nw, 1:nk] .+ 1e-30)
+    Nx = length(grid.xaxes[1])
+    ω  = fftfreq(length(diag.t), 1/dt) .* 2π
+    k  = fftfreq(Nx, 1/grid.delta[1]) .* 2π
+    nw = length(diag.t) ÷ 2
+    nk = Nx ÷ 2
+    data = transpose(hcat(getfield(diag, field)...))
+    spec = log.(abs.(fft(data .* kaiser(length(diag.t), 3)))[1:nw, 1:nk] .+ 1e-30)
     return k[2:nk], ω[2:nw], spec[2:nw, 2:end]
 end
 
@@ -230,246 +178,53 @@ function plot_spectrum!(ax, diag, dt, grid; field=:Bz)
     k, ω, spec = make_spec(diag, dt, grid; field)
     heatmap!(ax, k, ω, spec'; colormap=:inferno)
 end
-
-function overlay_cold!(ax, β, μ; kmax=2.0, dir=:par)
-    qn_ndc_c, _ = make_disp_fns(β, μ)
-    kvals = dir == :par ? range(0.02, kmax, length=50) : range(0.05, kmax, length=60)
-    roots_list = [real_roots_at_k(qn_ndc_c, dir==:par ? 0.0 : k, dir==:par ? k : 0.0;
-                                  ωmax=8.0, nscan=2000) for k in kvals]
-    M = roots_to_matrix(kvals, roots_list)
-    for j in 1:size(M,2)
-        lines!(ax, collect(kvals), M[:,j];
-               color=:white, linestyle=:dash, linewidth=1.5,
-               label=(j==1 ? "cold analytic" : nothing))
-    end
-end
-
-function overlay_hot!(ax, β, μ; dir=:par)
-    _, qn_ndc_h = make_disp_fns(β, μ)
-    if dir == :par
-        kz_vals = range(0.02, 3.0, length=40)
-        spec = Tuple{Float64,Float64}[]
-        for kz in kz_vals
-            for ω in weakly_damped_roots_at_k(qn_ndc_h, 0.0, kz; ωmax=8.0, nseed=100, γmax=0.5)
-                push!(spec, (kz, real(ω)))
-            end
-        end
-        scatter!(ax, first.(spec), last.(spec); color=WONG[3], markersize=5, label="hot analytic")
-    else
-        kx_vals = range(0.05, 4.0, length=50)
-        spec = Tuple{Float64,Float64}[]
-        for kx in kx_vals
-            for ω in real_roots_at_k(qn_ndc_h, kx, 0.0; ωmax=8.0, nscan=3000)
-                push!(spec, (kx, real(ω)))
-            end
-        end
-        scatter!(ax, first.(spec), last.(spec); color=WONG[3], markersize=5, label="hot analytic")
-    end
-end
 ```
 
-```julia; echo=false
-# ── Dispersion functions ───────────────────────────────────────────────────────
-const _Nharm_default = 12
-const _kpar_tol = 1e-12
+```julia; echo=false, results="hidden"
+# ── Analytic references (KineticDR) ────────────────────────────────────────────
+# In the 1D runs E∥ ≡ 0 (k ∥ b̂ or k ⊥ b̂), so the modes are the roots of the perpendicular 2×2 block of 𝒟.
+# Electrons: massless Hall response (drift-kinetic, T_e → 0); μ does not enter that block.
+darwin_model(β, μ, ions) = KDR.Model(
+    (KDR.Species(response = ions), KDR.Species(q = -1, m = μ, T = 1e-10, response = KDR.DriftKinetic())),
+    KDR.Darwin(beta = β))
 
-function Zfun(z::ComplexF64)
-    abs(z) > 30 ? -1/z - 1/(2z^3) - 3/(4z^5) - 15/(8z^7) : im*sqrt(π)*erfcx(-im*z)
-end
+kvec(k, dir) = dir == :par ? KDR.Wavevector(ky = 0.0, kz = k) : KDR.Wavevector(kx = k, ky = 0.0)
 
-function Zprime(z::ComplexF64)
-    abs(z) > 30 ? 1/z^2 + 3/(2z^4) + 15/(4z^6) + 105/(8z^8) : -2*(1 + z*Zfun(z))
-end
+const HARMONIC_SEEDS = sort(vcat(0.1:0.2:8.0, [n + s*d for n in 1:8 for s in (-1, 1) for d in (0.3, 0.1, 0.03, 0.01, 3e-3, 1e-3, 3e-4, 1e-4)]))
 
-Γfun(n::Integer, b::Real)      = exp(-b)*besseli(abs(n), b)
-Γprime(n::Integer, b::Real)    = exp(-b)*(0.5*(besseli(abs(abs(n)-1), b) + besseli(abs(n)+1, b)) - besseli(abs(n), b))
-
-function scaled_det(D::AbstractMatrix{<:Complex})
-    A = Matrix{ComplexF64}(D)
-    for i in axes(A,1); s = norm(view(A,i,:)); s>0 && (A[i,:] ./= s); end
-    for j in axes(A,2); s = norm(view(A,:,j)); s>0 && (A[:,j] ./= s); end
-    return det(A)
-end
-singular_ratio(D::AbstractMatrix{<:Complex}) = (s=svdvals(Matrix{ComplexF64}(D)); minimum(s)/maximum(s))
-
-function projectors(kx, kz)
-    kv = [kx, 0.0, kz]; k2 = dot(kv,kv); @assert k2>0
-    PL = ComplexF64.(kv*kv'/k2)
-    PT = Matrix{ComplexF64}(I,3,3) .- PL
-    return PL, PT, k2
-end
-
-function roots_to_matrix(kvals, root_lists)
-    nb = maximum(length.(root_lists); init=0)
-    M  = fill(NaN, length(kvals), nb)
-    for (i,rs) in enumerate(root_lists)
-        for (j,r) in enumerate(rs); M[i,j] = real(r); end
-    end
-    return M
-end
-
-function solve_seed(Dmat, kx, kz, seed; ftol=1e-10)
-    function residual!(F, x)
-        ω = complex(x[1], x[2])
-        d = scaled_det(Dmat(ω, kx, kz))
-        F[1] = real(d); F[2] = imag(d)
-    end
-    try
-        sol = nlsolve(residual!, [real(seed), imag(seed)]; method=:trust_region, ftol, xtol=1e-10, iterations=300)
-        return converged(sol) ? complex(sol.zero[1], sol.zero[2]) : nothing
-    catch; return nothing; end
-end
-
-function bisect_real_root(f, a, b; tol=1e-10, maxit=100)
-    fa, fb = f(a), f(b)
-    (!isfinite(fa) || !isfinite(fb) || fa*fb > 0) && return nothing
-    for _ in 1:maxit
-        m = 0.5*(a+b); fm = f(m)
-        !isfinite(fm) && return nothing
-        (abs(fm) < tol || abs(b-a) < tol) && return m
-        fa*fm <= 0 ? (b=m; fb=fm) : (a=m; fa=fm)
-    end
-    return 0.5*(a+b)
-end
-
-function real_roots_at_k(Dmat, kx, kz; ωmin=0.02, ωmax=8.0, nscan=5000, pole_pad=1e-4, srtol=1e-7)
-    f(ωr) = real(scaled_det(Dmat(complex(ωr, 0.0), kx, kz)))
-    grid = collect(range(ωmin, ωmax, length=nscan))
-    roots = ComplexF64[]; lastω = lastf = NaN
-    for ωr in grid
-        minimum(abs.(ωr .- collect(1:_Nharm_default))) < pole_pad && (lastω=lastf=NaN; continue)
-        fr = try f(ωr) catch; NaN end
-        (!isfinite(fr) || abs(fr) > 1e8) && (lastω=lastf=NaN; continue)
-        if isfinite(lastf) && lastf*fr <= 0
-            root = bisect_real_root(f, lastω, ωr)
-            if root !== nothing && ωmin < root < ωmax
-                ω = complex(root, 0.0); D = Dmat(ω, kx, kz)
-                if (singular_ratio(D) < srtol || abs(scaled_det(D)) < 1e-7) && all(abs(ω-r) > 2e-3 for r in roots)
-                    push!(roots, ω)
-                end
-            end
+# Roots ω (0.02 < Re ω < ωmax, |Im ω| < γmax) of det(ω² 𝒟⊥) at each k, from Muller seeds on re × im_seeds
+# (dense on both sides of each harmonic, where the ion Bernstein roots crowd).
+function spectrum(model, ks, dir; re=HARMONIC_SEEDS, im_seeds=(0.0, -0.01), ωmax=8.0, γmax=0.5)
+    out = Tuple{Float64,ComplexF64}[]
+    for k in ks
+        f(ω) = det(ω^2 .* KDR.dispersion_matrix(model, ω, kvec(k, dir))[1:2, 1:2])
+        roots = ComplexF64[]
+        for r in re, i in im_seeds
+            # Muller's initial spread δ must not straddle the pole at the nearest harmonic
+            ω, ok = KDR.find_root(f, complex(r, i); δ = clamp(abs(r - round(r)) / 10, 1e-6, 1e-3))
+            ok && 0.02 < real(ω) < ωmax && abs(imag(ω)) < γmax && all(z -> abs(z - ω) > 1e-6, roots) && push!(roots, ω)
         end
-        lastω = ωr; lastf = fr
+        append!(out, ((k, ω) for ω in roots))
     end
-    return sort!(roots, by=real)
+    return out
 end
 
-function scalar_real_roots(f; ωmin=0.02, ωmax=8.0, nscan=5000, pole_pad=1e-4)
-    grid = collect(range(ωmin, ωmax, length=nscan))
-    roots = Float64[]; lastω = lastf = NaN
-    for ωr in grid
-        minimum(abs.(ωr .- collect(1:_Nharm_default))) < pole_pad && (lastω=lastf=NaN; continue)
-        fr = try f(ωr) catch; NaN end
-        (!isfinite(fr) || abs(fr) > 1e8) && (lastω=lastf=NaN; continue)
-        if isfinite(lastf) && lastf*fr <= 0
-            r = bisect_real_root(f, lastω, ωr)
-            if r !== nothing && all(abs(r-r0) > 2e-3 for r0 in roots); push!(roots, r); end
-        end
-        lastω = ωr; lastf = fr
-    end
-    return sort!(roots)
-end
-
-function weakly_damped_roots_at_k(Dmat, kx, kz; ωmin=0.02, ωmax=8.0, nseed=120, γmax=0.5, srtol=1e-6)
-    roots = ComplexF64[]
-    for wr in range(ωmin, ωmax, length=nseed), wi in (0.0, -1e-5, -1e-4, -5e-4, -1e-3)
-        ω = solve_seed(Dmat, kx, kz, complex(wr, wi))
-        ω === nothing && continue
-        !(ωmin < real(ω) < ωmax && abs(imag(ω)) < γmax) && continue
-        D = Dmat(ω, kx, kz)
-        if singular_ratio(D) < srtol && abs(scaled_det(D)) < 1e-6
-            all(abs(real(ω)-real(r)) > 2e-3 for r in roots) && push!(roots, ω)
-        end
-    end
-    return sort!(roots, by=real)
-end
-
-# Parameterized dispersion matrix factories
-function make_disp_fns(βi, μ; c_norm=1000.0, Te_Ti=1.0, Nharm=_Nharm_default)
-    ωpi = c_norm * sqrt(βi/2)
-    ωpe = sqrt(μ) * ωpi
-    vte = sqrt(μ * Te_Ti)
-
-    function ion_chi(ω, kperp, kpar)
-        ω = ComplexF64(ω)
-        b = max(kperp^2, 1e-14)
-        # Γ_n(b) is peaked with width ~√b, so the harmonic sum must widen with b.
-        N = max(Nharm, ceil(Int, 6*sqrt(b)) + 4)
-        if abs(kpar) <= _kpar_tol
-            if b < 1e-12
-                den = ω^2 - 1
-                χ = zeros(ComplexF64, 3, 3)
-                χ[1,1] = χ[2,2] = -ωpi^2/den
-                χ[1,2] = -im*ωpi^2/(ω*den); χ[2,1] = -χ[1,2]
-                χ[3,3] = -ωpi^2/ω^2; return χ
-            end
-            χ = zeros(ComplexF64, 3, 3)
-            for n in -N:N
-                Δn = ω - n; Gn = Γfun(n,b); Gpn = Γprime(n,b); A = -ω/Δn
-                χ[1,1] += (n^2/b)*Gn*A; χ[1,2] += im*n*Gpn*A; χ[2,1] -= im*n*Gpn*A
-                χ[2,2] += ((n^2/b)*Gn - 2b*Gpn)*A; χ[3,3] -= Gn*ω/Δn
-            end
-            return (ωpi^2/ω^2)*χ
-        end
-        ζ0 = ω/(sqrt(2)*kpar); χ = zeros(ComplexF64, 3, 3)
-        for n in -N:N
-            ζn = (ω - n)/(sqrt(2)*kpar); Zn = Zfun(ζn); Zpn = Zprime(ζn)
-            Gn = Γfun(n,b); Gpn = Γprime(n,b); A = ζ0*Zn
-            χ[1,1] += (n^2/b)*Gn*A; χ[1,2] += im*n*Gpn*A; χ[2,1] -= im*n*Gpn*A
-            χ[2,2] += ((n^2/b)*Gn - 2b*Gpn)*A
-            χ[1,3] -= (n/sqrt(2b))*Gn*ζ0*Zpn; χ[3,1] -= (n/sqrt(2b))*Gn*ζ0*Zpn
-            χ[2,3] += im*sqrt(b/2)*Gpn*ζ0*Zpn; χ[3,2] -= im*sqrt(b/2)*Gpn*ζ0*Zpn
-            χ[3,3] -= Gn*ζ0*ζn*Zpn
-        end
-        return (ωpi^2/ω^2)*χ
-    end
-
-    function electron_dk_chi(ω, kpar)
-        ω = ComplexF64(ω); χe = zeros(ComplexF64, 3, 3)
-        χH = ωpi^2/ω; χe[1,2] = -im*χH; χe[2,1] = im*χH
-        χe[3,3] = abs(kpar) <= _kpar_tol ? -ωpe^2/ω^2 :
-                  -(ωpe^2/ω^2)*(ω/(sqrt(2)*kpar*vte))^2 * Zprime(ω/(sqrt(2)*kpar*vte))
-        return χe
-    end
-
-    function cold_chi(ω)
-        ω = ComplexF64(ω); den = ω^2 - 1
-        χ = zeros(ComplexF64, 3, 3)
-        χ[1,1] = χ[2,2] = -ωpi^2/den
-        χ[1,2] = -im*(ωpi^2/(ω*den) + ωpi^2/ω); χ[2,1] = -χ[1,2]
-        χ[3,3] = -(ωpi^2 + ωpe^2)/ω^2
-        return χ
-    end
-
-    function qn_ndc_cold(ω, kx, kz)
-        _, PT, k2 = projectors(kx, kz)
-        return cold_chi(ω) - (c_norm^2*k2/ω^2)*PT
-    end
-
-    function qn_ndc_hot(ω, kx, kz)
-        ω = ComplexF64(ω)
-        _, PT, k2 = projectors(kx, kz)
-        χ = ion_chi(ω, abs(kx), kz) + electron_dk_chi(ω, kz)
-        return χ - (c_norm^2*k2/ω^2)*PT
-    end
-
-    return qn_ndc_cold, qn_ndc_hot
+function overlay!(ax, model, ks, dir; color, label, kw...)
+    s = spectrum(model, ks, dir; kw...)
+    scatter!(ax, first.(s), real.(last.(s)); color, label)
 end
 ```
 
 ## Normalization
 
-All frequencies are normalized to $\Omega_i = q_i B_0 / m_i$, lengths to $\rho_i = v_\mathrm{th}/\Omega_i$, and velocities to $v_\mathrm{th} = \sqrt{T_i/m_i}$.
+Frequencies are normalized to $\Omega_i = q_i B_0 / m_i$, lengths to $\rho_i = v_\mathrm{th}/\Omega_i$, and velocities to $v_\mathrm{th} = \sqrt{T_i/m_i}$. Susceptibilities are in units of $\omega_{pi}^2/\Omega_i^2$ (as in KineticDR).
 
 | Symbol | Definition | Note |
 |---|---|---|
 | $\beta_i$ | $8\pi n_0 T_i / B_0^2$ | input |
-| $\mu$ | $m_i/m_e$ | input |
-| $c$ | $\sqrt{2/\beta_i}$ | Alfvén speed in units of $v_\mathrm{th}$ |
-| $\omega_{pi}$ | $c\sqrt{\beta_i/2}$ | ion plasma frequency |
-| $\omega_{pe}$ | $\sqrt{\mu}\,\omega_{pi}$ | electron plasma frequency |
-| $v_{te}$ | $\sqrt{\mu\, T_e/T_i}$ | electron thermal speed |
-| $d_i = c/\omega_{pi}$ | $\sqrt{2/\beta_i}/\omega_{pi}$ | ion inertial length in units of $\rho_i$ |
+| $\mu$ | $m_e/m_i$ | input; enters only the $E_\parallel$ equation through $\lambda$ |
+| $2/\beta_i$ | $v_A^2/v_\mathrm{th}^2$ | coefficient of $\nabla\times\mathbf{B}$ in $\mathbf{E}_\perp$ |
+| $d_i$ | $\sqrt{2/\beta_i}\,\rho_i$ | ion inertial length |
 | $\zeta_n$ | $(\omega - n)/(\sqrt{2}\,k_\parallel)$ | cyclotron resonance argument |
 
 ## Electromagnetic Model
@@ -483,11 +238,11 @@ Displacement current is neglected (Darwin approximation): $\nabla\times\mathbf{B
 
 $$\frac{\partial\mathbf{B}}{\partial t} = -\nabla\times\mathbf{E},$$
 
-$$\mathbf{E}_\perp = \left(c\,\nabla\times\mathbf{B} - \mathbf{J}_{i\perp}\right)\times\hat{b},$$
+$$\mathbf{E}_\perp = \left(\frac{2}{\beta_i}\,\nabla\times\mathbf{B} - \mathbf{J}_{i\perp}\right)\times\hat{b},$$
 
-$$\left(-\nabla_\perp^2 - \lambda\right)E_\parallel = -\nabla\cdot\boldsymbol\Pi_\mathrm{diff}, \qquad \lambda = \frac{\beta_i}{2}\!\left(1 + \frac{1}{\mu}\right).$$
+$$\left(\nabla_\perp^2 - \lambda\right)E_\parallel - \nabla_\parallel\left(\nabla_\perp\cdot\mathbf{E}_\perp\right) = \frac{\beta_i}{2}\nabla\cdot\boldsymbol\Pi_\mathrm{diff}, \qquad \lambda = \frac{\beta_i}{2}\!\left(1 + \frac{1}{\mu}\right).$$
 
-This is a quasineutral reduced model: $\nabla\cdot\mathbf{E}$ is not constrained by Gauss's law and can be nonzero, while $\partial_t(\nabla\cdot\mathbf{B}) = 0$, so an initially divergence-free magnetic field remains divergence-free. The normalized Alfvén speed $c = \sqrt{2/\beta_i}$ entering $\mathbf{E}_\perp$ is defined in the Normalization table. In all implemented integrators $\boldsymbol\Pi_\mathrm{diff} = 0$.
+This is a quasineutral reduced model: $\nabla\cdot\mathbf{E}$ is not constrained by Gauss's law and can be nonzero, while $\partial_t(\nabla\cdot\mathbf{B}) = 0$, so an initially divergence-free magnetic field remains divergence-free. In all implemented integrators $\boldsymbol\Pi_\mathrm{diff} = 0$. In the 1D runs below $\mathbf{k}$ is either parallel or perpendicular to $\hat{b}$, so the coupling term vanishes and $E_\parallel \equiv 0$: neither $\lambda$ nor $\mu$ affects them.
 
 ### Model comparison
 
@@ -497,62 +252,47 @@ This is a quasineutral reduced model: $\nabla\cdot\mathbf{E}$ is not constrained
 | Gauss / quasineutrality | Poisson | QN | QN | QN |
 | $(1/\mu)\partial_t\mathbf{E}_\perp$ (polarization drift) | — | — | no | yes |
 
-**DKNoPol** solves the field equations above with $\boldsymbol\Pi_\mathrm{diff}=0$. In Fourier space a $3\times3$ linear system for $\hat{\mathbf{E}}$ is solved via Cramer's rule with $\alpha = 2dt/\beta_i$ in the coupling matrix. **DKPol** adds the polarization drift term $(1/\mu)\partial_t\mathbf{E}_\perp$, which enters as an implicit rotation with denominator $(1+\alpha'^2)$, $\alpha' = dt/\mu$; it requires staggered-leapfrog $\mathbf{B}$.
+**DKNoPol** solves the field equations above with $\boldsymbol\Pi_\mathrm{diff}=0$. In Fourier space a $3\times3$ linear system for $\hat{\mathbf{E}}$ is solved via Cramer's rule with $\alpha = 2\Delta t/\beta_i$ in the coupling matrix. **DKPol** adds the polarization drift term $(1/\mu)\partial_t\mathbf{E}_\perp$, which enters as an implicit rotation with denominator $(1+\alpha'^2)$, $\alpha' = \Delta t/\mu$; it requires staggered-leapfrog $\mathbf{B}$.
 
 ### Electron and ion kinetics
 
 The ion density and perpendicular current are the velocity moments of $f_i$:
 $$n_i = \int f_i\,d\mathbf{v}, \qquad \mathbf{J}_{i\perp} = q_i\int\mathbf{v}_\perp f_i\,d\mathbf{v}.$$
 
-Electrons are treated in the drift-kinetic limit: they contribute only a Hall off-diagonal ($\chi_H = \omega_{pi}^2/\omega$) and a parallel Landau response to the susceptibility tensor.
+Electrons are massless across the field: they carry only the Hall ($\mathbf{E}\times\mathbf{B}$) current, $\chi_H = 1/\omega$. Their parallel inertia enters only through $\lambda$.
 
 ## Cold Plasma Dispersion
 
 ### Dispersion matrix
 
-The linear dispersion relation follows from the eigenvalue problem $\mathcal{D}\hat{\mathbf{E}} = 0$:
-$$\mathcal{D}(\omega,\mathbf{k}) = \chi_\mathrm{cold} - \frac{c^2 k^2}{\omega^2}\mathbf{P}_T, \qquad \det\mathcal{D} = 0.$$
+The analytic references are computed with KineticDR: `dispersion_matrix` of a `Darwin(beta)` model, with `Cold()` or full-orbit (`GordeyevSeries()`) ions and massless electrons (`DriftKinetic()` at $T_e \to 0$, which leaves only the Hall term in the perpendicular block). Its dispersion matrix is
+$$\mathcal{D}(\omega,\mathbf{k}) = \chi - \frac{2}{\beta_i}\frac{k^2}{\omega^2}\mathbf{P}_T, \qquad \mathbf{P}_T = \mathbf{I} - \hat{k}\hat{k},$$
+where the Darwin term follows from Ampère's law without displacement current and Faraday's law, $\mathbf{k}\times(\mathbf{k}\times\hat{\mathbf{E}}) = -k^2\mathbf{P}_T\hat{\mathbf{E}}$. Since $E_\parallel \equiv 0$ in the simulations, the modes are the roots of $\det(\omega^2\mathcal{D}_\perp) = 0$, with $\mathcal{D}_\perp$ the perpendicular $2\times2$ block.
 
-The transverse projector is $P_T = \mathbf{I} - \hat{k}\hat{k}$. The cold susceptibility tensor (for $\hat{b} = \hat{z}$) is
+The cold susceptibility (for $\hat{b} = \hat{z}$) is
 
-$$\chi_\mathrm{cold} = \begin{pmatrix} S & -iD & 0 \\ iD & S & 0 \\ 0 & 0 & P \end{pmatrix}$$
+$$\chi_{\perp,\mathrm{cold}} = \begin{pmatrix} S & -iD \\ iD & S \end{pmatrix}, \qquad S = -\frac{1}{\omega^2-1}, \qquad D = \frac{1}{\omega(\omega^2-1)} + \frac{1}{\omega},$$
 
-with
+where the second term of $D$ is the electron Hall term.
 
-$$S = -\frac{\omega_{pi}^2}{\omega^2-1}, \qquad D = \frac{\omega_{pi}^2}{\omega(\omega^2-1)} + \frac{\omega_{pi}^2}{\omega}, \qquad P = -\frac{\omega_{pi}^2 + \omega_{pe}^2}{\omega^2}.$$
+**Parallel propagation** ($\mathbf{k} = k_\parallel\hat{b}$): $S \pm D = \frac{2}{\beta_i}\frac{k_\parallel^2}{\omega^2}$ gives the two circularly polarized branches (Alfvén/ion-cyclotron and whistler).
 
-**Parallel propagation** ($\mathbf{k} = k_\parallel\hat{b}$): $\det\mathcal{D} = (S \pm D - c^2k_\parallel^2/\omega^2)(P)=0$ gives two circularly polarized branches (Alfvén/ion-cyclotron, whistler) and a non-propagating $P=0$ branch.
+**Perpendicular propagation** ($\mathbf{k} = k_\perp\hat{x}$): $S\left(S - \frac{2}{\beta_i}\frac{k_\perp^2}{\omega^2}\right) - D^2 = 0$, the extraordinary (compressional) branch. The ordinary mode lives in $E_\parallel$ and is absent here.
 
-**Perpendicular propagation** ($\mathbf{k} = k_\perp\hat{x}$): $\det\mathcal{D} = 0$ factors into the ordinary-mode branch $P = c^2k_\perp^2/\omega^2$ and the extraordinary-mode $S(S - c^2k_\perp^2/\omega^2) - D^2 = 0$.
+```julia; echo=false, label="fig-cold-dispersion", fig_cap="Cold plasma dispersion of the Darwin model (KineticDR): roots of det(ω²𝒟⊥) for two β."
 
-```julia; echo=false, label="fig-cold-dispersion", fig_cap="Cold plasma dispersion for the QN NDC model. Branches are solutions of det 𝒟 = 0 with cold susceptibility."
-
-βi_vals = [0.05, 0.5]
-μ_cold  = 10.0
-kz_c    = range(0.02, 0.8, length=60)
-kx_c    = range(0.05, 4.0, length=80)
+μ_ref = 0.1   # does not enter 𝒟⊥
+kz_c  = range(0.02, 0.8, length=60)
+kx_c  = range(0.05, 4.0, length=80)
 
 fig = Figure(size=(1000, 420))
 ax1 = Axis(fig[1,1], xlabel="k∥ ρᵢ", ylabel="ω/Ωᵢ", title="Parallel", limits=(nothing,(0,8)))
 ax2 = Axis(fig[1,2], xlabel="k⊥ ρᵢ", ylabel="ω/Ωᵢ", title="Perpendicular", limits=(nothing,(0,8)))
-
-for (ci, β) in enumerate(βi_vals)
-    qn_c, _ = make_disp_fns(β, μ_cold)
-    par_roots  = [real_roots_at_k(qn_c, 0.0, kz; nscan=2000) for kz in kz_c]
-    perp_roots = [real_roots_at_k(qn_c, kx, 0.0; nscan=2000) for kx in kx_c]
-    Mpar  = roots_to_matrix(kz_c, par_roots)
-    Mperp = roots_to_matrix(kx_c, perp_roots)
-    ls = ci == 1 ? :solid : :dash
-    for j in 1:size(Mpar,2)
-        lines!(ax1, collect(kz_c), Mpar[:,j]; color=WONG[ci+1], linestyle=ls,
-               label=(j==1 ? "β=$β" : nothing))
-    end
-    for j in 1:size(Mperp,2)
-        lines!(ax2, collect(kx_c), Mperp[:,j]; color=WONG[ci+1], linestyle=ls,
-               label=(j==1 ? "β=$β" : nothing))
-    end
+for (ci, β) in enumerate([0.05, 0.5])
+    m = darwin_model(β, μ_ref, KDR.Cold())
+    overlay!(ax1, m, kz_c, :par;  color=WONG[ci+1], label="β=$β")
+    overlay!(ax2, m, kx_c, :perp; color=WONG[ci+1], label="β=$β")
 end
-
 axislegend(ax1; position=:lt)
 axislegend(ax2; position=:lt)
 fig
@@ -562,149 +302,70 @@ fig
 
 ### Ion susceptibility tensor
 
-The hot ion susceptibility sums over cyclotron harmonics $n = -N\ldots N$. Since $\Gamma_n(b)$ is
-peaked with width $\sim\!\sqrt{b}$, the truncation is chosen adaptively as
-$N = \max(12, \lceil 6\sqrt{b}\,\rceil + 4)$:
-
-$$\chi_i = \frac{\omega_{pi}^2}{\omega^2} \sum_{n=-N}^{N} \mathbf{X}_n$$
-
-with the shorthand
+The hot ion susceptibility sums over cyclotron harmonics $n$ (KineticDR's `GordeyevSeries`, adaptive truncation):
 
 $$b = k_\perp^2\rho_i^2, \qquad \Gamma_n(b) = e^{-b}I_{|n|}(b), \qquad \Gamma'_n(b) = e^{-b}\!\left[\tfrac{1}{2}(I_{|n|-1}+I_{|n|+1})-I_{|n|}\right],$$
 $$\zeta_n = \frac{\omega - n\Omega_i}{\sqrt{2}\,k_\parallel v_{ti}}, \qquad \zeta_0 = \frac{\omega}{\sqrt{2}\,k_\parallel v_{ti}}.$$
 
-The six independent components of $\mathbf{X}_n$ are
-
 $$\begin{aligned}
-(\chi_i)_{xx} &= \frac{\omega_{pi}^2}{\omega^2}\sum_n \frac{n^2}{b}\,\Gamma_n\,\zeta_0 Z(\zeta_n) \\
-(\chi_i)_{xy} &= -(\chi_i)_{yx}^* = \frac{\omega_{pi}^2}{\omega^2}\sum_n in\,\Gamma'_n\,\zeta_0 Z(\zeta_n) \\
-(\chi_i)_{xz} &= (\chi_i)_{zx} = -\frac{\omega_{pi}^2}{\omega^2}\sum_n \frac{n}{\sqrt{2b}}\,\Gamma_n\,\zeta_0 Z'(\zeta_n) \\
-(\chi_i)_{yy} &= \frac{\omega_{pi}^2}{\omega^2}\sum_n \!\left[\frac{n^2}{b}\Gamma_n - 2b\Gamma'_n\right]\zeta_0 Z(\zeta_n) \\
-(\chi_i)_{yz} &= -(\chi_i)_{zy}^* = \frac{\omega_{pi}^2}{\omega^2}\sum_n i\sqrt{\tfrac{b}{2}}\,\Gamma'_n\,\zeta_0 Z'(\zeta_n) \\
-(\chi_i)_{zz} &= -\frac{\omega_{pi}^2}{\omega^2}\sum_n \Gamma_n\,\zeta_0\zeta_n Z'(\zeta_n)
+(\chi_i)_{xx} &= \frac{1}{\omega^2}\sum_n \frac{n^2}{b}\,\Gamma_n\,\zeta_0 Z(\zeta_n) \\
+(\chi_i)_{xy} &= -(\chi_i)_{yx} = \frac{1}{\omega^2}\sum_n in\,\Gamma'_n\,\zeta_0 Z(\zeta_n) \\
+(\chi_i)_{xz} &= (\chi_i)_{zx} = -\frac{1}{\omega^2}\sum_n \frac{n}{\sqrt{2b}}\,\Gamma_n\,\zeta_0 Z'(\zeta_n) \\
+(\chi_i)_{yy} &= \frac{1}{\omega^2}\sum_n \!\left[\frac{n^2}{b}\Gamma_n - 2b\Gamma'_n\right]\zeta_0 Z(\zeta_n) \\
+(\chi_i)_{yz} &= -(\chi_i)_{zy} = \frac{1}{\omega^2}\sum_n i\sqrt{\tfrac{b}{2}}\,\Gamma'_n\,\zeta_0 Z'(\zeta_n) \\
+(\chi_i)_{zz} &= -\frac{1}{\omega^2}\sum_n \Gamma_n\,\zeta_0\zeta_n Z'(\zeta_n)
 \end{aligned}$$
 
-For $k_\parallel=0$: large-$\zeta$ limit $\zeta_0 Z(\zeta_n)\to -\omega/(\omega-n)$, off-diagonal $xz,\,yz$ terms vanish.
-
-### Electron drift-kinetic susceptibility
-
-The DK electron tensor is sparse (no perpendicular diagonal):
-
-$$\chi_e^{\rm DK} = \begin{pmatrix} 0 & -i\chi_H & 0 \\ i\chi_H & 0 & 0 \\ 0 & 0 & \chi_{e\parallel} \end{pmatrix}, \qquad \chi_H = \frac{\omega_{pi}^2}{\omega}, \qquad \chi_{e\parallel} = -\frac{\omega_{pe}^2}{\omega^2}\,\zeta_e^2 Z'(\zeta_e), \quad \zeta_e = \frac{\omega}{\sqrt{2}\,k_\parallel v_{te}}.$$
-
-### Plasma dispersion function
-
-$$Z(\zeta) = i\sqrt{\pi}\,\mathrm{erfcx}(-i\zeta), \qquad Z'(\zeta) = -2\bigl(1 + \zeta Z(\zeta)\bigr).$$
-
-Asymptotic expansions for $|\zeta|>30$: $Z(\zeta) \approx -1/\zeta - 1/(2\zeta^3) - \ldots$
-
-### Physical origin of the susceptibility terms
-
-**Ion response.** Linearize the Vlasov equation $\partial_t f + \mathbf{v}\cdot\nabla f + (\mathbf{E}+\mathbf{v}\times\mathbf{B}_0)\cdot\nabla_v f = 0$ around a Maxwellian $f_0$. The first-order response integrated along the unperturbed gyro-orbit is
-
-$$\delta f_i(\mathbf{k},\omega,\mathbf{v}) = -\frac{q_i}{T_i}f_0\int_{-\infty}^{0}\!\mathbf{E}(\mathbf{k},\omega)\cdot\mathbf{v}(t')\,e^{i(\mathbf{k}\cdot[\mathbf{r}(t')-\mathbf{r}]-\omega t')}\,dt'.$$
-
-The gyro-orbit phase factor is expanded via the Jacobi–Anger identity
-
-$$e^{i\mathbf{k}_\perp\cdot[\mathbf{r}_\perp(t')-\mathbf{r}_\perp]} = \sum_{n=-\infty}^{\infty} J_n\!\left(\frac{k_\perp v_\perp}{\Omega_i}\right)^{\!2} e^{-in\Omega_i t'},$$
-
-which converts the $e^{-i\omega t'}$ Fourier mode into harmonic poles at $\omega - n\Omega_i - k_\parallel v_\parallel = 0$. Integrating $\delta f_i$ over velocity produces the $n$-th harmonic contribution to $\hat{\mathbf{J}}_i = q_i\int\mathbf{v}\,\delta f_i\,d^3v$; the resulting Bessel sums reduce to $\Gamma_n(b)$ via the identity $\int_0^\infty e^{-b}I_n(b)\,db = \Gamma_n(b)$, and the resonance integral gives $Z(\zeta_n)$, yielding equations (1)–(6). For $k_\perp = 0$ ($b=0$) all $\Gamma_n(0) = \delta_{n0}$, so only the $n = 0$ (Landau) and $n = \pm 1$ (gyro-resonance) terms contribute.
-
-**Electron response.** In the drift-kinetic limit $m_e \to 0$ the perpendicular electron momentum equation reduces to instantaneous $\mathbf{E}\times\mathbf{B}$ force balance:
-
-$$0 = -en_0\left(\mathbf{E}_\perp + \frac{\mathbf{u}_{e\perp}\times\mathbf{B}_0}{c}\right) \quad\Longrightarrow\quad \mathbf{J}_{e\perp} = -en_0\mathbf{u}_{e\perp} = \frac{n_0}{B_0}\mathbf{E}\times\hat{b},$$
-
-which contributes the antisymmetric Hall block $(\chi_e^{\rm DK})_{xy} = -i\chi_H$, $\chi_H = \omega_{pi}^2/\omega$. The parallel component is governed by the 1-D drift-kinetic equation; integrating over $v_\parallel$ gives the Landau-resonant response
-
-$$J_{e\parallel} = -\frac{\omega_{pe}^2}{\omega}\left(1 + \zeta_e Z(\zeta_e)\right)E_\parallel \quad\Longrightarrow\quad \chi_{e\parallel} = -\frac{\omega_{pe}^2}{\omega^2}\,\zeta_e^2 Z'(\zeta_e).$$
-
-There is no perpendicular diagonal electron susceptibility because perpendicular electron inertia vanishes.
-
-**Field response.** The Darwin approximation drops $\varepsilon_0\partial_t\mathbf{E}$ from Ampere's law:
-
-$$\nabla\times\mathbf{B} = \mu_0(\mathbf{J}_i + \mathbf{J}_e).$$
-
-Combined with quasineutrality $\delta n_i = \delta n_e$ (replacing Gauss's law), Fourier-transforming Ampere and eliminating $\hat{\mathbf{B}}$ via Faraday produces the identity
-
-$$-k^2\hat{\mathbf{E}}_\perp + \mathbf{k}(\mathbf{k}\cdot\hat{\mathbf{E}}) = \frac{\omega^2}{c^2}\hat{\mathbf{E}} \quad\Rightarrow\quad -\frac{c^2k^2}{\omega^2}\mathbf{P}_T(\hat{k})\hat{\mathbf{E}}$$
-
-as the electromagnetic term in $\mathcal{D}$. Radiation modes (requiring the displacement current) are absent; Alfvén and kinetic Alfvén waves survive through the $\mathbf{P}_T$ coupling.
+with $Z$ the plasma dispersion function. For $k_\parallel=0$, $\zeta_0 Z(\zeta_n)\to -\omega/(\omega-n)$ and the $xz,\,yz$ terms vanish. For $k_\perp \to 0$ only $n = 0, \pm 1$ survive, the latter through $n^2\Gamma_n/b \to \tfrac{1}{2}$.
 
 ### Full dispersion matrix
 
-Combining the ion, electron, and field responses, the dispersion matrix is
+$$\mathcal{D}_\perp(\omega,\mathbf{k}) = \chi_{i\perp} + \begin{pmatrix} 0 & -i\chi_H \\ i\chi_H & 0 \end{pmatrix} - \frac{2}{\beta_i}\frac{k^2}{\omega^2}\mathbf{P}_{T\perp}, \qquad \det\left(\omega^2\mathcal{D}_\perp\right) = 0.$$
 
-$$\mathcal{D}(\omega,\mathbf{k}) = \chi_i(\omega,\mathbf{k}) + \chi_e^{\rm DK}(\omega,\mathbf{k}) - \frac{c^2 k^2}{\omega^2}\mathbf{P}_T(\hat{k}), \qquad \det\mathcal{D}(\omega,\mathbf{k}) = 0.$$
+For **parallel propagation** ($k_\perp = 0$) the system splits into the two circular polarizations, $\chi_i^\pm = (\chi_i)_{xx} \pm i(\chi_i)_{xy}$:
 
-For **parallel propagation** ($k_\perp = 0$, $\mathbf{k} = k_\parallel\hat{b}$) only $n = 0, \pm 1$ harmonics survive and the system decouples into two circularly polarized components. Defining $\chi_i^\pm = (\chi_i)_{xx} \pm i(\chi_i)_{xy}$ for the right/left-hand polarizations, the parallel dispersion relation reads
+$$\chi_i^\pm \pm \chi_H - \frac{2}{\beta_i}\frac{k_\parallel^2}{\omega^2} = 0.$$
 
-$$\chi_i^\pm + \chi_H \mp \frac{c^2 k_\parallel^2}{\omega^2} = 0,$$
+For **perpendicular propagation** ($k_\parallel = 0$) the $2\times2$ block contains the electrostatic ion Bernstein modes and the compressional (extraordinary) branch.
 
-where $\chi_i^+ = -\omega_{pi}^2[\zeta_0 Z(\zeta_{-1})]/\omega^2$ (right-hand, couples to the $n{=}{-1}$ resonance) and $\chi_i^- = -\omega_{pi}^2[\zeta_0 Z(\zeta_{+1})]/\omega^2$ (left-hand, $n{=}{+1}$). The parallel electric-field component $E_\parallel$ decouples and satisfies the Helmholtz equation $(-k_\parallel^2 - \lambda)E_\parallel = 0$.
+```julia; echo=false, label="fig-hot-parallel", fig_cap="Parallel propagation hot dispersion (β=0.5). Cold reference: black. Hot roots colored by Re(ω)<1 (orange) / Re(ω)>1 (blue); roots with |Im ω| > 0.5 are not shown."
 
-For **perpendicular propagation** ($k_\parallel = 0$, $\mathbf{k} = k_\perp\hat{x}$) the $\zeta_n \to \infty$ limit gives $\zeta_0 Z(\zeta_n) \to -\omega/(\omega - n)$ and the off-diagonal $xz, yz$ elements of $\chi_i$ vanish. The $3\times3$ determinant factors into the electrostatic ion Bernstein modes and an electromagnetic ordinary-mode branch.
-
-```julia; echo=false, label="fig-hot-parallel", fig_cap="Parallel propagation hot dispersion (β=0.5, μ=10, Tₑ/Tᵢ=1). Cold reference: dashed black. Hot roots colored by Re(ω)<1 (orange) / Re(ω)>1 (blue)."
-
-βi_h = 0.5; μ_h = 10.0
-qn_c_h, qn_h = make_disp_fns(βi_h, μ_h)
-
+βi_h = 0.5
 kz_vals = range(0.02, 3.0, length=50)
-γmax = 0.5
-par_spectrum = Tuple{Float64,ComplexF64}[]
-for kz in kz_vals
-    for ω in weakly_damped_roots_at_k(qn_h, 0.0, kz; ωmax=8.0, nseed=140, γmax)
-        push!(par_spectrum, (kz, ω))
-    end
-end
-
-cold_par = roots_to_matrix(kz_vals, [real_roots_at_k(qn_c_h, 0.0, kz; nscan=2000) for kz in kz_vals])
-
-kpar_k = first.(par_spectrum); ωpar = last.(par_spectrum)
-ωre = real.(ωpar); ωim = imag.(ωpar)
+par_spectrum = spectrum(darwin_model(βi_h, μ_ref, KDR.GordeyevSeries()), kz_vals, :par; im_seeds=(-0.01, -0.1))
+kpar_k = first.(par_spectrum); ωre = real.(last.(par_spectrum)); ωim = imag.(last.(par_spectrum))
 
 fig = Figure(size=(800, 620))
 ax1 = Axis(fig[1,1], xlabel="k∥ ρᵢ", ylabel="Re(ω)/Ωᵢ", limits=(nothing,(0,8)))
 ax2 = Axis(fig[2,1], xlabel="k∥ ρᵢ", ylabel="Im(ω)/Ωᵢ")
-
-for j in 1:size(cold_par,2)    lines!(ax1, collect(kz_vals), cold_par[:,j]; color=:black, linestyle=:dash, linewidth=1.5,
-           label=(j==1 ? "cold" : nothing))
+overlay!(ax1, darwin_model(βi_h, μ_ref, KDR.Cold()), kz_vals, :par; color=:black, label="cold")
+for (sel, c, l) in ((ωre .< 1.0, WONG[2], "Re(ω)<1"), (ωre .> 1.0, WONG[6], "Re(ω)>1"))
+    scatter!(ax1, kpar_k[sel], ωre[sel]; color=c, label=l)
+    scatter!(ax2, kpar_k[sel], ωim[sel]; color=c)
 end
-scatter!(ax1, kpar_k[ωre .< 1.0], ωre[ωre .< 1.0]; color=WONG[2], label="Re(ω)<1")
-scatter!(ax1, kpar_k[ωre .> 1.0], ωre[ωre .> 1.0]; color=WONG[6], label="Re(ω)>1")
-scatter!(ax1, kpar_k[ωre .== 1.0], ωre[ωre .== 1.0]; color=:gray)
 axislegend(ax1; position=:lt)
-scatter!(ax2, kpar_k[ωre .< 1.0], ωim[ωre .< 1.0]; color=WONG[2])
-scatter!(ax2, kpar_k[ωre .> 1.0], ωim[ωre .> 1.0]; color=WONG[6])
 hlines!(ax2, [0.0]; color=:gray, linestyle=:dash)
+linkxaxes!(ax1, ax2)
 fig
 ```
 
-```julia; echo=false, label="fig-hot-perp", fig_cap="Perpendicular propagation hot dispersion (β=0.5, μ=10). Cold reference: dashed black. Hot roots including ion Bernstein branches."
+```julia; echo=false, label="fig-hot-perp", fig_cap="Perpendicular propagation hot dispersion (β=0.5). Cold reference: black. Hot roots including ion Bernstein branches."
 
 kx_vals = range(0.05, 4.0, length=75)
-perp_roots = [real_roots_at_k(qn_h, kx, 0.0; ωmax=8.0, nscan=5000) for kx in kx_vals]
-cold_perp  = roots_to_matrix(kx_vals, [real_roots_at_k(qn_c_h, kx, 0.0; nscan=2000) for kx in kx_vals])
-
-perp_spec = [(kx, real(r)) for (kx, rs) in zip(kx_vals, perp_roots) for r in rs]
-
 fig = Figure(size=(850, 480))
 ax = Axis(fig[1,1], xlabel="k⊥ ρᵢ", ylabel="ω/Ωᵢ", limits=(nothing,(0,8)))
-for j in 1:size(cold_perp,2)
-    lines!(ax, collect(kx_vals), cold_perp[:,j]; color=:black, linestyle=:dash, linewidth=1.5,
-           label=(j==1 ? "cold" : nothing))
-end
-scatter!(ax, first.(perp_spec), last.(perp_spec); color=WONG[3], markersize=5, label="hot (DK electrons)")
+overlay!(ax, darwin_model(βi_h, μ_ref, KDR.Cold()), kx_vals, :perp; color=:black, label="cold")
+overlay!(ax, darwin_model(βi_h, μ_ref, KDR.GordeyevSeries()), kx_vals, :perp; color=WONG[3], label="hot")
 axislegend(ax; position=:lt)
 fig
 ```
 
 ## Cold Plasma Simulation
 
-The linearized cold-ion fluid (`ColdIonFluid`) is used to validate the EM field closure. It integrates the cold-limit equations $\partial_t\delta\mathbf{u}_i = \mathbf{E} + \Omega_i(\delta\mathbf{u}_i\times\hat{b})$, $\partial_t\delta n = -\nabla\cdot\delta\mathbf{u}_i$ with constant background density $n_0=1$ fed to the field solver — no velocity-space grid is required. A broadband seed in $\mathbf{B}$ excites all linear eigenmodes; the power spectrum $\log|A(k,\omega)|^2$ is extracted via windowed FFT.
+The linearized cold-ion fluid (`ColdIonFluid`) is used to validate the EM field closure. It integrates the cold-limit equations $\partial_t\delta\mathbf{u}_i = \mathbf{E} + \Omega_i(\delta\mathbf{u}_i\times\hat{b})$, $\partial_t\delta n = -\nabla\cdot\delta\mathbf{u}_i$ with constant background density $n_0=1$ fed to the field solver. No velocity-space grid is required, so the field can also point along $x_1$ (parallel propagation). A broadband seed in $\mathbf{B}$ excites all linear eigenmodes; the spectrum $\log|A(k,\omega)|$ is extracted via windowed FFT.
 
-```julia; echo=false, label="sim-cold"
-β_cold = 0.05; μ_cold_sim = 0.1
+```julia; echo=false, results="hidden", label="sim-cold"
+β_cold = 0.05; μ_cold = 0.1
 Nx_cold = 64
 Lz_cold = 100π; Lx_cold = 20π
 dt_cold = 0.002; Tmax_cold = 500.0
@@ -717,35 +378,23 @@ grid_perp_cold = bslLD.Grid(
     [0.0, -1.0, -1.0], [Lx_cold, 1.0, 1.0],
     [Nx_cold, 1, 1], 1, 1.0, 3)
 
-diag_par_cold  = run_sim_cold(β_cold, μ_cold_sim, dt_cold, Tmax_cold, grid_par_cold);
-diag_perp_cold = run_sim_cold(β_cold, μ_cold_sim, dt_cold, Tmax_cold, grid_perp_cold);
+diag_par_cold  = run_sim(β_cold, μ_cold, dt_cold, Tmax_cold, grid_par_cold;  stepper=bslLD.step_cold!, ε=1e-7);
+diag_perp_cold = run_sim(β_cold, μ_cold, dt_cold, Tmax_cold, grid_perp_cold; stepper=bslLD.step_cold!, ε=1e-7);
 ```
 
-```julia; echo=false, label="fig-cold-sim", fig_cap="Cold plasma simulation (β=0.05, μ=0.1, T=0.1). Power spectra of Bz with cold analytic branches (white dashed)."
+```julia; echo=false, label="fig-cold-sim", fig_cap="Cold plasma simulation (β=0.05). Spectra of Bz with cold analytic branches (white)."
 
-qn_c_cs, _ = make_disp_fns(β_cold, μ_cold_sim)
-kz_ref = range(0.02, 0.6, length=40)
-kx_ref = range(0.05, 3.0, length=50)
-cold_par_ref  = roots_to_matrix(kz_ref, [real_roots_at_k(qn_c_cs, 0.0, kz; nscan=1500) for kz in kz_ref])
-cold_perp_ref = roots_to_matrix(kx_ref, [real_roots_at_k(qn_c_cs, kx, 0.0; nscan=1500) for kx in kx_ref])
-
+m_cold = darwin_model(β_cold, μ_cold, KDR.Cold())
 fig = Figure(size=(1000, 420))
-ax1 = Axis(fig[1,1], xlabel="k∥ ρᵢ", ylabel="ω/Ωᵢ", title="Parallel (β=$β_cold)", limits=((0,0.6),(0,6)))
-ax2 = Axis(fig[1,2], xlabel="k⊥ ρᵢ", ylabel="ω/Ωᵢ", title="Perpendicular (β=$β_cold)", limits=((0,3.0),(0,8)))
-
-plot_spectrum!(ax1, diag_par_cold, dt_cold, grid_par_cold)
-for j in 1:size(cold_par_ref,2)
-    lines!(ax1, collect(kz_ref), cold_par_ref[:,j]; color=:white, linestyle=:dash, linewidth=1.5,
-           label=(j==1 ? "cold analytic" : nothing))
+for (ci, (dir, diag, grid, ks, lims)) in enumerate((
+        (:par,  diag_par_cold,  grid_par_cold,  range(0.02, 0.6, length=40), ((0,0.6),(0,6))),
+        (:perp, diag_perp_cold, grid_perp_cold, range(0.05, 3.0, length=50), ((0,3.0),(0,8)))))
+    ax = Axis(fig[1,ci], xlabel=(dir == :par ? "k∥ ρᵢ" : "k⊥ ρᵢ"), ylabel="ω/Ωᵢ",
+              title="$(dir == :par ? "Parallel" : "Perpendicular") (β=$β_cold)", limits=lims)
+    plot_spectrum!(ax, diag, dt_cold, grid)
+    overlay!(ax, m_cold, ks, dir; color=:white, label="cold analytic")
+    axislegend(ax; position=:lt)
 end
-axislegend(ax1; position=:lt)
-
-plot_spectrum!(ax2, diag_perp_cold, dt_cold, grid_perp_cold)
-for j in 1:size(cold_perp_ref,2)
-    lines!(ax2, collect(kx_ref), cold_perp_ref[:,j]; color=:white, linestyle=:dash, linewidth=1.5,
-           label=(j==1 ? "cold analytic" : nothing))
-end
-axislegend(ax2; position=:lt)
 fig
 ```
 
@@ -762,8 +411,8 @@ Phase space is discretized on a uniform Cartesian grid $N_x \times N_v \times N_
 | $V_\tau[\mathbf{E},\mathbf{B}]$ | Velocity-space Lorentz advection over time $\tau$ |
 | $X_\tau$ | Spatial advection over time $\tau$ |
 | $\mathcal{M}[f]$ | Moment evaluation: $(n_i,\mathbf{J}_{i\perp})$ |
-| $\mathcal{F}_{\Delta t}$ | **1st-order field solve**: semi-implicit with $\alpha=c\Delta t$ (backward-Euler coupling); **Faraday applied inside** the linear system |
-| $\mathcal{F}^m_{\Delta t}$ | **2nd-order field solve**: midpoint with $\alpha=c\Delta t/2$; **Faraday suppressed** inside — applied separately after with full $\Delta t$ |
+| $\mathcal{F}_{\Delta t}$ | **1st-order field solve**: semi-implicit with $\alpha=2\Delta t/\beta_i$ (backward-Euler coupling); **Faraday applied inside** the linear system |
+| $\mathcal{F}^m_{\Delta t}$ | **2nd-order field solve**: midpoint with $\alpha=\Delta t/\beta_i$; **Faraday suppressed** inside — applied separately after with full $\Delta t$ |
 
 Phase values $\tfrac{1}{4},\tfrac{1}{2},\tfrac{3}{4}$ refer to accumulated gyro-phase $\phi = \Omega_i t$ at each substep; the rotating-frame advection routines require this to be updated consistently.
 
@@ -771,7 +420,7 @@ Phase values $\tfrac{1}{4},\tfrac{1}{2},\tfrac{3}{4}$ refer to accumulated gyro-
 
 The electromagnetic field equations in Fourier space reduce to a single $3\times3$ system for $\hat{\mathbf{E}}$. For a given current $\mathbf{J}_{i\perp}^m$ and background field $\mathbf{B}^n$, define the source
 
-$$\hat{\mathbf{w}} = c\,i\mathbf{k}\times\hat{\mathbf{B}}^n - \hat{\mathbf{J}}_{i\perp}^m.$$
+$$\hat{\mathbf{w}} = \frac{2}{\beta_i}\,i\mathbf{k}\times\hat{\mathbf{B}}^n - \hat{\mathbf{J}}_{i\perp}^m.$$
 
 The system $A(\mathbf{k})\hat{\mathbf{E}} = \mathbf{r}$ is solved mode by mode via Cramer's rule:
 
@@ -779,7 +428,7 @@ $$A=\begin{pmatrix}1+\alpha k_2^2-\alpha k_1 k_2&\alpha(k_1^2+k_z^2)&-\alpha k_2
 
 where $k_\perp^2 = k_1^2+k_2^2$ and $\lambda = \tfrac{\beta_i}{2}(1+1/\mu)$. The coupling parameter $\alpha$ depends on the integrator:
 
-$$\alpha = \begin{cases} c\Delta t & \text{1st-order scheme (`step!`): Faraday folded inside the solve} \\ c\Delta t/2 & \text{2nd-order midpoint (`stepMidpoint!`): Faraday applied after} \\ c\theta\Delta t & \text{damped midpoint with } \theta = \tfrac{1}{2}+\kappa\Delta t \end{cases}$$
+$$\alpha = \begin{cases} 2\Delta t/\beta_i & \text{1st-order scheme (`step!`): Faraday folded inside the solve} \\ \Delta t/\beta_i & \text{2nd-order midpoint (`stepMidpoint!`): Faraday applied after} \\ 2\theta\Delta t/\beta_i & \text{damped midpoint with } \theta = \tfrac{1}{2}+\kappa\Delta t \end{cases}$$
 
 In the 1st-order case Faraday's law $\hat{\mathbf{B}}^{n+1} = \hat{\mathbf{B}}^n - \Delta t\,i\mathbf{k}\times\hat{\mathbf{E}}^{n+1}$ is substituted into $\mathbf{E}_\perp$ before building $A$, so $\mathbf{E}^{n+1}$ and $\mathbf{B}^{n+1}$ emerge jointly. In the 2nd-order case the solve targets only $\mathbf{E}^m$; $\mathbf{B}^{n+1}$ is updated explicitly after convergence via
 
@@ -800,7 +449,7 @@ f^{(3)} &= X_{\Delta t/2}\,f^{(2)}, \\
 f^{n+1} &= V_{\Delta t/2}[\mathbf{E}^{n+1}]\,f^{(3)}.
 \end{aligned}$$
 
-The field solve $\mathcal{F}_{\Delta t}$ uses $\alpha = c\Delta t$ (backward-Euler): Faraday's law is substituted into $\mathbf{E}_\perp$ before assembling $A$, so $\mathbf{E}^{n+1}$ and $\mathbf{B}^{n+1}$ are determined simultaneously. Although the kinetic split is Strang-symmetric, the electromagnetic part is first-order accurate because the backward-Euler coupling is $O(\Delta t)$.
+The field solve $\mathcal{F}_{\Delta t}$ uses $\alpha = 2\Delta t/\beta_i$ (backward-Euler): Faraday's law is substituted into $\mathbf{E}_\perp$ before assembling $A$, so $\mathbf{E}^{n+1}$ and $\mathbf{B}^{n+1}$ are determined simultaneously. Although the kinetic split is Strang-symmetric, the electromagnetic part is first-order accurate because the backward-Euler coupling is $O(\Delta t)$.
 
 **Cost:** 2 kinetic pushes $V_{\Delta t/2}$, 1 moment reduction, 1 field solve. **Order:** $O(\Delta t)$.
 
@@ -810,13 +459,13 @@ The second-order integrator advances spatial characteristics across the full ste
 
 $$f^a = X_{\Delta t/2}\,f^n, \qquad [\text{C substep: find } \mathbf{E}^m], \qquad f^{n+1} = X_{\Delta t/2}\,f^b.$$
 
-The C substep uses the midpoint field solve $\mathcal{F}^m_{\Delta t}$ with $\alpha = c\Delta t/2$. Faraday is not folded into the linear system; it is applied explicitly after convergence:
+The C substep uses the midpoint field solve $\mathcal{F}^m_{\Delta t}$ with $\alpha = \Delta t/\beta_i$. Faraday is not folded into the linear system; it is applied explicitly after convergence:
 
 $$\mathbf{B}^{n+1} = \mathbf{B}^n - \Delta t\,\nabla\times\mathbf{E}^m.$$
 
-The particle push in the C substep then uses the converged midpoint field: $f^b = V_{\Delta t/2}[\mathbf{E}^m](V_{\Delta t/2}[\mathbf{E}^m]f^a)$. The splitting error is $O(\Delta t^3)$ per step (Strang) and the field solve is $O(\Delta t^2)$ (midpoint rule), giving global $O(\Delta t^2)$.
+This is the implicit midpoint rule for Faraday: eliminating $\mathbf{B}^m = \mathbf{B}^n - \tfrac{\Delta t}{2}\nabla\times\mathbf{E}^m$ from $\mathbf{E}_\perp^m$ gives exactly the $3\times3$ system with $\alpha = \Delta t/\beta_i$. The particle push in the C substep then uses the converged midpoint field: $f^b = V_{\Delta t}[\mathbf{E}^m]f^a$. The splitting error is $O(\Delta t^3)$ per step (Strang) and the field solve is $O(\Delta t^2)$ (midpoint rule), giving global $O(\Delta t^2)$.
 
-Four coupling modes determine how $\mathbf{E}^m$ is found.
+The `coupling` keyword sets how $\mathbf{E}^m$ is found.
 
 **Mode A** (`:predictor_only`) — frozen-phase current predictor:
 
@@ -825,12 +474,12 @@ $$\begin{aligned}
 2.\quad & n^a = \mathcal{M}_n[f^a], \qquad \mathbf{J}^a = \mathcal{M}_J[f^a]. \\
 3.\quad & \mathbf{J}^m_\mathrm{pred} = \mathbf{J}^a + q_i n^a \frac{\Delta t}{2}\mathbf{E}^n. \\
 4.\quad & \mathbf{E}^m = \mathcal{F}^m_{\Delta t}(\mathbf{B}^n,\mathbf{J}^m_\mathrm{pred}). \\
-5.\quad & f^b = V_{\Delta t/2}[\mathbf{E}^m]\bigl(V_{\Delta t/2}[\mathbf{E}^m]\,f^a\bigr). \\
+5.\quad & f^b = V_{\Delta t}[\mathbf{E}^m]\,f^a. \\
 6.\quad & \mathbf{B}^{n+1} = \mathbf{B}^n - \Delta t\,\nabla\times\mathbf{E}^m. \\
 7.\quad & f^{n+1} = X_{\Delta t/2}\,f^b, \qquad \mathbf{E}^{n+1} = \mathbf{E}^m.
 \end{aligned}$$
 
-Step 3 uses the linearized frozen-phase current response $\mathbf{J}^m_\mathrm{pred} = \mathbf{J}^a + q_i n^a (\Delta t/2)\mathbf{E}^n$, which is exact for the spectral gyration performed by the BSL advection routine.
+Step 3 is a first-order frozen-phase predictor: during the C substep there is no spatial transport and the gyro-phase is fixed, so the push is a uniform velocity kick and the current evolves as $\mathbf{J}^a + q_i n^a\tau\mathbf{E}$. Using $\mathbf{E}^n$ instead of $\mathbf{E}^m$ makes the error in $\mathbf{J}^m$ $O(\Delta t^2)$, enough for global second order.
 
 **Mode C** (`:moment_kinetic_corrector`) — one kinetic correction after Mode A step 4. Starting from $\mathbf{E}^m_\mathrm{pred}$ obtained at step 4:
 
@@ -841,19 +490,11 @@ $$\begin{aligned}
 
 Then continue with steps 5–7 of Mode A using the corrected $\mathbf{E}^m$. Mode C adds one kinetic push and one field solve over Mode A but produces a kinetically consistent midpoint current.
 
-**Mode IMF** (`:implicit_midpoint_faraday`) — same corrector structure as Mode C, with the $\alpha = c\Delta t/2$ prefactor derived by explicitly eliminating the midpoint magnetic field. The midpoint field satisfies $\mathbf{B}^m = \mathbf{B}^n - \tfrac{\Delta t}{2}\nabla\times\mathbf{E}^m$; substituting into $\mathbf{E}_\perp^m = c\nabla\times\mathbf{B}^m - \mathbf{J}_\perp^m$ gives
+**Picard** (`:kinetic_picard`) repeats 5a–5b until $\max|\Delta E_y| <$ `picard_tol` (at most `picard_maxiter` times).
 
-$$\mathbf{E}_\perp^m = c\nabla\times\mathbf{B}^n - \frac{c\Delta t}{2}\nabla\times\bigl(\nabla\times\mathbf{E}^m\bigr) - \mathbf{J}_\perp^m,$$
+### θ-method (damped midpoint, `damping_rate`)
 
-which is the same $3\times3$ system with $\alpha = c\Delta t/2$ as `solve_fields_midpoint!`. $\mathbf{B}$ is not modified inside the routine; the caller applies Faraday once after convergence:
-
-$$\mathbf{B}^{n+1} = \mathbf{B}^n - \Delta t\,\nabla\times\mathbf{E}^m.$$
-
-The Faraday residual $\mathbf{B}^{n+1} - \mathbf{B}^n + \Delta t\,\nabla\times\mathbf{E}^m = 0$ exactly by construction of `apply_faraday!`. Mode IMF and Mode C have identical cost and the same matrix; the distinction is that Mode IMF makes the $B^m$-elimination derivation transparent.
-
-### θ-method (damped midpoint, `field_solver=:damped_midpoint`)
-
-Setting $\theta = \tfrac{1}{2} + \kappa\Delta t$ (with $\kappa \geq 0$, $\theta \leq 1$) shifts the field-solve stage off-centre. Because $\theta - \tfrac{1}{2} = O(\Delta t)$, the modification to $\alpha = c\theta\Delta t$ enters the local truncation error at $O(\Delta t^3)$, so global order remains $O(\Delta t^2)$. The stage current predictor and kinetic corrector push both use $\tau = \theta\Delta t$:
+Setting `damping_rate` $=\kappa > 0$ gives $\theta = \tfrac{1}{2} + \kappa\Delta t$ (with $\theta \leq 1$) and shifts the field-solve stage off-centre. Because $\theta - \tfrac{1}{2} = O(\Delta t)$, the modification to $\alpha = 2\theta\Delta t/\beta_i$ enters the local truncation error at $O(\Delta t^3)$, so global order remains $O(\Delta t^2)$. The stage current predictor and kinetic corrector push both use $\tau = \theta\Delta t$:
 
 $$\mathbf{J}^\theta_\mathrm{pred} = \mathbf{J}^a + q_i n^a \theta\Delta t\,\mathbf{E}^n, \qquad \mathbf{J}^\theta_\mathrm{kin} = \mathcal{M}_J\!\left[V_{\theta\Delta t}[\mathbf{E}^\theta]\,f^a\right].$$
 
@@ -861,21 +502,22 @@ The full Faraday update after convergence uses the complete $\Delta t$:
 
 $$\mathbf{B}^{n+1} = \mathbf{B}^n - \Delta t\,\nabla\times\mathbf{E}^\theta.$$
 
-This is orthogonal to the `coupling` parameter: all coupling modes accept `field_solver=:damped_midpoint` with a `damping_rate` keyword. At `damping_rate=0` (or `field_solver=:midpoint`), $\theta=\tfrac{1}{2}$ and behaviour is identical to the unmodified scheme. A sensible starting point is $\kappa \ll \Omega_i$ so that $\kappa\Delta t \ll 1$.
+This is orthogonal to the `coupling` parameter. At `damping_rate=0` (the default), $\theta=\tfrac{1}{2}$ and behaviour is identical to the unmodified scheme. A sensible starting point is $\kappa \ll \Omega_i$ so that $\kappa\Delta t \ll 1$.
 
 ### Cost and accuracy summary
 
-| Mode | $V_{\Delta t/2}$ pushes | Moment reductions | Field solves | Order |
+| Mode | Kinetic pushes | Moment reductions | Field solves | Order |
 |---|---|---|---|---|
-| `step!` (V-X-C-X-V) | 2 | 1 | 1 ($\alpha=c\Delta t$) | $O(\Delta t)$ |
-| Mode A (`:predictor_only`) | 2 | 1$n$+1$J$ | 1 ($\alpha=c\Delta t/2$) | $O(\Delta t^2)$ |
-| Mode C (`:moment_kinetic_corrector`) | 3 | 1$n$+2$J$ | 2 | $O(\Delta t^2)$ |
-| Mode IMF (`:implicit_midpoint_faraday`) | 3 | 1$n$+2$J$ | 2 | $O(\Delta t^2)$ |
-| Picard (`:kinetic_picard`) | $\geq 4$ | $\geq 4J$ | $\geq 3$ | $O(\Delta t^2)$ |
+| `step!` (V-X-C-X-V) | 2 ($V_{\Delta t/2}$) | 1$n$+1$J$ | 1 ($\alpha=2\Delta t/\beta_i$) | $O(\Delta t)$ |
+| Mode A (`:predictor_only`) | 1 ($V_{\Delta t}$) | 1$n$+1$J$ | 1 ($\alpha=\Delta t/\beta_i$) | $O(\Delta t^2)$ |
+| Mode C (`:moment_kinetic_corrector`) | 2 ($V_{\theta\Delta t}$, $V_{\Delta t}$) | 1$n$+2$J$ | 2 | $O(\Delta t^2)$ |
+| Picard (`:kinetic_picard`) | $1 + p$ | 1$n$+$(1+p)J$ | $1+p$ | $O(\Delta t^2)$ |
+
+($p$ = number of Picard iterations.)
 
 ### Convergence test
 
-```julia; echo=false, label="sim-conv"
+```julia; echo=false, results="hidden", label="sim-conv"
 T_cv = 1.0; vmax_cv = 6.0*sqrt(T_cv)
 grid_cv = bslLD.Grid(
     [0.0, -vmax_cv, -vmax_cv], [25π, vmax_cv, vmax_cv],
@@ -884,110 +526,64 @@ grid_cv = bslLD.Grid(
 β_cv = 0.1; μ_cv = 0.01; Tmax_cv = 10.0
 dts  = [0.0025, 0.01, 0.025, 0.05]
 
-modeA   = (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:predictor_only)
-modeC   = (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:moment_kinetic_corrector)
-picard  = (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:kinetic_picard)
-modeIMF = (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:implicit_midpoint_faraday)
-modeD   = (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:moment_kinetic_corrector,
-                                         field_solver=:damped_midpoint, damping_rate=0.1)
+midpoint(; kw...) = (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; kw...)
+steppers_cv = [("step! (V-X-C-X-V)", step!),
+               ("Mode A",            midpoint(coupling=:predictor_only)),
+               ("Mode C",            midpoint(coupling=:moment_kinetic_corrector)),
+               ("Mode C, κ=0.1",     midpoint(coupling=:moment_kinetic_corrector, damping_rate=0.1)),
+               ("Picard",            midpoint(coupling=:kinetic_picard))]
+colors_cv  = [WONG[6], WONG[4], WONG[7], WONG[2], WONG[8]]
+markers_cv = [:circle, :utriangle, :diamond, :hexagon, :star5]
 
-steppers_cv = [("step! (V-X-C-X-V)", step!), ("Mode A", modeA),
-               ("Mode C", modeC), ("Mode IMF", modeIMF), ("Mode D (κ=0.1)", modeD), ("Picard", picard)]
+diags_cv = Dict(label => [(dt, run_sim(β_cv, μ_cv, dt, Tmax_cv, grid_cv; stepper, ε=1e-6, T=T_cv,
+                                       seed_field=:Ey, vnoise=1e-6)) for dt in dts]
+                for (label, stepper) in steppers_cv)
 
-diags_cv = Dict{String,Vector}()
-for (label, stepper) in steppers_cv
-    diags_cv[label] = [(dt, run_sim(β_cv, μ_cv, dt, Tmax_cv, grid_cv;
-                                     stepper=stepper, ε=1e-6, T=T_cv, ic=make_ics))
-                       for dt in dts]
+function plot_history_grid(field)
+    fig = Figure(size=(1000, 620))
+    for (ci, (label, _)) in enumerate(steppers_cv)
+        row, col = divrem(ci-1, 2)
+        ax = Axis(fig[row+1, col+1], xlabel="t", ylabel="⟨$(field)²⟩", title=label, yscale=log10)
+        for (dti, (dt, d)) in enumerate(diags_cv[label])
+            lines!(ax, d.t, mean_sq(d, field); color=(colors_cv[ci], 0.5 + 0.5*dti/length(dts)), label="dt=$dt")
+        end
+        axislegend(ax; position=:lt)
+    end
+    fig
 end
 ```
 
-```julia; echo=false, label="fig-energy-cv", fig_cap="⟨Ey²⟩(t) for four steppers at all tested dt values."
-
-colors_cv = [WONG[6], WONG[4], WONG[7], WONG[3], WONG[2], WONG[8]]
-fig = Figure(size=(1000, 620))
-for (ci, (label, _)) in enumerate(steppers_cv)
-    row, col = divrem(ci-1, 2); ax = Axis(fig[row+1, col+1],
-        xlabel="t", ylabel="⟨Ey²⟩", title=label, yscale=log10)
-    for (dti, (dt, d)) in enumerate(diags_cv[label])
-        Ey2 = map(x -> mean(x .* x), d.Ey)
-        lines!(ax, d.t, Ey2; color=(colors_cv[ci], 0.5 + 0.5*dti/length(dts)),
-               label="dt=$dt")
-    end
-    axislegend(ax; position=:lt)
-end
-fig
+```julia; echo=false, label="fig-energy-cv", fig_cap="⟨Ey²⟩(t) for all steppers at all tested dt values."
+plot_history_grid(:Ey)
 ```
 
 ```julia; echo=false, label="fig-Bfield-cv", fig_cap="⟨Bz²⟩(t) for all steppers at all tested dt values. Compare with fig-energy-cv for the electric-field counterpart."
-
-colors_cv = [WONG[6], WONG[4], WONG[7], WONG[3], WONG[2], WONG[8]]
-fig = Figure(size=(1000, 620))
-for (ci, (label, _)) in enumerate(steppers_cv)
-    row, col = divrem(ci-1, 2); ax = Axis(fig[row+1, col+1],
-        xlabel="t", ylabel="⟨Bz²⟩", title=label, yscale=log10)
-    for (dti, (dt, d)) in enumerate(diags_cv[label])
-        Bz2 = map(x -> mean(x .* x), d.Bz)
-        lines!(ax, d.t, Bz2; color=(colors_cv[ci], 0.5 + 0.5*dti/length(dts)),
-               label="dt=$dt")
-    end
-    axislegend(ax; position=:lt)
-end
-fig
+plot_history_grid(:Bz)
 ```
 
 ```julia; echo=false, label="fig-conv", fig_cap="L1 error in Ey at final time vs dt. Reference: finest dt within each stepper."
 
-markers_cv = [:circle, :utriangle, :diamond, :rect, :hexagon, :star5]
 fig = Figure(size=(700, 480))
 ax = Axis(fig[1,1], xlabel="Δt", ylabel="L₁ error in Eᵧ", xscale=log10, yscale=log10,
           title="Convergence: step! vs stepMidpoint!")
 
+l1_err(label, i) = mean(abs.(diags_cv[label][i][2].Ey[end] .- diags_cv[label][1][2].Ey[end]))
 for (ci, (label, _)) in enumerate(steppers_cv)
-    runs = diags_cv[label]
-    ref  = runs[1][2].Ey[end]
-    errs = [mean(abs.(r[2].Ey[end] .- ref)) for r in runs]
-    scatterlines!(ax, dts, errs; color=colors_cv[ci], marker=markers_cv[ci], label=label)
+    scatterlines!(ax, dts, [l1_err(label, i) for i in eachindex(dts)];
+                  color=colors_cv[ci], marker=markers_cv[ci], label=label)
 end
 
 # Reference lines anchored at dts[2]
-ref_err_old  = mean(abs.(diags_cv["step! (V-X-C-X-V)"][2][2].Ey[end] .- diags_cv["step! (V-X-C-X-V)"][1][2].Ey[end]))
-ref_err_modeC = mean(abs.(diags_cv["Mode C"][2][2].Ey[end] .- diags_cv["Mode C"][1][2].Ey[end]))
-lines!(ax, dts[2:end], (dts[2:end]./dts[2]) .* ref_err_old;
+lines!(ax, dts[2:end], (dts[2:end]./dts[2]) .* l1_err("step! (V-X-C-X-V)", 2);
        color=:gray, linestyle=:dash, label="O(Δt)")
-lines!(ax, dts[2:end], (dts[2:end]./dts[2]).^2 .* ref_err_modeC;
+lines!(ax, dts[2:end], (dts[2:end]./dts[2]).^2 .* l1_err("Mode C", 2);
        color=:gray, linestyle=:dashdot, label="O(Δt²)")
 
 Legend(fig[1,2], ax)
 fig
 ```
 
-```julia; echo=false, label="fig-faraday-residual", fig_cap="Faraday residual ‖B^{n+1} − B^n + dt·∇×E^m‖ for Mode IMF at all tested dt values. Zero by construction of apply_faraday!."
-
-fig = Figure(size=(700, 320))
-ax = Axis(fig[1,1], xlabel="Δt", ylabel="‖residual‖∞", xscale=log10, yscale=log10,
-          title="Faraday residual for Mode IMF (should be ≈ machine ε)")
-
-for (dti, (dt, d)) in enumerate(diags_cv["Mode IMF"])
-    # Reconstruct B^{n+1} from B^n and E^m at the last recorded step.
-    # The diagnostic stores Bz only; verify B^{n+1} - B^n + dt·curl(E^m) ≈ 0
-    # by checking that the Bz difference equals -dt * (∇×E^m)_z at that step.
-    Bz_last = d.Bz[end]
-    Bz_prev = length(d.Bz) > 1 ? d.Bz[end-1] : zeros(size(Bz_last))
-    Ey_last = d.Ey[end]
-    Nx_r    = length(Bz_last)
-    k_vals  = fftfreq(Nx_r, 1/grid_cv.delta[1]) .* 2π
-    curlEz  = real.(ifft(im .* k_vals .* fft(Ey_last)))  # (∇×E)_z = ∂_x E_y for 1-D perp
-    residual = maximum(abs.(Bz_last .- Bz_prev .+ dt .* curlEz))
-    scatter!(ax, [dt], [residual]; color=colors_cv[4], marker=markers_cv[4],
-             label=(dti==1 ? "Mode IMF" : nothing))
-end
-hlines!(ax, [eps(Float64)]; color=:gray, linestyle=:dash, label="machine ε")
-axislegend(ax; position=:lt)
-fig
-```
-
-```julia; echo=false, label="sim-damping-growth"
+```julia; echo=false, results="hidden", label="sim-damping-growth"
 
 function fit_growth_rate(t_vec, E2_vec)
     t_half = t_vec[end] / 2
@@ -1002,64 +598,42 @@ end
 κ_vals_gr = [0.0, 0.05, 0.1, 0.5]
 Tmax_gr   = 80.0; dt_gr = 0.025
 
-diags_growth = map(κ_vals_gr) do κ
-    st = κ == 0.0 ?
-         (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:moment_kinetic_corrector) :
-         (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:moment_kinetic_corrector,
-                                       field_solver=:damped_midpoint, damping_rate=κ)
-    run_sim(β_cv, μ_cv, dt_gr, Tmax_gr, grid_cv; stepper=st, ε=1e-6, T=T_cv, ic=make_ics)
-end
+diags_growth = [run_sim(β_cv, μ_cv, dt_gr, Tmax_gr, grid_cv; stepper=midpoint(damping_rate=κ),
+                        ε=1e-6, T=T_cv, seed_field=:Ey, vnoise=1e-6) for κ in κ_vals_gr]
 
-γ_Ey_vals = [fit_growth_rate(d.t, map(x -> mean(x .* x), d.Ey)) for d in diags_growth]
-γ_Bz_vals = [fit_growth_rate(d.t, map(x -> mean(x .* x), d.Bz)) for d in diags_growth]
+γ_vals = Dict(field => [fit_growth_rate(d.t, mean_sq(d, field)) for d in diags_growth] for field in (:Ey, :Bz))
+
+function plot_damping(field)
+    fig = Figure(size=(800, 400))
+    ax = Axis(fig[1,1], xlabel="t", ylabel="⟨$(field)²⟩", yscale=log10,
+              title="Damping sweep β=$β_cv, κ ∈ $κ_vals_gr")
+    for (i, (κ, d)) in enumerate(zip(κ_vals_gr, diags_growth))
+        X2 = mean_sq(d, field)
+        lines!(ax, d.t, X2; color=WONG[i+1], label="κ=$κ")
+        idx_h = findfirst(t -> t >= d.t[end] / 2, d.t)
+        t_fit = d.t[idx_h:end]
+        lines!(ax, t_fit, X2[idx_h] .* exp.(2γ_vals[field][i] .* (t_fit .- t_fit[1]));
+               color=WONG[i+1], linestyle=:dash, linewidth=1)
+    end
+    axislegend(ax; position=:lt)
+    fig
+end
 ```
 
-```julia; echo=false, label="fig-damping-Ey", fig_cap="⟨Ey²⟩(t) with and without numerical damping (β=0.1, μ=0.01, dt=0.025). Dashed lines show the fitted growth rate 2γ extracted from the second half of each run."
-
-fig = Figure(size=(800, 400))
-ax = Axis(fig[1,1], xlabel="t", ylabel="⟨Ey²⟩", yscale=log10,
-          title="Damping sweep β=$β_cv, κ ∈ $κ_vals_gr")
-for (i, (κ, d)) in enumerate(zip(κ_vals_gr, diags_growth))
-    Ey2 = map(x -> mean(x .* x), d.Ey)
-    lines!(ax, d.t, Ey2; color=WONG[i+1], label="κ=$κ")
-    γ = γ_Ey_vals[i]
-    t_half = d.t[end] / 2
-    idx_h = findfirst(t -> t >= t_half, d.t)
-    E2_anchor = Ey2[idx_h]
-    t_fit = d.t[idx_h:end]
-    lines!(ax, t_fit, E2_anchor .* exp.(2γ .* (t_fit .- t_fit[1]));
-           color=WONG[i+1], linestyle=:dash, linewidth=1)
-end
-axislegend(ax; position=:lt)
-fig
+```julia; echo=false, label="fig-damping-Ey", fig_cap="⟨Ey²⟩(t) with and without numerical damping (Mode C, β=0.1, μ=0.01, dt=0.025). Dashed lines show the fitted growth rate 2γ extracted from the second half of each run."
+plot_damping(:Ey)
 ```
 
 ```julia; echo=false, label="fig-damping-Bz", fig_cap="⟨Bz²⟩(t) with and without numerical damping. Dashed lines show the fitted growth rate 2γ."
-
-fig = Figure(size=(800, 400))
-ax = Axis(fig[1,1], xlabel="t", ylabel="⟨Bz²⟩", yscale=log10,
-          title="Magnetic energy — damping sweep β=$β_cv, κ ∈ $κ_vals_gr")
-for (i, (κ, d)) in enumerate(zip(κ_vals_gr, diags_growth))
-    Bz2 = map(x -> mean(x .* x), d.Bz)
-    lines!(ax, d.t, Bz2; color=WONG[i+1], label="κ=$κ")
-    γ = γ_Bz_vals[i]
-    t_half = d.t[end] / 2
-    idx_h = findfirst(t -> t >= t_half, d.t)
-    B2_anchor = Bz2[idx_h]
-    t_fit = d.t[idx_h:end]
-    lines!(ax, t_fit, B2_anchor .* exp.(2γ .* (t_fit .- t_fit[1]));
-           color=WONG[i+1], linestyle=:dash, linewidth=1)
-end
-axislegend(ax; position=:lt)
-fig
+plot_damping(:Bz)
 ```
 
-```julia; echo=false, label="fig-kappa-sweep", fig_cap="Effective growth rate γ vs κ extracted from the last half of each time series via linear regression on log⟨E²⟩ (solid circles: Ey, open squares: Bz)."
+```julia; echo=false, label="fig-kappa-sweep", fig_cap="Effective growth rate γ vs κ extracted from the last half of each time series via linear regression on log⟨E²⟩ (circles: Ey, squares: Bz)."
 
 fig = Figure(size=(600, 380))
 ax = Axis(fig[1,1], xlabel="κ", ylabel="γ (growth rate)", title="Growth rate vs damping κ")
-scatterlines!(ax, κ_vals_gr, γ_Ey_vals; color=WONG[6], marker=:circle, label="Ey")
-scatterlines!(ax, κ_vals_gr, γ_Bz_vals; color=WONG[4], marker=:rect, label="Bz")
+scatterlines!(ax, κ_vals_gr, γ_vals[:Ey]; color=WONG[6], marker=:circle, label="Ey")
+scatterlines!(ax, κ_vals_gr, γ_vals[:Bz]; color=WONG[4], marker=:rect, label="Bz")
 hlines!(ax, [0.0]; color=:gray, linestyle=:dash)
 axislegend(ax; position=:rt)
 fig
@@ -1067,67 +641,35 @@ fig
 
 ## Kinetic Simulations
 
-All kinetic simulations use Mode C (`stepMidpoint!` with `:moment_kinetic_corrector`). Parameters: $\mu=0.1$, $T_i=1$, $N_x=64$, $N_v=16$, $v_\mathrm{max}=4\,v_\mathrm{th}$.
+All kinetic simulations use Mode C (`stepMidpoint!` with `:moment_kinetic_corrector`). Parameters: $\mu=0.1$, $T_i=1$, $N_x=64$, $N_v=32$, $v_\mathrm{max}=6\,v_\mathrm{th}$, $\Delta t = 0.01$, $t_\mathrm{max} = 200$, perpendicular propagation ($\hat{b} = \hat{z}$, $L_x = 20\pi$). Parallel propagation is tested with the cold fluid only: the 1D2v grid has velocities $(v_1, v_2)$, while gyration about a field along $x_1$ needs $(v_2, v_3)$.
 
-```julia; echo=false, label="sim-kinetic_setup"
+```julia; echo=false, results="hidden", label="sim-kinetic"
 μ_kin = 0.1; T_kin = 1.0; Nx_kin = 64; Nv_kin = 32
 vmax_kin = 6.0*sqrt(T_kin)
-Lz_kin = 100π; Lx_kin = 20π
+Lx_kin = 20π
 dt_kin = 0.01; Tmax_kin = 200.0
 
 βi_lo = 0.05; βi_hi = 0.5
-
-grid_par_kin = bslLD.Grid(
-    [0.0, -vmax_kin, -vmax_kin], [Lz_kin, vmax_kin, vmax_kin],
-    [Nx_kin, Nv_kin, Nv_kin], 1, 0.0, 1)  # b0=0 for parallel propagation
 
 grid_perp_kin = bslLD.Grid(
     [0.0, -vmax_kin, -vmax_kin], [Lx_kin, vmax_kin, vmax_kin],
     [Nx_kin, Nv_kin, Nv_kin], 1, 1.0, 3)
 
-stepper_kin = (f,s,g,t,v) -> stepMidpoint!(f,s,g,t,v; coupling=:moment_kinetic_corrector)
-
+diag_perp_lo = run_sim(βi_lo, μ_kin, dt_kin, Tmax_kin, grid_perp_kin; T=T_kin);
+diag_perp_hi = run_sim(βi_hi, μ_kin, dt_kin, Tmax_kin, grid_perp_kin; T=T_kin);
+runs_kin = [(βi_lo, diag_perp_lo), (βi_hi, diag_perp_hi)]
 ```
 
-```julia; echo=false, label="sim-kinetic_par"
-diag_par_lo   = run_sim(βi_lo, μ_kin, dt_kin, Tmax_kin, grid_par_kin;  stepper=stepper_kin, T=T_kin, ic=make_ics_em);
-diag_par_hi   = run_sim(βi_hi, μ_kin, dt_kin, Tmax_kin, grid_par_kin;  stepper=stepper_kin, T=T_kin, ic=make_ics_em);
-```
+```julia; echo=false, label="fig-kin-perp", fig_cap="Perpendicular propagation kinetic spectra (density). White: cold analytic. Colored: hot analytic roots."
 
-```julia; echo=false, label="sim-kinetic-perp"
-diag_perp_lo  = run_sim(βi_lo, μ_kin, dt_kin, Tmax_kin, grid_perp_kin; stepper=stepper_kin, T=T_kin, ic=make_ics_em);
-diag_perp_hi  = run_sim(βi_hi, μ_kin, dt_kin, Tmax_kin, grid_perp_kin; stepper=stepper_kin, T=T_kin, ic=make_ics_em);
-```
-
-### Parallel propagation
-
-```julia; echo=false, label="fig-kin-par", fig_cap="Parallel propagation kinetic spectra (Bz). White dashed: cold analytic. Colored scatter: hot analytic roots."
-
-kmax_par_kin = (Nx_kin÷2 - 1) * 2π / Lz_kin  # Nyquist limit of the simulation
-
+kx_kin = range(0.05, 4.0, length=50)
 fig = Figure(size=(1000, 430))
-for (ci, (β, diag)) in enumerate([(βi_lo, diag_par_lo), (βi_hi, diag_par_hi)])
-    ax = Axis(fig[1,ci], xlabel="k∥ ρᵢ", ylabel="ω/Ωᵢ",
-              title="Parallel β=$β", limits=((0, kmax_par_kin),(0,8)))
-    plot_spectrum!(ax, diag, dt_kin, grid_par_kin)
-    overlay_cold!(ax, β, μ_kin; dir=:par, kmax=kmax_par_kin)
-    overlay_hot!(ax,  β, μ_kin; dir=:par)
-    axislegend(ax; position=:lt)
-end
-fig
-```
-
-### Perpendicular propagation
-
-```julia; echo=false, label="fig-kin-perp", fig_cap="Perpendicular propagation kinetic spectra (density). White dashed: cold analytic. Colored scatter: hot analytic roots."
-
-fig = Figure(size=(1000, 430))
-for (ci, (β, diag)) in enumerate([(βi_lo, diag_perp_lo), (βi_hi, diag_perp_hi)])
+for (ci, (β, diag)) in enumerate(runs_kin)
     ax = Axis(fig[1,ci], xlabel="k⊥ ρᵢ", ylabel="ω/Ωᵢ",
               title="Perpendicular β=$β", limits=((0,4),(0,8)))
     plot_spectrum!(ax, diag, dt_kin, grid_perp_kin; field=:ni)
-    overlay_cold!(ax, β, μ_kin; dir=:perp, kmax=4.0)
-    overlay_hot!(ax,  β, μ_kin; dir=:perp)
+    overlay!(ax, darwin_model(β, μ_kin, KDR.Cold()),           kx_kin, :perp; color=:white,  label="cold analytic")
+    overlay!(ax, darwin_model(β, μ_kin, KDR.GordeyevSeries()), kx_kin, :perp; color=WONG[3], label="hot analytic")
     axislegend(ax; position=:lt)
 end
 fig
@@ -1139,57 +681,28 @@ The two discrete conservation laws of interest are **Faraday's law**
 
 $$\frac{\mathbf{B}^{n+1} - \mathbf{B}^n}{\Delta t} + \nabla\times\mathbf{E}^m = 0$$
 
-and the **quasineutrality constraint** $\delta n_i \ll n_0$. The first is enforced exactly by construction of `apply_faraday!` (machine-precision residual at every step). The second is monitored via $\max_x|n_i(x,t) - 1|$, which should remain small in the linear regime and grow at most algebraically as nonlinear effects develop.
+and the **quasineutrality constraint** $\delta n_i \ll n_0$. The first is enforced by construction of `apply_faraday!`; the residual below only checks that it matches an independent spectral curl. The second is monitored via $\max_x|n_i(x,t) - 1|$, which should remain small in the linear regime and grow at most algebraically as nonlinear effects develop.
 
-```julia; echo=false
-# Helper: compute max spectral-curl residual ‖Bz^{n+1} − Bz^n + dt·(∇×E)_z‖∞ over time.
-# For 1-D grids, (∇×E)_z = ∂_{x1} E_y  →  ik_{x1} Ê_y in Fourier space.
-function faraday_residuals(diag, dt, grid)
-    Nx = size(grid.xaxes[1], 1)
-    k1 = fftfreq(Nx, 1/grid.delta[1]) .* 2π
-    residuals = Float64[]
-    for n in 2:length(diag.t)
-        curlEz = real.(ifft(im .* k1 .* fft(diag.Ey[n-1])))
-        R = diag.Bz[n] .- diag.Bz[n-1] .+ dt .* curlEz
-        push!(residuals, maximum(abs.(R)))
-    end
-    return residuals
-end
-
-# Helper: max density deviation from background n₀=1.
-qn_deviation(diag) = [maximum(abs.(ni .- 1.0)) for ni in diag.ni]
-```
-
-```julia; echo=false, label="fig-faraday-kin", fig_cap="Faraday residual ‖Bz^{n+1}−Bz^n+dt·∂_{x1}Ey‖∞ over time for all four kinetic simulations. Dashed line: machine ε. Zero by construction of apply_faraday!."
-
-runs_kin = [
-    ("Par β=$(βi_lo)",  diag_par_lo,  grid_par_kin),
-    ("Par β=$(βi_hi)",  diag_par_hi,  grid_par_kin),
-    ("Perp β=$(βi_lo)", diag_perp_lo, grid_perp_kin),
-    ("Perp β=$(βi_hi)", diag_perp_hi, grid_perp_kin),
-]
+```julia; echo=false, label="fig-faraday-kin", fig_cap="Faraday residual ‖Bz^{n+1}−Bz^n+dt·∂_{x1}Ey^m‖∞ over time for both kinetic simulations. Dashed line: machine ε."
 
 fig = Figure(size=(1000, 420))
 ax = Axis(fig[1,1], xlabel="t / Ωᵢ⁻¹", ylabel="‖Faraday residual‖∞", yscale=log10,
           title="Faraday conservation")
-for (ci, (label, diag, grid)) in enumerate(runs_kin)
-    res = faraday_residuals(diag, dt_kin, grid)
-    t_res = diag.t[2:end]
-    lines!(ax, t_res, res; color=WONG[ci+1], label=label)
+for (ci, (β, diag)) in enumerate(runs_kin)
+    lines!(ax, diag.t[2:end], faraday_residuals(diag, dt_kin, grid_perp_kin); color=WONG[ci+1], label="β=$β")
 end
 hlines!(ax, [eps(Float64)]; color=:gray, linestyle=:dash, label="machine ε")
 axislegend(ax; position=:rt)
 fig
 ```
 
-```julia; echo=false, label="fig-qn-kin", fig_cap="Quasineutrality indicator max|nᵢ−1| over time for all four kinetic simulations. Small values confirm the linear regime; saturation marks nonlinear onset."
+```julia; echo=false, label="fig-qn-kin", fig_cap="Quasineutrality indicator max|nᵢ−1| over time for both kinetic simulations. Small values confirm the linear regime; saturation marks nonlinear onset."
 
 fig = Figure(size=(1000, 420))
 ax = Axis(fig[1,1], xlabel="t / Ωᵢ⁻¹", ylabel="max|nᵢ − 1|", yscale=log10,
           title="Quasineutrality indicator")
-for (ci, (label, diag, _)) in enumerate(runs_kin)
-    dev = qn_deviation(diag)
-    lines!(ax, diag.t, dev; color=WONG[ci+1], label=label)
+for (ci, (β, diag)) in enumerate(runs_kin)
+    lines!(ax, diag.t, [maximum(abs.(ni .- 1.0)) for ni in diag.ni]; color=WONG[ci+1], label="β=$β")
 end
 axislegend(ax; position=:lt)
 fig
