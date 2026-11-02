@@ -127,6 +127,36 @@ solver = bslLD.AdiabaticSolver((bslLD.Mirror(), bslLD.Periodic()); order = 8)   
 sol = bslLD.solve_fields(bslLD.Moments(rho), grid, solver)
 ```
 
+## Writing a simulation script
+
+bslLD has no `run` function and no recipe object: the step function and the time loop are plain code in
+your script, because the splitting (what is advanced, in which order, at which time level) is yours to
+change. `examples/itg_mirror.jl` is the template (6D, mirror wall in x1, `BSLLD_TINY=1` for a tiny CPU run);
+copy it and edit. It shows, in this order: parameters, `Grid`, `Distribution` (starting from `f = 0`),
+`SimulationTime`, profile and target function, field solver, diagnostics, `step!`, loop.
+
+Build `f` from a source, or set an initial condition, with one function:
+
+```julia
+using bslLD.Production: gaussian_ramp, deposit!
+ramp = gaussian_ramp(15.0, 3.0)              # weight on [0, 30), integral 1
+# target(grid, t) returns an array of the size of f.data
+deposit!(f, grid, target, t; weight = ramp(t), dt = DT / 2)   # in the loop: f += weight*dt*target
+deposit!(f, grid, target, 0.0; weight = 1, dt = 1)           # once, before the loop: initial condition
+```
+
+`deposit!` does not evaluate `target` when `weight * dt` is zero. Sub-stepping of a mirror sweep, the
+flux-surface average and any filter (`PlasmaCore.fourier_filter!` for periodic axes) are written in the
+script, not hidden in the library.
+
+**Output** is written by `bslLD.Production.Diagnostic` (`src/production/`; the submodule depends on the core, the core
+does not refer to it, and nothing is exported: `using bslLD.Production: Diagnostic, write!, close!`). One `Diagnostic`
+per field, with explicit `every` and `buffer`; chunk files `<dir>/<name>_<firststep>.jls` (`Serialization`, format
+version 1: header `(version, meta, grid, time = (step, t, phase), kind)` then the data, one host array per record).
+The header's `meta["code"]` holds the git state of the script, bslLD and PlasmaCore. `BSL6DPostProcessing.bslLD()`
+reads the files. There is no restart yet; up to `buffer` records are lost if a run is interrupted. Tests:
+`test/production/`, including one run of the template on a tiny grid.
+
 ## Field Solvers
 
 All solvers implement the `AbstractFieldSolver` interface via `solve_fields` / `solve_fields!`, which takes a `Moments` struct and returns a `FieldSolution` holding the updated `E` and `B` vector fields.
@@ -138,7 +168,7 @@ All solvers implement the `AbstractFieldSolver` interface via `solve_fields` / `
 | `PoissonSolver(factor=1.0)` | $-\nabla^2\phi = \text{factor}\cdot\rho$, $\mathbf{E}=-\nabla\phi$ | `rho` |
 | `AdiabaticSolver(boundaries = (); order = 8)` | $\mathbf{E} = -\nabla\rho$ (adiabatic electrons, no Poisson inversion); `Mirror()` axes by finite differences of `order` | `rho` |
 
-Both are FFT-based and support arbitrary 1D/2D periodic domains. A 2/3-rule dealiasing filter is applied.
+Both are FFT-based and support arbitrary 1D/2D periodic domains. `PoissonSolver` applies a fixed Fourier filter (cutoff fraction 0.5, hard-coded); `AdiabaticSolver` applies none.
 
 ```julia
 sol = bslLD.solve_fields(bslLD.Moments(rho), grid, bslLD.PoissonSolver())
@@ -201,31 +231,31 @@ Diagnostic helpers: `bslLD.electromagnetic_energy(E, B; params)` and `bslLD.maxw
 
 ## Project Structure
 
+Grids, fields, `SimulationTime` and the derivative operators live in
+[PlasmaCore.jl](https://github.com/mraeth/PlasmaCore.jl); this package holds the kinetic and field-solver parts.
+
 ```
 bslLD/
 ├── src/
-│   ├── bslLD.jl                       # module entry point, backend management
-│   ├── core/
-│   │   ├── grid.jl                    # Grid (Cart/Polar), axes
-│   │   ├── time.jl                    # SimulationTime, advance!, continue_advection
-│   │   ├── indexing.jl                # multi-dim index helpers
-│   │   └── fields.jl                  # ScalarField, VectorField, MatrixField
+│   ├── bslLD.jl                       # module entry point, imports from PlasmaCore, backend selection
+│   ├── sources.jl                     # add_kappaT!
+│   ├── production/                    # submodule bslLD.Production: gaussian_ramp, deposit!, Diagnostic, chunk I/O
 │   ├── kinetics/
-│   │   ├── distribution.jl            # DistributionGrid, compute_density/current/Pi
-│   │   ├── interpolation.jl           # arbitrary-order Lagrange weights (uniform grid)
-│   │   ├── advectorCart.jl            # BSL advection (Cartesian, KernelAbstractions)
-│   │   └── advectorPolar.jl           # BSL advection (polar coordinates)
-│   ├── maxwell/
-│   │   ├── differential_operators.jl  # spectral grad, curl, div
-│   │   ├── spectral.jl                # FFT helpers, wavenumbers
-│   │   ├── field_solver.jl            # AbstractFieldSolver, Moments, FieldSolution
-│   │   ├── solvers_electrostatic.jl   # PoissonSolver, AdiabaticSolver
-│   │   ├── solvers_vacuum.jl          # EMSolverVacuum, VacuumMaxwellParams
-│   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol
-│   │   └── cold_plasma.jl             # ColdIonFluid for linear EM benchmarks
-│   └── execution.jl                   # use_cpu!, use_cuda!, backend switching
-├── examples/                          # Jupyter notebooks (landau_damping, ibw, em_cases, …)
-└── test/                              # Unit tests
+│   │   ├── species.jl                 # Species, thermal velocity, gyro frequency
+│   │   ├── initialization.jl          # Distribution (outer-product initial condition)
+│   │   ├── interpolation.jl           # Lagrange weights (uniform grid)
+│   │   ├── advectorCart.jl            # BSL advection (Cartesian, periodic and Mirror)
+│   │   ├── advectorPolar.jl           # BSL advection (polar coordinates)
+│   │   ├── exbBracketCart.jl          # E×B Poisson bracket
+│   │   ├── moments.jl                 # compute_density
+│   │   └── moment_response.jl         # compute_current, compute_momentum_tensor, …
+│   └── maxwell/
+│       ├── solvers_electrostatic.jl   # PoissonSolver, AdiabaticSolver
+│       ├── solvers_vacuum.jl          # EMSolverVacuum, VacuumMaxwellParams
+│       ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol
+│       └── cold_plasma.jl             # ColdIonFluid for linear EM benchmarks
+├── examples/                          # itg_mirror.jl (template), itg_instability.jl, cold_plasma.jl, notebooks
+└── test/                              # Unit tests (include the template's diagnostics block and a tiny run of itg_mirror.jl)
 ```
 
 ## Dependencies
@@ -256,7 +286,7 @@ bslLD/
 | `FFTW.jl` | Spectral diagnostics in notebooks (already a core dep) |
 | `DSP.jl` | Window functions (Kaiser) for ω–k spectra |
 
-**PlasmaCore.jl status:** this package depends on `PlasmaCore.jl` via a remote git URL declared in `Project.toml`/`Manifest.toml`, not a local vendored copy, even though `PlasmaCore.jl` sits right next to this repo on disk. If full separation between development streams is later required, the recommended approach is to vendor a copy into `vendor/PlasmaCore.jl` within this project and repoint the dependency to that local path.
+**PlasmaCore.jl:** this package depends on `PlasmaCore` (compat `0.2`) through the BSLRegistry, not through a `[sources]` entry; see the registry README for the release workflow. `Serialization` is a test-only dependency (the template's diagnostics block is tested).
 
 ## Backend Selection
 
