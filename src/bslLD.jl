@@ -125,5 +125,8 @@ include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
 include("kinetics/exbBracketCart.jl")
 include("sources.jl")
+# Polar perpendicular-velocity grid (P2 scheme): grid, quadrature, init, moments, advectors.
+include("kinetics/polarVGrid.jl")
+include("kinetics/polarVAdvect.jl")
 
 end # module bslLD
