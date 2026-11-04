@@ -153,7 +153,9 @@ The Darwin model retains electromagnetic effects while filtering out light waves
 |--------|-------------|-----------------|
 | `EMSolverDKPol(β_i, μ)` | Darwin-Kinetic **with** the electron polarisation current $\mu\partial_t\mathbf{E}_\perp$. Implicit $\mathbf{E}_\perp$ update via a $2\times2$ linear system per Fourier mode; Helmholtz solve for $E_\parallel$. Staggered Faraday for $\mathbf{B}$. | `rho`, `J` (⊥ current), `Pi_diff` (anisotropic pressure) |
 | `EMSolverDKNoPol(β_i, μ)` | Darwin-Kinetic **without** polarisation drift. Fully spectral $3\times3$ Cramer solve per Fourier mode; simultaneous Faraday update. | `rho`, `J`, `Pi_diff` |
-| `EMSolverDKPolDensity(β_i, μ; w = 1)` | Drift-kinetic electrons with the polarisation **density** only (weight $w$), in charge form: quasineutrality $(1 + w d_e^2 k^2)\hat{B}_z = \hat{n}_i + ikw\mu\hat{J}_{iy}$ is imposed at every time level. 1D with $\mathbf{k}\perp\hat{b}$ (`Bdir = 3`) only. Use `solve_fields_moment_implicit!` (moment-implicit stage field of an X–C–X step) and `quasineutral_B!`; `step_cold!` implements the step for `ColdIonFluid`. | `rho`, `J` |
+| `EMSolverDKPolDensity(β_i, μ; w = 1)` | Drift-kinetic electrons with the polarisation **density** only (weight $w$), in charge form: quasineutrality $\sum_s q_s n_s = w\mu[(2/\beta_i)\Delta B_\parallel + \hat b\cdot\nabla\times\mathbf{J}_{\perp}]\,/\,q_e$ replaces $\nabla\cdot\mathbf{J} = 0$. Works on explicit species (see below), any geometry: `step_charge_form!(species, sol, grid, solver, dt; phase, damping_rate)` is one X–C–X step (stage field from a $3\times3$ solve per Fourier mode, `solve_fields_moment_implicit!`; $\theta = 1/2 + \kappa\,dt$ damps the parallel-Ampère defect mode at second order). `quasineutral_drift!` sets a quasineutral start, `quasineutrality_residual` checks it. 1D, $\mathbf{k}\perp\hat b$ only: `quasineutral_B!` and the lagged `solve_fields!`. | explicit species |
+
+**Species and equation-of-motion models.** A species is a charge $q$ and mass $m$ plus a model: kinetic (`Species`) or a linearised cold fluid `ColdFluid(grid, closure; q, m)` with closure `LorentzFluid()` (full cold fluid; `ColdIonFluid(grid)` = cold ions, $q = m = 1$) or `DriftFluid()` ($\mathbf{u}_\perp = \mathbf{E}\times\hat b$, parallel inertia; cold drift-kinetic electrons: `ColdFluid(grid, DriftFluid(); q = -1, m = μ)`). Every model provides `push_free!` (field-free half step), `push_field!` (kick), `moments_at` (charge density, current) and `stage_response` (linear response to the stage field per Fourier mode), so the charge-form step couples any set of them, e.g. `(ions, electrons)` with kinetic or cold-fluid ions.
 
 The rate-form solvers use `solve_fields!(sol, moments, grid, solver, dt)` (in-place, stores result in `sol.Enew`):
 
@@ -223,7 +225,8 @@ bslLD/
 │   │   ├── solvers_electrostatic.jl   # PoissonSolver, AdiabaticSolver
 │   │   ├── solvers_vacuum.jl          # EMSolverVacuum, VacuumMaxwellParams
 │   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol, EMSolverDKPolDensity
-│   │   └── cold_plasma.jl             # ColdIonFluid for linear EM benchmarks
+│   │   ├── cold_plasma.jl             # ColdFluid species (Lorentz / drift closure) for linear EM benchmarks
+│   │   └── charge_form.jl             # species models ↔ charge-form solve, step_charge_form!
 │   └── execution.jl                   # use_cpu!, use_cuda!, backend switching
 ├── examples/                          # Jupyter notebooks (landau_damping, ibw, em_cases, …)
 └── test/                              # Unit tests

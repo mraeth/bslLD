@@ -34,15 +34,16 @@ const WONG = [:black, "#E69F00", "#56B4E9", "#009E73",
 ```julia; echo=false, results="hidden"
 # ── Steppers ──────────────────────────────────────────────────────────────────
 mutable struct Diag
-    Ey::Vector; Bz::Vector; ni::Vector; t::Vector
+    Ey::Vector; Bz::Vector; ni::Vector; t::Vector; qn::Vector
 end
-Diag() = Diag([], [], [], [])
+Diag() = Diag([], [], [], [], [])
 
-function record!(diag::Diag, sol, ni, simTime)
+function record!(diag::Diag, sol, ni, simTime; qn=NaN)
     push!(diag.Ey, copy(sol.E[2].data))
     push!(diag.Bz, copy(sol.B[3].data))
     push!(diag.ni, copy(ni.data))
     push!(diag.t,  simTime.current_T)
+    push!(diag.qn, qn)
 end
 
 function step!(f_i, sol, grid, simTime, solver)
@@ -116,36 +117,13 @@ function stepMidpoint!(f_i, sol, grid, simTime, solver;
     sol.E .= E_mid; simTime.phase = phase_start; simTime.fraction_dt = 1.0
 end
 
-# X–C–X step in charge form (EMSolverDKPolDensity): moment-implicit stage field, one kinetic
-# corrector, then B_z^{n+1} from quasineutrality with the final ion moments.
-function stepMidpointQN!(f_i, sol, grid, simTime, solver)
-    phase_start = simTime.phase
-    Ω  = bslLD.gyro_frequency(f_i, grid)
-    dt = simTime.dt
-    copy3(F) = bslLD.VectorField([copy(F[d].data) for d in 1:3])
-    x_half!(φ) = (simTime.phase = phase_start + φ*Ω*dt; simTime.fraction_dt = 0.5;
-                  bslLD.advectX!(f_i, grid, simTime))
-    kick!(E) = (simTime.phase = phase_start + 0.5Ω*dt; simTime.fraction_dt = 1.0;
-                bslLD.advectV!(f_i, grid, simTime, E))
-    moments(φ) = bslLD.Moments(bslLD.compute_density(f_i, grid),
-                               bslLD.compute_current(f_i, grid, phase_start + φ*Ω*dt))
+# X–C–X step in charge form (EMSolverDKPolDensity) for state = (ions, electrons): kinetic or
+# cold-fluid ions, cold drift-fluid electrons. damping_rate κ > 0 moves the stage to θ = 1/2 + κ dt.
+stepQN!(state, sol, grid, simTime, solver; damping_rate=0.0) =
+    bslLD.step_charge_form!(state, sol, grid, solver, simTime.dt; phase=simTime.phase, damping_rate)
 
-    x_half!(0.25)
-    f_a, m_a, B_n = copy(f_i.data), moments(0.5), copy3(sol.B)
-    n0 = mean(m_a.rho.data) * bslLD.electric_acceleration_scale(f_i)
-    bslLD.solve_fields_moment_implicit!(sol, m_a, grid, solver, dt; B_n, n0)
-
-    E_p = copy3(sol.Enew)
-    kick!(E_p); J_b = moments(0.5).J
-    x_half!(0.75); m_1 = moments(1.0)
-    bslLD.solve_fields_moment_implicit!(sol, m_a, grid, solver, dt; B_n, n0,
-        corrector = (E = E_p, J_b = J_b, n_1 = m_1.rho, J_1 = m_1.J))
-
-    f_i.data .= f_a
-    kick!(sol.Enew); x_half!(0.75); m_1 = moments(1.0)
-    bslLD.quasineutral_B!(sol.B, m_1.rho, m_1.J, grid, solver)
-    sol.E .= sol.Enew; simTime.phase = phase_start; simTime.fraction_dt = 1.0
-end
+# Cold drift-kinetic electrons of the polarisation-density model.
+cold_electrons(grid, μ) = bslLD.ColdFluid(grid, bslLD.DriftFluid(); q=-1, m=μ)
 
 # ── Simulation helpers ─────────────────────────────────────────────────────────
 # Zero-mean random seed of amplitude ε in Ey (:Ey), Bz (:Bz) or the ion density (:n); returns (sol, δn).
@@ -163,35 +141,47 @@ maxwellian_ions(grid, T; vnoise=0.0, δn=zeros(length(grid.xaxes[1]))) = bslLD.D
     initFuncx = x -> 1.0 + δn[round(Int, x / grid.delta[1]) + 1],
     initFuncv = v -> exp(-(v + vnoise*rand())^2 / (2T)) / sqrt(2π*T))
 
-# B_z in quasineutral balance with the initial ions (w = 0 unless the solver keeps the polarisation density).
-function quasineutral_start!(sol, state, grid, solver)
+# Ion moments (n_i, J_i) at gyro-phase φ; J = (J⊥₁, J⊥₂[, J∥]) as the field solvers expect.
+ion_moments(f::bslLD.ColdIonFluid, grid, φ) = bslLD.compute_moments(f, grid)
+ion_moments(f, grid, φ) = bslLD.Moments(bslLD.compute_density(f, grid), bslLD.compute_current(f, grid, φ))
+
+# Quasineutral start. 1D, k ⊥ b̂: B_z in balance with the ions, with frozen-in electrons δN_e = δB_z
+# (w = 0 unless the solver keeps the polarisation density). EMSolverDKPolDensity: δN_e of the
+# electron fluid from quasineutrality.
+function quasineutral_start!(sol, ions, el, grid, solver)
     w = solver isa bslLD.EMSolverDKPolDensity ? solver.w : 0.0
-    m = state isa bslLD.ColdIonFluid ? bslLD.compute_moments(state, grid) :
-        bslLD.Moments(bslLD.compute_density(state, grid), bslLD.compute_current(state, grid, 0.0))
-    bslLD.quasineutral_B!(sol.B, m.rho, m.J, grid, bslLD.EMSolverDKPolDensity(solver.beta_i, solver.mu; w))
+    m = ion_moments(ions, grid, 0.0)
+    bslLD.spatial_ndims(grid) == 1 && grid.Bdir == 3 &&
+        bslLD.quasineutral_B!(sol.B, m.rho, m.J, grid, bslLD.EMSolverDKPolDensity(solver.beta_i, solver.mu; w))
+    el === nothing || bslLD.quasineutral_drift!((ions, el), sol.B, grid, solver)
 end
 
-# Kinetic ions (stepper(f, sol, grid, simTime, solver)) or, with stepper = bslLD.step_cold!, the cold-ion fluid.
-# seed_field = :n seeds the ion density and starts from a quasineutral B_z.
+# Kinetic ions (stepper(state, sol, grid, simTime, solver)) or, with stepper = bslLD.step_cold!, the
+# cold-ion fluid. EMSolverDKPolDensity carries a cold electron fluid: state = (ions, electrons).
+# seed_field = :n seeds the ion density and starts quasineutral.
 function run_sim(β, μ, dt, Tmax, grid; stepper=stepMidpoint!, solver=bslLD.EMSolverDKNoPol(β, μ),
                  ε=1e-4, T=1.0, seed=42, seed_field=:Bz, vnoise=0.0)
     Random.seed!(seed)
     sol, δn = seed_fields(length(grid.xaxes[1]), ε, seed_field)
     if stepper === bslLD.step_cold!
-        state = bslLD.ColdIonFluid(grid); Ω = grid.b0
-        state.delta_n.data .= δn
+        ions = bslLD.ColdIonFluid(grid); Ω = grid.b0
+        ions.delta_n.data .= δn
         density = s -> s.delta_n
     else
-        state = maxwellian_ions(grid, T; vnoise, δn); Ω = bslLD.gyro_frequency(state, grid)
+        ions = maxwellian_ions(grid, T; vnoise, δn); Ω = bslLD.gyro_frequency(ions, grid)
         density = s -> bslLD.compute_density(s, grid)
     end
-    seed_field == :n && quasineutral_start!(sol, state, grid, solver)
+    el = solver isa bslLD.EMSolverDKPolDensity ? cold_electrons(grid, μ) : nothing
+    el !== nothing && stepper === bslLD.step_cold! && (stepper = stepQN!)
+    seed_field == :n && quasineutral_start!(sol, ions, el, grid, solver)
+    state = el === nothing ? ions : (ions, el)
     simTime = bslLD.SimulationTime(dt, Tmax)
     diag = Diag()
     while bslLD.continue_advection(simTime, true)
         stepper(state, sol, grid, simTime, solver)
         bslLD.advance!(simTime, Ω)
-        record!(diag, sol, density(state), simTime)
+        qn = el === nothing ? NaN : bslLD.quasineutrality_residual(state, sol.B, grid, solver; phase=simTime.phase)
+        record!(diag, sol, density(ions), simTime; qn)
     end
     return diag
 end
@@ -764,27 +754,43 @@ fig
 
 ### Model
 
-This is the "DK + polarisation density" electron model of the hybrid-model study (`projects/hybrid_model_map`, final model; note *hybrid-electron-reductions-polarisation-and-mode-exclusion*, model E4). The electrons are drift-kinetic and massless across the field, except for the polarisation **charge** $w\mu\nabla_\perp^2\phi$ (weight $w$, physical $w=1$). The transverse polarisation current is dropped. In KineticDR units the electron susceptibility is
+This is the "DK + polarisation density" electron model of the hybrid-model study (`projects/hybrid_model_map`, final model; note *hybrid-electron-reductions-polarisation-and-mode-exclusion*, model E4). The electrons are drift-kinetic and massless across the field, except for the polarisation **charge** $w\mu\nabla_\perp^2\phi$ (weight $w$, physical $w=1$). The transverse polarisation current is dropped. The model keeps the longitudinal (charge-carrying) part of the polarisation current $\mu\,\partial_t\mathbf{E}_\perp$,
 
-$$\chi_e = \chi_e^{\rm DK} + w\mu\,\frac{k_\perp^2}{k^2}\,\hat{k}\hat{k}^{\mathsf T}.$$
+$$\mathbf{J}_{\rm pol} = w\,\mathcal{P}_L\,\mu\,\partial_t\mathbf{E}_\perp = -i\omega\,w\mu\,\frac{\mathbf{k}\,(\mathbf{k}_\perp\cdot\mathbf{E}_\perp)}{k^2},$$
+
+which at $\mathbf{k} = k_\perp\hat{x}$ adds $w\mu$ to the $xx$ entry of the KineticDR electron susceptibility (`dperp_poldensity`).
 
 DKPol keeps the full polarisation current, $\chi_e^{\rm DK} + \mu\,\mathbf{I}_\perp$ (KineticDR `DriftKinetic(polarization = true)`, model E2). Its transverse part adds a spurious cut-off at $|\omega| = \Omega_e/w + \Omega_i$. The density-only model has no root above $\Omega_e$ and caps the compressional branch at the lower-hybrid frequency $\omega_{LH}/\sqrt{w} = (w\mu)^{-1/2}\,\Omega_i$.
 
 ### Charge form
 
-The solver imposes quasineutrality itself rather than its time derivative $\nabla\cdot\mathbf{J}=0$. In 1D with $\mathbf{k}\perp\hat{b}$, the only geometry where kinetic ions can test the term here, the electron guiding-centre density is frozen in, $\delta n_e = \delta B_z$. Per Fourier mode, with $c = 2/\beta_i$ and $d_e^2 = c\mu$:
+The solver imposes quasineutrality itself rather than its time derivative $\nabla\cdot\mathbf{J}=0$. With perpendicular Ampère's law the polarisation density is a function of the state ($c = 2/\beta_i$),
 
-$$\left(1 + w d_e^2 k^2\right)\hat{B}_z = \hat{n}_i + ikw\mu\,\hat{J}_{iy}, \qquad \hat{E}_x = -c\,ik\hat{B}_z - \hat{J}_{iy}, \qquad \hat{E}_y = -\partial_t\hat{A}_y,\ \ \hat{B}_z = ik\hat{A}_y .$$
+$$n_i - N_e = w\mu\,\nabla_\perp\cdot\left(N_e\mathbf{E}_\perp\right) = w\mu\left[-c\,\Delta B_\parallel - \hat{b}\cdot\nabla\times\mathbf{J}_{i\perp}\right],$$
 
-Quasineutrality and the transverse Ampère law hold at every time level. The inductive field needs $B_z^{n+1}$, i.e. the ion density at the end of the step, which depends on the stage field through the C kick. `solve_fields_moment_implicit!` linearises that response around the background density ($\mathbf{J}^m = \mathbf{J}^a + n_0\tfrac{\Delta t}{2}\mathbf{E}^m$, $n^{n+1} = n^a - \tfrac{\Delta t}{2}\partial_x(J_x^a + n_0\Delta t E_x^m)$) and solves for $\mathbf{E}^m$ and $B_z^{n+1}$ per mode. A kinetic corrector then replaces the linear model by the moments of a trial push, keeping the difference as a fixed defect (`stepMidpointQN!`, and `step_cold!` for the cold fluid). $B_z^{n+1}$ is finally reset from quasineutrality with the actual moments.
+and this form is imposed. The electrons are a linearised cold drift fluid (`ColdFluid(grid, DriftFluid(); q = -1, m = μ)`: guiding-centre density $\delta N_e$, parallel flux $\Gamma_e = u_{e\parallel}$),
 
-So quasineutrality holds exactly, while Faraday's law holds only up to the predictor–corrector error. This is the opposite of the rate-form solvers. For cold ions the scheme reproduces
+$$\partial_t\delta N_e = -\hat{b}\cdot\nabla\times\mathbf{E} - \partial_\parallel\Gamma_e, \qquad \partial_t\Gamma_e = -\frac{1}{\mu}E_\parallel,$$
+
+where $\hat{b}\cdot\nabla\times\mathbf{E} = \nabla_\perp\cdot(\mathbf{E}\times\hat{b})$ is the compression of the $E\times B$ flow. For $\mathbf{k}\perp\hat{b}$ this freezes the electrons into the field, $\delta N_e - \delta B_z = $ const.
+
+The step is X–C–X. The stage field $\mathbf{E}^m$ solves, per Fourier mode (`solve_fields_moment_implicit!`), a $3\times3$ system:
+
+- transverse Ampère's law at the stage, $c\,\nabla\times\mathbf{B}^m = \mathbf{J}^m$ (transverse part), with $\mathbf{B}^m = \mathbf{B}^n - \tfrac{\Delta t}{2}\nabla\times\mathbf{E}^m$ and $\mathbf{J}^m = \mathbf{J}_i^m - \mathbf{E}^m\times\hat{b} - \Gamma_e^m\hat{b}$;
+- quasineutrality at $t^{n+1}$, with $\mathbf{B}^{n+1} = \mathbf{B}^n - \Delta t\,\nabla\times\mathbf{E}^m$ and the electron step;
+- at $\mathbf{k} = 0$, $\mathbf{J}^m = 0$.
+
+The ion response is linearised around the background density ($\mathbf{J}_i^m = \mathbf{J}^a + n_0\tfrac{\Delta t}{2}\mathbf{E}^m$, $n_i^{n+1} = n^a - \tfrac{\Delta t}{2}\nabla\cdot(\mathbf{J}^a + n_0\Delta t\,\mathbf{E}^m)$). A kinetic corrector replaces that model by the moments of a trial push and keeps the difference as a fixed defect. The electron fluid is linear and is treated exactly.
+
+Each species is a charge and mass plus an equation-of-motion model: kinetic (`Species`) or cold fluid with Lorentz or drift closure (`ColdFluid`). Every model provides the same building blocks (field-free half step, kick by the stage field, moments, and its linear stage response per Fourier mode), and `step_charge_form!` couples any set of them to this field solve; the cold ions are the Lorentz fluid with $q = m = 1$. Faraday's law holds by construction, quasineutrality up to the corrector error. The 1D version of commit `8478822` did the opposite: it reset $B_z^{n+1}$ from quasineutrality after the step and took $B_z^m$ from quasineutrality at the stage instead of the Faraday midpoint.
+
+For cold ions and $\mathbf{k}\perp\hat{b}$ the model gives
 
 $$\omega^2 = \frac{c k^2 (1 + w\mu)}{1 + w\mu + w\mu c k^2},$$
 
-which is a root of the KineticDR matrix above to $\sigma_{\min}/\sigma_{\max} < 2\times10^{-11}$ (24 cases, β ∈ {0.05, 0.5}, μ ∈ {0.01, 1/1836}, w ∈ {1, 0.5}). It converges at second order (unit tests).
+which is a root of the KineticDR matrix above to $\sigma_{\min}/\sigma_{\max} < 2\times10^{-11}$ (24 cases, β ∈ {0.05, 0.5}, μ ∈ {0.01, 1/1836}, w ∈ {1, 0.5}). The eigenfrequencies of one cold step converge to it at second order (unit tests).
 
-All runs below use $\mu = 0.01$ ($\omega_{LH} = 10\,\Omega_i$, $\Omega_e = 100\,\Omega_i$) and seed the ion density, starting from a quasineutral $B_z$.
+All runs below use $\mu = 0.01$ ($\omega_{LH} = 10\,\Omega_i$, $\Omega_e = 100\,\Omega_i$) and seed the ion density, starting quasineutral ($B_z$ in balance with the ions, $\delta N_e = \delta B_z$).
 
 ```julia; echo=false, results="hidden", label="sim-pol-cold"
 β_pc = 0.05; μ_pc = 0.01; dt_pc = 0.002; Tmax_pc = 200.0
@@ -839,7 +845,7 @@ The table gives the relative frequency error of the simulated spectral peaks aga
 
 ```julia; echo=false, results="hidden", label="sim-pol-kin"
 β_pk = [0.05, 0.5]; μ_pk = 0.01; dt_pk = 0.01; Tmax_pk = 100.0
-diags_pk = [run_sim(β, μ_pk, dt_pk, Tmax_pk, grid_perp_kin; stepper=stepMidpointQN!,
+diags_pk = [run_sim(β, μ_pk, dt_pk, Tmax_pk, grid_perp_kin; stepper=stepQN!,
                     solver=bslLD.EMSolverDKPolDensity(β, μ_pk), T=T_kin, seed_field=:n) for β in β_pk]
 ```
 
@@ -859,20 +865,248 @@ end
 fig
 ```
 
-```julia; echo=false, label="fig-pol-diag", fig_cap="Constraint errors per step. Rate form (DKNoPol, cold): quasineutrality residual max|δBz − δn|. Charge form (DKPolDensity): Faraday residual ‖Bz^{n+1}−Bz^n+dt·∂ₓEy^m‖∞, i.e. the predictor–corrector error; quasineutrality holds to round-off."
+```julia; echo=false, label="fig-pol-diag", fig_cap="Constraint errors per step, relative to the initial density seed. Rate form (DKNoPol, cold): quasineutrality residual max|δBz − δn|. Charge form (DKPolDensity): quasineutrality residual of the electron fluid, max|δN_e(quasineutral) − δN_e| (the corrector error), and the Faraday residual ‖Bz^{n+1}−Bz^n+dt·∂ₓEy^m‖∞ (exact by construction)."
 
 fig = Figure(size=(1000, 400))
 ax = Axis(fig[1,1], xlabel="t / Ωᵢ⁻¹", ylabel="residual / max|δn(0)|", yscale=log10, title="Constraint errors")
 qn_res(d) = [maximum(abs.((B .- mean(B)) .- (n .- mean(n)))) for (B, n) in zip(d.Bz, d.ni)]
 δn0(d) = maximum(abs.(d.ni[1] .- mean(d.ni[1])))
-lines!(ax, diags_pc[1].t, qn_res(diags_pc[1]) ./ δn0(diags_pc[1]); color=WONG[2], label="DKNoPol cold: quasineutrality")
-lines!(ax, diags_pc[3].t[2:end], faraday_residuals(diags_pc[3], dt_pc, grid_pc) ./ δn0(diags_pc[3]); color=WONG[6], label="DKPolDensity cold: Faraday")
+floor_eps(x) = max.(x, 1e-17)
+lines!(ax, diags_pc[1].t, floor_eps(qn_res(diags_pc[1]) ./ δn0(diags_pc[1])); color=WONG[2], label="DKNoPol cold: quasineutrality")
+lines!(ax, diags_pc[3].t, floor_eps(diags_pc[3].qn ./ δn0(diags_pc[3])); color=WONG[6], label="DKPolDensity cold: quasineutrality")
 for (ci, (β, d)) in enumerate(zip(β_pk, diags_pk))
-    lines!(ax, d.t[2:end], faraday_residuals(d, dt_pk, grid_perp_kin) ./ δn0(d); color=WONG[6+ci], label="DKPolDensity kinetic β=$β: Faraday")
+    lines!(ax, d.t, floor_eps(d.qn ./ δn0(d)); color=WONG[6+ci], label="DKPolDensity kinetic β=$β: quasineutrality")
+    lines!(ax, d.t[2:end], floor_eps(faraday_residuals(d, dt_pk, grid_perp_kin) ./ δn0(d)); color=WONG[6+ci], linestyle=:dash, label="DKPolDensity kinetic β=$β: Faraday")
 end
 axislegend(ax; position=:rb)
 fig
 ```
+
+### Oblique propagation ($k_\parallel \neq 0$, cold ions)
+
+With $k_\parallel \neq 0$ the electrons are no longer frozen in: $\delta N_e$ changes through $\partial_\parallel\Gamma_e$, and $E_\parallel$, the parallel electron flow and the parallel ion current enter the stage solve. Kinetic ions cannot test this here (the 1D2v grid has no $v_\parallel$ for $\hat{b}\perp x_1$), so this section uses the cold-ion fluid on a 2D grid, $x_1 \perp \hat{b}$, $x_2 \parallel \hat{b}$ (`Bdir = 2`).
+
+The reference is the continuum dispersion relation of the model, $\mathsf{D}(\omega,\mathbf{k})\hat{\mathbf{E}} = 0$, with $\mathsf{D} = c\,i\,\mathbf{k}\times(\mathbf{k}\times\cdot)/\omega - \sigma$ and the conductivity $\sigma$ of cold magnetised ions, the cold electron fluid ($-\mathbf{E}\times\hat{b}$ and $\Gamma_e = E_\parallel/(i\omega\mu)$) and $\mathbf{J}_{\rm pol}$ above. At $w = 0$ its roots are roots of the KineticDR Darwin matrix (cold ions, cold `DriftKinetic` electrons), checked below. The scheme is compared through its one-step map: one `step_cold!` acting on the 9 Fourier amplitudes $(\delta n_i, \mathbf{u}_i, \mathbf{B}, \delta N_e, \Gamma_e)$ of a single mode. Its eigenvalues are $\lambda = e^{-i\omega\Delta t}$.
+
+```julia; echo=false, results="hidden", label="sim-pol-oblique"
+β_ob = 0.5; μ_ob = 0.01; kz_ob = 0.5; c_ob = 2/β_ob
+
+# One-step map of the charge-form step on the Fourier mode (k⊥, k∥); 2D grid, x₁ ⊥ b̂, x₂ ∥ b̂.
+function step_map(kp, kz, dt, solver; N=4, κ=0.0)
+    grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [2π/kp, 2π/kz, 1.0, 1.0], [N, N, 1, 1], 2, 1.0, 2)
+    ph = [kp*x + kz*z for (x, z) in Iterators.product(grid.xaxes...)]
+    z3() = bslLD.VectorField([bslLD.ScalarField(zeros(N, N)) for _ in 1:3])
+    state(fl, el, sol) = (fl.delta_n, fl.u..., sol.B..., el.delta_n, el.u[2])
+    amp(a) = sum(a .* exp.(-im .* ph)) / length(a)
+    G = zeros(ComplexF64, 9, 9)
+    for j in 1:9
+        fl, el, sol = bslLD.ColdIonFluid(grid), cold_electrons(grid, μ_ob), bslLD.FieldSolution(z3(), z3())
+        state(fl, el, sol)[j].data .= cos.(ph)
+        bslLD.step_charge_form!((fl, el), sol, grid, solver, dt; damping_rate=κ)
+        G[:, j] .= [amp(v.data) for v in state(fl, el, sol)] ./ 0.5
+    end
+    return G
+end
+
+# Physical eigenvalues: |λ| > 1/2 (λ ≈ 0 are projected quasineutrality defects), 0.05 < Re ω < π/(2dt).
+function step_modes(kp, kz, dt; w=1.0)
+    λ = eigvals(step_map(kp, kz, dt, bslLD.EMSolverDKPolDensity(β_ob, μ_ob; w)))
+    ω = im .* log.(λ) ./ dt
+    sel = @. abs(λ) > 0.5 && 0.05 < real(ω) < π/(2dt)
+    return sort(collect(zip(real.(ω[sel]), abs.(λ[sel]))))
+end
+
+# Continuum D(ω)·E in the frame (a, b, ∥), k = (k⊥, 0, k∥), and its roots by Newton from ω.
+function D_model(ω, kp, kz; w=1.0)
+    κ = [kp, 0.0, kz]; K = [0 -κ[3] κ[2]; κ[3] 0 -κ[1]; -κ[2] κ[1] 0]
+    R = ComplexF64[0 1 0; -1 0 0; 0 0 0]                     # R u = u × b̂
+    σ = inv(-im*ω*I(3) - R) - R + Diagonal([0, 0, im/(ω*μ_ob)]) - im*ω*w*μ_ob*κ*[kp, 0.0, 0.0]'/sum(abs2, κ)
+    return c_ob*im*K*K/ω - σ
+end
+function model_root(ω, kp, kz; w=1.0)
+    f(z) = det(D_model(z, kp, kz; w))
+    for _ in 1:60
+        δ = 1e-7abs(ω); Δ = f(ω) / ((f(ω + δ) - f(ω - δ)) / 2δ); ω -= Δ
+        abs(Δ) < 1e-13abs(ω) && break
+    end
+    return real(ω)
+end
+
+kps_ob = 0.25:0.25:4.0; dt_ob = 0.01
+modes_ob = Dict(w => [(kp, ω, model_root(complex(ω), kp, kz_ob; w)) for kp in kps_ob for (ω, _) in step_modes(kp, kz_ob, dt_ob; w)]
+                for w in (1.0, 0.0))
+
+# Convergence and amplitude error of the two branches at k = (2, 0.5)
+dts_ob = [0.04, 0.02, 0.01, 0.005]
+conv_ob = [(dt, step_modes(2.0, kz_ob, dt)) for dt in dts_ob]
+
+# KineticDR check of the continuum reference at w = 0
+kdr_ob = KDR.Model((KDR.Species(response = KDR.Cold()),
+                    KDR.Species(q = -1, m = μ_ob, T = 1e-10, response = KDR.DriftKinetic(polarization = false))),
+                   KDR.Darwin(beta = β_ob))
+kdr_sv = maximum(((sv = svdvals(KDR.dispersion_matrix(kdr_ob, r, KDR.Wavevector(kx = kp, ky = 0.0, kz = kz_ob))));
+                  sv[end] / sv[1]) for (kp, _, r) in modes_ob[0.0])
+
+# 2D random-seed run: quasineutrality residual over time
+function oblique_run(dt, Tmax; N=32)
+    grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [8π, 16π, 1.0, 1.0], [N, N, 1, 1], 2, 1.0, 2)
+    solver = bslLD.EMSolverDKPolDensity(β_ob, μ_ob)
+    Random.seed!(3)
+    fl, el = bslLD.ColdIonFluid(grid), cold_electrons(grid, μ_ob)
+    z3() = bslLD.VectorField([bslLD.ScalarField(zeros(N, N)) for _ in 1:3])
+    sol = bslLD.FieldSolution(z3(), z3())
+    fl.delta_n.data .= 1e-6 .* randn(N, N); fl.delta_n.data .-= mean(fl.delta_n.data)
+    quasineutral_start!(sol, fl, el, grid, solver)
+    t, qn, amp = Float64[], Float64[], Float64[]
+    for s in 1:round(Int, Tmax/dt)
+        bslLD.step_charge_form!((fl, el), sol, grid, solver, dt)
+        push!(t, s*dt); push!(qn, bslLD.quasineutrality_residual((fl, el), sol.B, grid, solver)); push!(amp, maximum(abs, fl.delta_n.data))
+    end
+    return t, qn, amp
+end
+run_ob = oblique_run(0.01, 50.0)
+
+# Stage shift θ = 1/2 + κ dt at k = (2, 0.5): defect eigenvalue and physical frequencies, damping
+function shift_modes(κ, dt)
+    λ = eigvals(step_map(2.0, kz_ob, dt, bslLD.EMSolverDKPolDensity(β_ob, μ_ob); κ))
+    ω = im .* log.(λ) ./ dt
+    phys = sort([o for (o, l) in zip(ω, λ) if abs(l) > 0.5 && 0.05 < real(o) < π/(2dt)], by=real)
+    return λ[argmin(abs.(λ .+ 1))], phys
+end
+shift_ob = [(κ, dt, shift_modes(κ, dt)...) for κ in (0.0, 1.0) for dt in (0.02, 0.01)]
+```
+
+```julia; echo=false, label="fig-pol-oblique", fig_cap="Cold ions, k∥ = 0.5, β = 0.5, μ = 0.01: eigenfrequencies of one step (dt = 0.01, markers) and roots of the continuum dispersion relation of the model (lines), for w = 1 and w = 0. Dashed: ω_LH = 10 Ωᵢ."
+
+fig = Figure(size=(1000, 420))
+for (ci, w) in enumerate((1.0, 0.0))
+    ax = Axis(fig[1, ci], xlabel="k⊥ ρᵢ", ylabel="ω/Ωᵢ", title="DKPolDensity, w = $w, k∥ρᵢ = $kz_ob", limits=((0, 4.1), (0, 12)))
+    m = modes_ob[w]
+    for branch in (filter(x -> x[3] < 1, m), filter(x -> x[3] >= 1, m))
+        lines!(ax, first.(branch), last.(branch); color=:gray)
+    end
+    scatter!(ax, first.(m), getindex.(m, 2); color=WONG[6], label="one-step map")
+    hlines!(ax, [10.0]; color=:gray, linestyle=:dash)
+    axislegend(ax; position=:lt)
+end
+fig
+```
+
+```julia; echo=false, results="markup", label="tab-pol-oblique"
+println("k = (2, 0.5), w = 1: relative frequency error and |λ| − 1 of the two branches")
+for (dt, ms) in conv_ob
+    println("  dt = $dt:  ", join(["ω = $(round(ω, sigdigits=6)), err = $(round(abs(ω/model_root(complex(ω), 2.0, kz_ob) - 1), sigdigits=3)), |λ|−1 = $(round(l - 1, sigdigits=3))" for (ω, l) in ms], ";  "))
+end
+println("all k⊥, dt = $dt_ob: max relative error w = 1: ", round(maximum(abs(ω/r - 1) for (_, ω, r) in modes_ob[1.0]), sigdigits=3),
+        ",  w = 0: ", round(maximum(abs(ω/r - 1) for (_, ω, r) in modes_ob[0.0]), sigdigits=3))
+println("w = 0 continuum roots vs KineticDR Darwin matrix: max σmin/σmax = ", round(kdr_sv, sigdigits=2))
+println("2D random seed, dt = 0.01, t ≤ 50: max quasineutrality residual ", round(maximum(run_ob[2]), sigdigits=2),
+        " (δn ~ 1e-6), max|δn| ", round(maximum(run_ob[3]), sigdigits=3))
+println("stage shift θ = 1/2 + κ dt, k = (2, 0.5):")
+for (κ, dt, λd, phys) in shift_ob
+    θ = 0.5 + κ*dt
+    println("  κ = $κ, dt = $dt: defect λ = ", round(real(λd), digits=5), " (−(1−θ)/θ = ", round(-(1 - θ)/θ, digits=5), ");  ",
+            join(["ω = $(round(real(o), sigdigits=6)), err = $(round(abs(real(o)/model_root(complex(real(o)), 2.0, kz_ob) - 1), sigdigits=3)), γ = $(round(-imag(o), sigdigits=3))" for o in phys], ";  "))
+end
+```
+
+Besides the physical branches, the one-step map has three kinds of eigenvalues:
+
+- $\lambda \approx 0$: quasineutrality defects, projected out in one step.
+- $\lambda = 1$, a Jordan block for $k_\parallel \neq 0$. It is physical: a neutral parallel flow ($u_{i\parallel} = \Gamma_e$) streams ballistically in the cold model and makes $\delta n_i = \delta N_e$ grow linearly.
+- $\lambda = -1$ ($\omega = \pi/\Delta t$, undamped): data that violate parallel Ampère's law ($\Gamma_e$ inconsistent with $\mathbf{B}$, $J_{i\parallel}$). In the continuum $E_\parallel$ is algebraic and has no root there. Ampère's law is imposed only at the stage, so such a defect alternates sign forever instead of being projected out. A density-seeded quasineutral start ($\mathbf{u}_i = \mathbf{B} = \Gamma_e = 0$) has no content in it (round-off), so the runs here do not excite it; kinetic moment defects would.
+
+The physical branches have $|\lambda| - 1 = \mathcal{O}(\Delta t^4)$ (table): one corrector does not give the exactly neutral implicit-midpoint map. The resulting growth or damping rate is $\mathcal{O}(\Delta t^3)$, $\approx 5\times10^{-8}\,\Omega_i$ at $\Delta t = 0.02$.
+
+`damping_rate` $= \kappa$ moves the stage to $\theta = \tfrac12 + \kappa\Delta t$: Ampère's law, $\mathbf{B}^\theta = \mathbf{B}^n - \theta\Delta t\,\nabla\times\mathbf{E}^m$ and the stage currents at $t^n + \theta\Delta t$, quasineutrality still at $t^{n+1}$. Since $\theta - \tfrac12 = \mathcal{O}(\Delta t)$, the order stays two. The defect mode then decays with $\lambda = -(1-\theta)/\theta \approx -(1 - 4\kappa\Delta t)$, i.e. at rate $\approx 4\kappa$ independent of $\Delta t$ (exactly at $k_\parallel = 0$; for $k_\parallel \neq 0$ only the transverse part of Ampère's law sits at the stage and the rate is slightly lower). Resolved branches are damped at a rate $\lesssim \kappa(\omega\Delta t)^2$, which scales as $\Delta t^2$ (table, last lines: $\gamma = 0.006$ for $\omega = 5.2$ and $6\times10^{-6}$ for $\omega = 0.68$ at $\kappa = 1$, $\Delta t = 0.02$), while the defect decays at $\approx 3.7$ there.
+
+### Convergence in $\Delta t$
+
+Two references:
+
+- **Kinetic ions**, $\mathbf{k}\perp\hat{b}$ (grid of the kinetic runs above, $32^3$, $\beta = 0.1$, $t = 10$, random density seed without the mean and the Nyquist mode). Self-convergence: the reference is the Richardson extrapolation $(4u_{\Delta t} - u_{2\Delta t})/3$ of the two smallest $\Delta t$ at $\kappa = 0$.
+- **Cold ions, oblique** $\mathbf{k} = (2, 0.5)$: frequencies of the one-step map against the roots of the continuum dispersion relation (independent reference).
+
+```julia; echo=false, results="hidden", label="sim-pol-conv"
+β_cv2 = 0.1; μ_cv2 = 0.01; Tmax_cv2 = 10.0
+grid_cv2 = bslLD.Grid([0.0, -6.0, -6.0], [25π, 6.0, 6.0], [32, 32, 32], 1, 1.0, 3)
+dts_cv2 = [0.0025, 0.005, 0.01, 0.02, 0.04]; κs_cv2 = (0.0, 1.0)
+
+# Kinetic charge-form run to t = Tmax_cv2: (δn_i, δB_z) at the end, max quasineutrality residual.
+function kinetic_qn_run(dt, κ; seed=42)
+    Nx = length(grid_cv2.xaxes[1])
+    Random.seed!(seed)
+    δh = fft(1e-6 .* randn(Nx)); δh[1] = 0; δh[Nx÷2 + 1] = 0; δn = real(ifft(δh))
+    ions = maxwellian_ions(grid_cv2, 1.0; δn)
+    el = cold_electrons(grid_cv2, μ_cv2)
+    z3() = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)) for _ in 1:3])
+    sol = bslLD.FieldSolution(z3(), z3())
+    solver = bslLD.EMSolverDKPolDensity(β_cv2, μ_cv2)
+    quasineutral_start!(sol, ions, el, grid_cv2, solver)
+    simTime = bslLD.SimulationTime(dt, Tmax_cv2)
+    qn = 0.0
+    while bslLD.continue_advection(simTime, false)
+        stepQN!((ions, el), sol, grid_cv2, simTime, solver; damping_rate=κ)
+        bslLD.advance!(simTime, bslLD.gyro_frequency(ions, grid_cv2))
+        qn = max(qn, bslLD.quasineutrality_residual((ions, el), sol.B, grid_cv2, solver; phase=simTime.phase))
+    end
+    n = bslLD.compute_density(ions, grid_cv2).data
+    return (n = n .- mean(n), Bz = sol.B[3].data .- mean(sol.B[3].data), qn = qn)
+end
+runs_cv2 = Dict((dt, κ) => kinetic_qn_run(dt, κ) for dt in dts_cv2 for κ in κs_cv2)
+richardson(f) = (4 .* getfield(runs_cv2[(dts_cv2[1], 0.0)], f) .- getfield(runs_cv2[(dts_cv2[2], 0.0)], f)) ./ 3
+rel_err(f, dt, κ) = (r = richardson(f); maximum(abs, getfield(runs_cv2[(dt, κ)], f) .- r) / maximum(abs, r))
+
+# Cold oblique: frequency error of both branches vs the continuum roots
+cold_cv2 = Dict(κ => [(dt, [abs(real(o) / model_root(complex(real(o)), 2.0, kz_ob) - 1) for o in shift_modes(κ, dt)[2]])
+                      for dt in dts_cv2] for κ in κs_cv2)
+```
+
+```julia; echo=false, label="fig-pol-conv", fig_cap="Convergence of the charge-form X–C–X step. Left, centre: kinetic ions, k ⊥ b̂, relative max-norm error of δn_i and δB_z at t = 10 against the Richardson reference. Right: cold ions, k = (2, 0.5), relative frequency error of the two branches against the continuum roots. Solid κ = 0, dashed κ = 1 (θ = 1/2 + κ dt; in the cold panel the two coincide). Grey: O(Δt²)."
+
+fig = Figure(size=(1100, 380))
+guide!(ax, e) = lines!(ax, dts_cv2, 0.4e .* (dts_cv2 ./ dts_cv2[3]).^2; color=:gray, linestyle=:dot, label="O(Δt²)")
+dt_ticks = (dts_cv2, string.(dts_cv2))
+for (ci, (f, name)) in enumerate(((:n, "δnᵢ"), (:Bz, "δB_z")))
+    ax = Axis(fig[1, ci], xlabel="Ωᵢ Δt", ylabel="relative error", xscale=log10, yscale=log10, xticks=dt_ticks, title="kinetic ions: $name")
+    for (κ, ls) in zip(κs_cv2, (:solid, :dash))
+        e = [rel_err(f, dt, κ) for dt in dts_cv2[2:end]]
+        scatterlines!(ax, dts_cv2[2:end], e; color=WONG[6], linestyle=ls, label="κ = $κ")
+    end
+    guide!(ax, rel_err(f, dts_cv2[3], 0.0))
+    axislegend(ax; position=:lt)
+end
+ax = Axis(fig[1, 3], xlabel="Ωᵢ Δt", ylabel="relative frequency error", xscale=log10, yscale=log10, xticks=dt_ticks, title="cold ions, k = (2, 0.5)")
+for (κ, ls) in zip(κs_cv2, (:solid, :dash)), (b, col) in zip(1:2, (WONG[4], WONG[7]))
+    scatterlines!(ax, dts_cv2, [e[b] for (_, e) in cold_cv2[κ]]; color=col, linestyle=ls, label="branch $b, κ = $κ")
+end
+guide!(ax, cold_cv2[0.0][3][2][2])
+axislegend(ax; position=:rb)
+fig
+```
+
+```julia; echo=false, results="markup", label="tab-pol-conv"
+order(e) = round.(log2.(e[2:end] ./ e[1:end-1]), digits=2)
+for κ in κs_cv2, f in (:n, :Bz)
+    u = [getfield(runs_cv2[(dt, κ)], f) for dt in dts_cv2]
+    d = [maximum(abs, u[i+1] .- u[i]) for i in 1:length(u)-1]
+    println(rpad("kinetic $f, κ = $κ", 22), "observed order from successive differences: ", order(d))
+end
+for κ in κs_cv2, b in 1:2
+    println(rpad("cold branch $b, κ = $κ", 22), "observed order: ", order([e[b] for (_, e) in cold_cv2[κ]]))
+end
+println("kinetic, κ = 1 vs κ = 0 Richardson references: ",
+        round(maximum(abs, (4 .* runs_cv2[(dts_cv2[1], 1.0)].Bz .- runs_cv2[(dts_cv2[2], 1.0)].Bz) ./ 3 .- richardson(:Bz)) / maximum(abs, richardson(:Bz)), sigdigits=2), " (relative, δB_z)")
+println("kinetic quasineutrality residual (max over t ≤ 10, δn ~ 1e-6): ",
+        join(["Δt = $dt: $(round(runs_cv2[(dt, 0.0)].qn, sigdigits=2))" for dt in dts_cv2], ",  "))
+```
+
+All runs converge at second order, with and without the stage shift. The kinetic quasineutrality residual is the one-step corrector defect: at round-off for $\Delta t \le 0.01$ and $\mathcal{O}(\Delta t^3)$ above (×8 per doubling); it does not accumulate. The $E_\parallel$ subsystem ($u_{e\parallel}$, $B_y$, $E_z$) stays exactly zero for $\mathbf{k}\perp\hat{b}$: the 1D2v ions carry no $J_\parallel$, so the kinetic defects cannot excite the parallel-Ampère defect mode here.
+
+Two observations from separate runs (scripts not part of this file):
+
+- With a random seed that contains the Nyquist mode $k = \pi/\Delta x$, $\delta n_i$ appears to converge at order $\approx 1.3$. Every resolved mode converges at second order; only the Nyquist mode converges at first order and dominates the max-norm. For a real field at the Nyquist wavenumber, $ik\hat{u}$ has no real counterpart, so the spectral derivatives and the phase-shift advection treat it inconsistently. This is a property of the spectral discretisation, not of the solver; the seed above removes it.
+- Against the 1D step of commit `8478822` (kinetic ions, same seed and grid), both schemes converge to the same limit (Richardson references agree to $6\times10^{-8}$ relative in $\delta B_z$). The old error constant is about $3\times$ smaller (cold ions: $2\times$), from $B_z^m$ taken from quasineutrality at the stage instead of the Faraday midpoint.
 
 ### Time-step limit
 
@@ -884,23 +1118,23 @@ function cold_mode_growth(step, dt; k=3.0, β=0.05, μ=0.01, Tmax=20.0, Nx=32, m
     grid = bslLD.Grid([0.0, -1.0, -1.0], [2π*m/k, 1.0, 1.0], [Nx, 1, 1], 1, 1.0, 3)
     solver = bslLD.EMSolverDKPolDensity(β, μ)
     fluid = bslLD.ColdIonFluid(grid); fluid.delta_n.data .= 1e-6 .* cos.(k .* collect(grid.xaxes[1]))
+    el = cold_electrons(grid, μ)
     z() = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)) for _ in 1:3])
     sol = bslLD.FieldSolution(z(), z())
-    quasineutral_start!(sol, fluid, grid, solver)
+    quasineutral_start!(sol, fluid, el, grid, solver)
     amax = 0.0
     for _ in 1:round(Int, Tmax/dt)
-        step(fluid, sol, grid, solver, dt)
+        step(fluid, el, sol, grid, solver, dt)
         amax = max(amax, maximum(abs.(fluid.delta_n.data)))
         isfinite(amax) && amax < 1 || return Inf
     end
     return amax / 1e-6
 end
-lagged(fluid, sol, grid, solver, dt) = invoke(bslLD.step_cold!,
-    Tuple{bslLD.ColdIonFluid, bslLD.FieldSolution, bslLD.Grid, bslLD.AbstractFieldSolver, Real},
-    fluid, sol, grid, solver, dt)
+lagged(fluid, _, sol, grid, solver, dt) = bslLD.step_cold!(fluid, sol, grid, solver, dt)
+moment_implicit(fluid, el, sol, grid, solver, dt) = bslLD.step_charge_form!((fluid, el), sol, grid, solver, dt)
 dts_pol = [0.01, 0.02, 0.05, 0.08, 0.1, 0.12, 0.15, 0.2, 0.3]
 growth = Dict(name => [cold_mode_growth(st, dt) for dt in dts_pol]
-              for (name, st) in (("lagged", lagged), ("moment-implicit", bslLD.step_cold!)))
+              for (name, st) in (("lagged", lagged), ("moment-implicit", moment_implicit)))
 
 fig = Figure(size=(700, 400))
 ax = Axis(fig[1,1], xlabel="Ωᵢ dt", ylabel="max|δn| / δn(0)", xscale=log10, yscale=log10,
@@ -927,4 +1161,4 @@ println("moment-implicit: bounded (max|δn|/δn(0) ≤ ", round(maximum(filter(i
         ") up to Ωᵢdt = ", maximum(dts_pol[isfinite.(growth["moment-implicit"])]))
 ```
 
-The lagged form is not conditionally stable: its growth rate is $\approx\omega^2\Delta t/4$ at every $\Delta t$, a forward-Euler-type instability of the explicit ion response, so it is useless even below $1/\omega_{cap}$. The moment-implicit step stays bounded well beyond $\Omega_i\Delta t = 1/\omega_{LH}$, up to about $2/\omega_{LH}$. Beyond that the explicit defect correction (and the split gyration) no longer converge. The scheme is the implicit midpoint rule for the linear part, so unresolved $\omega_{LH}$ oscillations are not damped.
+The lagged form is not conditionally stable: its growth rate is $\approx\omega^2\Delta t/4$ at every $\Delta t$, a forward-Euler-type instability of the explicit ion response, so it is useless even below $1/\omega_{cap}$. The moment-implicit step stays bounded at every tested $\Delta t$, up to $\Omega_i\Delta t = 0.3 = 3/\omega_{LH}$. (The 1D step of commit `8478822`, with $B_z$ reset from quasineutrality, was bounded only up to about $2/\omega_{LH}$.) Larger steps were not tested. The scheme is the implicit midpoint rule for the linear part, so unresolved $\omega_{LH}$ oscillations are not damped.

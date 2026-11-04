@@ -563,13 +563,14 @@ end
 # ── EMSolverDKPolDensity ──────────────────────────────────────────────────────
 #
 # Darwin, kinetic ions, drift-kinetic electrons with the polarisation density only (weight w).
-# Charge form: quasineutrality is imposed at every time level, not in rate form (∇·J = 0).
-# 1D with k ⊥ b̂ (Bdir = 3) only. There the electron guiding-centre density is frozen in,
-# δn_e = δB_z, and per Fourier mode (c = 2/β_i, d_e² = cμ):
-#   (1 + w d_e² k²) B̂_z = n̂_i + i k w μ Ĵ_iy      quasineutrality
-#   Ê_x = −c i k B̂_z − Ĵ_iy                         Ampère (y)
-#   Ê_y = −∂_t Â_y,  B̂_z = i k Â_y                   Faraday
-# The k = 0 mode keeps the DKNoPol balance E = (J × b̂) (mean B_z unchanged).
+# Charge form: quasineutrality replaces the longitudinal part of Ampère's law and is imposed
+# at the new time level, not in rate form (∇·J = 0). The general solve over explicit species
+# (charge_form.jl) uses, with c = 2/β_i and ⊥ Ampère, for the drift species d (electrons),
+#   Σ_s q_s n_s = w m_d ∇⊥·(N_d E⊥) = (w m_d / q_d) [c ΔB_∥ + b̂·∇×J_other⊥].
+#
+# 1D with k ⊥ b̂ (Bdir = 3) only: `quasineutral_B!` and the lagged `solve_fields!`. There the
+# guiding-centre density is frozen in, δN_e = δB_z, and quasineutrality reads
+#   (1 + w d_e² k²) B̂_z = n̂_i + i k w μ Ĵ_iy,   d_e² = cμ.
 
 struct EMSolverDKPolDensity{T<:AbstractFloat} <: AbstractFieldSolver
     beta_i::T
@@ -584,7 +585,7 @@ end
 
 function _check_dk_pol_density(grid::Grid)
     spatial_ndims(grid) == 1 && grid.Bdir == 3 || throw(
-        ArgumentError("EMSolverDKPolDensity supports 1D grids with k ⊥ b̂ (Bdir = 3) only"),
+        ArgumentError("quasineutral_B! and the lagged solve_fields! of EMSolverDKPolDensity support 1D grids with k ⊥ b̂ (Bdir = 3) only"),
     )
     return nothing
 end
@@ -647,74 +648,3 @@ function solve_fields!(
     return _write_E_dk_pol_density!(sol, Exh, Eyh, sw)
 end
 
-"""
-    solve_fields_moment_implicit!(sol, moments, grid, solver::EMSolverDKPolDensity, dt;
-                                  B_n = sol.B, n0 = 1, corrector = nothing)
-
-Stage field E^m of an X–C–X step in charge form. `moments` = (n^a, J^a) after the first
-X(dt/2); the C substep kicks the ions by dt·E^m at frozen gyro-phase. The ion response is
-linearised around the uniform density `n0` (times q/√m) and solved per mode together with
-quasineutrality at the stage and at t^{n+1}:
-
-    J^m = J^a + n0 (dt/2) E^m,   n^{n+1} = n^a − (dt/2) ∂_x(J_x^a + n0 dt E_x^m),
-    J_y^{n+1} = J_y^a + n0 dt E_y^m,   E_y^m = −(B_z^{n+1} − B_z^n)/(dt ∂_x).
-
-`corrector = (E, J_b, n_1, J_1)` holds the kinetic moments obtained with a predicted field `E`:
-`J_b` after the C push (stage phase), `n_1`, `J_1` after the second X(dt/2). Their difference
-to the linear model at `E` is kept as a fixed defect. Writes E^m to `sol.Enew` and the
-predicted B_z^{n+1} to `sol.B`.
-"""
-function solve_fields_moment_implicit!(
-    sol::FieldSolution,
-    moments::Moments,
-    grid::Grid,
-    solver::EMSolverDKPolDensity,
-    dt::Real;
-    B_n::VectorField = sol.B,
-    n0::Real = 1,
-    corrector = nothing,
-)
-    moments.J !== nothing ||
-        throw(ArgumentError("moments.J is required for EMSolverDKPolDensity"))
-    _check_dk_pol_density(grid)
-    DT = eltype(sol.B[3].data)
-    sw = spectral_workspace(sol.B[3].data, grid)
-    k = sw.k[1]
-    a, c, _dt = DT(solver.w * solver.mu), DT(2 / solver.beta_i), DT(dt)
-    h = DT(n0 * dt / 2)
-    nh, Jxh, Jyh = _fft_c(moments.rho.data, sw), _fft_c(moments.J[1].data, sw), _fft_c(moments.J[2].data, sw)
-    Bnh = _fft_c(B_n[3].data, sw)
-
-    # Defects of the linear model: stage J_y, n^{n+1}, J_y^{n+1}
-    dJm, dn, dJ1 = zero(nh), zero(nh), zero(nh)
-    if corrector !== nothing
-        Xp, Yp = _fft_c(corrector.E[1].data, sw), _fft_c(corrector.E[2].data, sw)
-        Jybh = _fft_c(corrector.J_b[2].data, sw)
-        n1h, Jy1h = _fft_c(corrector.n_1.data, sw), _fft_c(corrector.J_1[2].data, sw)
-        @. dJm = (Jyh + Jybh) / 2 - (Jyh + h * Yp)
-        @. dn = n1h - (nh - (_dt / 2) * im * k * Jxh - im * k * h * _dt * Xp)
-        @. dJ1 = Jy1h - (Jyh + 2h * Yp)
-    end
-
-    g = @. 1 + a * c * k^2
-    P = @. Jyh + dJm
-    Q = @. nh - (_dt / 2) * im * k * Jxh + dn
-    R = @. Jyh + dJ1
-    X0 = @. -c * im * k * (nh + im * k * a * P) / g - P
-    Xy = @. c * k^2 * a * h / g - h
-    Yh = @. ifelse(
-        iszero(k),
-        Jxh + h * (-Jyh - h * Jxh) / (1 + h^2),
-        (im * (Q + im * k * a * R - g * Bnh) / k + h * _dt * X0) / (_dt * g + 2a * h - h * _dt * Xy),
-    )
-    Xh = @. ifelse(iszero(k), (-Jyh - h * Jxh) / (1 + h^2), X0 + Xy * Yh)
-    B1h = @. ifelse(
-        iszero(k),
-        Bnh,
-        (Q - im * k * h * _dt * Xh + im * k * a * R + 2im * k * a * h * Yh) / g,
-    )
-
-    sol.B === B_n || copyto!(sol.B, B_n)
-    ifft_spatial!(sol.B[3].data, B1h, sw)
-    return _write_E_dk_pol_density!(sol, Xh, Yh, sw)
-end

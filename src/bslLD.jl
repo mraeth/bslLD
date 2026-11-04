@@ -123,6 +123,7 @@ include("maxwell/solvers_electrostatic.jl")
 include("maxwell/solvers_vacuum.jl")
 include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
+include("maxwell/charge_form.jl")
 include("kinetics/exbBracketCart.jl")
 include("sources.jl")
 
