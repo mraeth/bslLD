@@ -155,7 +155,7 @@ The Darwin model retains electromagnetic effects while filtering out light waves
 | `EMSolverDKNoPol(β_i, μ)` | Darwin-Kinetic **without** polarisation drift. Fully spectral $3\times3$ Cramer solve per Fourier mode; simultaneous Faraday update. | `rho`, `J`, `Pi_diff` |
 | `EMSolverDKPolDensity(β_i, μ; w = 1)` | Drift-kinetic electrons with the polarisation **density** only (weight $w$), in charge form: quasineutrality $\sum_s q_s n_s = w\mu[(2/\beta_i)\Delta B_\parallel + \hat b\cdot\nabla\times\mathbf{J}_{\perp}]\,/\,q_e$ replaces $\nabla\cdot\mathbf{J} = 0$. Works on explicit species (see below), any geometry: `step_charge_form!(species, sol, grid, solver, dt; phase, damping_rate)` is one X–C–X step (stage field from a $3\times3$ solve per Fourier mode, `solve_fields_moment_implicit!`; $\theta = 1/2 + \kappa\,dt$ damps the parallel-Ampère defect mode at second order). `quasineutral_drift!` sets a quasineutral start, `quasineutrality_residual` checks it. 1D, $\mathbf{k}\perp\hat b$ only: `quasineutral_B!` and the lagged `solve_fields!`. | explicit species |
 
-**Species and equation-of-motion models.** A species is a charge $q$ and mass $m$ plus a model: kinetic (`Species`) or a linearised cold fluid `ColdFluid(grid, closure; q, m)` with closure `LorentzFluid()` (full cold fluid; `ColdIonFluid(grid)` = cold ions, $q = m = 1$) or `DriftFluid()` ($\mathbf{u}_\perp = \mathbf{E}\times\hat b$, parallel inertia; cold drift-kinetic electrons: `ColdFluid(grid, DriftFluid(); q = -1, m = μ)`). Every model provides `push_free!` (field-free half step), `push_field!` (kick), `moments_at` (charge density, current) and `stage_response` (linear response to the stage field per Fourier mode), so the charge-form step couples any set of them, e.g. `(ions, electrons)` with kinetic or cold-fluid ions.
+**Species and equation-of-motion models.** A species is a mass $m$ and charge $q$ plus a model, `Species(m, q, model)` or `Species(model; q, m)`. The model type carries the equations of motion and owns the whole state; methods dispatch on it (`Species{<:Any,<:Kinetic}`), and its fields are reachable from the species (`sp.dist`, `sp.delta_n`). Models: `Kinetic(dist)` (full orbit; `Species(m, q, dist)` wraps a distribution in it), and the linearised cold fluid `ColdFluid(grid, closure)` with closure `LorentzFluid()` (full cold fluid; `ColdIonFluid(grid)` = cold ions, $q = m = 1$) or `DriftFluid()` ($\mathbf{u}_\perp = \mathbf{E}\times\hat b$, parallel inertia; cold drift-kinetic electrons: `Species(ColdFluid(grid, DriftFluid()); q = -1, m = μ)`), and the linear drift-kinetic model `LinearDK(grid; T_e, Nv = 64, vmax = 6, method = Fourier())` ($\delta F(\mathbf x, v_\parallel)$ on its own 1V grid, $T_{e\perp} = 0$; electrons: `Species(LinearDK(grid; T_e); q = -1, m = μ)`). `LinearDK` streams with the kinetic `advectX!` along $\hat b$ (keyword `vdirs = (Bdir,)`: physical direction of each velocity axis, default `1:NV`) and kicks with `add_linear_dk_kick!` (sources.jl); with Fourier streaming its stage response is exact, with `Lagrange(W)` the corrector applies. Every model provides `push_free!(sp, grid, dt, half; phase, B)` (field-free half step; `B` = $\mathbf B^n$ or $\mathbf B^{n+1}$, used by `LinearDK`, whose streaming acts on $\delta f = \delta F - F_0\delta B_\parallel/b_0$), `push_field!` (kick), `moments_at` (charge density, current) and `stage_response(sp, grid, dt, θ; phase, B)` (linear response to the stage field per Fourier mode), so the charge-form step couples any set of them, e.g. `(ions, electrons)` with kinetic or cold-fluid ions. `response_class(sp)` selects the coupling: `Magnetised()` (⊥ current through $(q^2n/m)\mathbf{E}$; kinetic, Lorentz fluid) or `Drift()` ($E\times B$ current, carries the polarisation density; drift fluid, `LinearDK`).
 
 The rate-form solvers use `solve_fields!(sol, moments, grid, solver, dt)` (in-place, stores result in `sol.Enew`):
 
@@ -198,7 +198,7 @@ Diagnostic helpers: `bslLD.electromagnetic_energy(E, B; params)` and `bslLD.maxw
 |-------|--------------|-------------|-----------------|
 | Vlasov–Poisson (electrostatic) | 1D1v or 1D2v | `PoissonSolver` | `landau_damping`, `ibw` |
 | Ion Bernstein Waves | 1D2v + background $B_0$ | `PoissonSolver` (with gyration) | `ibw` |
-| Darwin hybrid-kinetic | 1D2v + background $B_0$ | `EMSolverDKPol` / `EMSolverDKNoPol` / `EMSolverDKPolDensity` | `em_cases`, `field_solver_tests.jmd` |
+| Darwin hybrid-kinetic | 1D2v + background $B_0$ | `EMSolverDKPol` / `EMSolverDKNoPol` / `EMSolverDKPolDensity` | `em_cases`, `field_solver_tests.jmd`, `electron_models.jmd` (electron models of the charge form: cold fluid → linear DK → nonlinear; roadmap) |
 | E×B drift verification | 1D2v + external $E$, $B$ | none (imposed fields) | `exb_test` |
 | Vacuum EM wave propagation | 1D or 2D | `EMSolverVacuum` | `solve_maxwell` |
 
@@ -216,6 +216,7 @@ bslLD/
 │   ├── kinetics/
 │   │   ├── distribution.jl            # DistributionGrid, compute_density/current/Pi
 │   │   ├── interpolation.jl           # arbitrary-order Lagrange weights (uniform grid)
+│   │   ├── species.jl                 # Species = (m, q, model); AbstractModel, DistributionModel, Kinetic
 │   │   ├── advectorCart.jl            # BSL advection (Cartesian, KernelAbstractions)
 │   │   └── advectorPolar.jl           # BSL advection (polar coordinates)
 │   ├── maxwell/
@@ -225,8 +226,9 @@ bslLD/
 │   │   ├── solvers_electrostatic.jl   # PoissonSolver, AdiabaticSolver
 │   │   ├── solvers_vacuum.jl          # EMSolverVacuum, VacuumMaxwellParams
 │   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol, EMSolverDKPolDensity
-│   │   ├── cold_plasma.jl             # ColdFluid species (Lorentz / drift closure) for linear EM benchmarks
-│   │   └── charge_form.jl             # species models ↔ charge-form solve, step_charge_form!
+│   │   ├── cold_plasma.jl             # ColdFluid model (Lorentz / drift closure) for linear EM benchmarks
+│   │   ├── charge_form.jl             # species models ↔ charge-form solve, step_charge_form!
+│   │   └── dk_electrons.jl            # LinearDK model (linear drift-kinetic electrons)
 │   └── execution.jl                   # use_cpu!, use_cuda!, backend switching
 ├── examples/                          # Jupyter notebooks (landau_damping, ibw, em_cases, …)
 └── test/                              # Unit tests

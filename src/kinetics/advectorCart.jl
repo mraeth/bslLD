@@ -23,7 +23,9 @@ backend_vector(values) = bslLD.backend_array(collect(values))
 @inline _cartesian_axis_sizes(grid::CartGrid) =
     (Tuple(length.(grid.xaxes)), Tuple(length.(grid.vaxes)))
 
-struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT}
+# `vdirs[d]` is the physical direction of velocity axis d (default d; a drift-kinetic 1V grid
+# has `vdirs = (Bdir,)`).
+struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT,VDT}
     grid::GT
     k::KT
     vaxes::VAT
@@ -36,9 +38,10 @@ struct XShiftContext{GT,KT,VAT,SXT,SVT,PT,VTT,EST,FT}
     vth::VTT
     electric_scale::EST
     vflip::FT  # which velocity components a mirror on this axis reverses
+    vdirs::VDT
 end
 
-struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
+struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST,VDT}
     grid::GT
     e_components::ET
     k::KT
@@ -49,6 +52,7 @@ struct VShiftContext{GT,ET,KT,SXT,SVT,PT,EST}
     dt::PT
     delta::PT
     electric_scale::EST
+    vdirs::VDT
 end
 
 Adapt.@adapt_structure XShiftContext
@@ -67,7 +71,7 @@ end
     xdisp = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, -ctx.electric_scale*ctx.phi)
     for dv = 1:length(ivs)
-        xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, dv]
+        xdisp += ctx.vaxes[dv][ivs[dv]] * rotation[ctx.dir, ctx.vdirs[dv]]
     end
     return xdisp
 end
@@ -80,8 +84,8 @@ end
 @inline function _v_displacement(ctx::VShiftContext, ixs)
     delta_v = zero(eltype(ctx.k))
     rotation = R(ctx.grid.Bdir, ctx.electric_scale*ctx.phi)
-    for field_dir = 1:length(ctx.e_components)
-        delta_v += ctx.e_components[field_dir][ixs...] * rotation[ctx.dir, field_dir]
+    for dv = 1:length(ctx.e_components)
+        delta_v += ctx.e_components[dv][ixs...] * rotation[ctx.vdirs[ctx.dir], ctx.vdirs[dv]]
     end
     return delta_v
 end
@@ -283,8 +287,8 @@ The mirror planes sit at the first and last grid node, `x[1]` and `x[end]`.
 Mirror
 
 # Velocity components reversed by a mirror on spatial axis `dir`.
-@inline _mirror_flip(Bdir::Int, dir::Int, ::Val{NV}) where {NV} =
-    ntuple(d -> dir == Bdir ? d == Bdir : d != Bdir, Val(NV))
+@inline _mirror_flip(Bdir::Int, dir::Int, ::Val{NV}, vdirs = ntuple(identity, Val(NV))) where {NV} =
+    ntuple(d -> dir == Bdir ? vdirs[d] == Bdir : vdirs[d] != Bdir, Val(NV))
 
 @inline function _flip_v(ctx, ivs::NTuple{NV,Int}) where {NV}
     return ntuple(d -> ctx.vflip[d] ? ctx.sizes_v[d] + 1 - ivs[d] : ivs[d], Val(NV))
@@ -811,7 +815,10 @@ end
 
 # --- Direction drivers ----------------------------------------------------
 
-function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, plan)
+_default_vdirs(grid::CartGrid) = ntuple(identity, length(grid.vaxes))
+
+function _x_context(sp::DistSpecies, grid::CartGrid, simTime::SimulationTime, dir, plan,
+                    vdirs = _default_vdirs(grid))
     DT = eltype(sp.dist.data)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     NV = length(grid.vaxes)
@@ -827,24 +834,26 @@ function _x_context(sp::Species, grid::CartGrid, simTime::SimulationTime, dir, p
         DT(grid.delta[dir]),
         DT(thermal_velocity(sp)),
         DT(electric_acceleration_scale(sp)),
-        _mirror_flip(grid.Bdir, dir, Val(NV)),
+        _mirror_flip(grid.Bdir, dir, Val(NV), vdirs),
+        vdirs,
     )
 end
 
 function _v_context(
-    sp::Species,
+    sp::DistSpecies,
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
     dir,
     plan,
+    vdirs = _default_vdirs(grid),
 )
     DT = eltype(sp.dist.data)
     NX = length(grid.xaxes)
     sizes_x, sizes_v = _cartesian_axis_sizes(grid)
     return VShiftContext(
         grid,
-        ntuple(i -> e[i].data, Val(length(grid.vaxes))),
+        ntuple(i -> e[vdirs[i]].data, Val(length(grid.vaxes))),
         plan.kv[dir],
         sizes_x,
         sizes_v,
@@ -853,6 +862,7 @@ function _v_context(
         DT(_effective_dt(simTime)),
         DT(grid.delta[NX+dir]),
         DT(electric_acceleration_scale(sp)),
+        vdirs,
     )
 end
 
@@ -920,12 +930,13 @@ function _check_mirror_axes(grid::CartGrid, dir::Int, ::Val{W}) where {W}
 end
 
 function _advect_x!(
-    sp::Species,
+    sp::DistSpecies,
     grid::CartGrid,
     simTime::SimulationTime,
     dirs,
     method,
     boundary,
+    vdirs = _default_vdirs(grid),
 )
     NX = length(grid.xaxes)
     all(in(1:NX), dirs) || throw(ArgumentError("advectX! direction $dirs out of 1:$NX"))
@@ -933,62 +944,67 @@ function _advect_x!(
         foreach(dir -> _check_mirror_axes(grid, dir, stencil_order(method)), dirs)
     end
     plan = _get_plan(sp.dist, grid)
-    contexts = (_x_context(sp, grid, simTime, dir, plan) for dir in dirs)
+    contexts = (_x_context(sp, grid, simTime, dir, plan, vdirs) for dir in dirs)
     _advect!(sp.dist, plan, method, boundary, contexts, dirs)
     return nothing
 end
 
 function _advect_v!(
-    sp::Species,
+    sp::DistSpecies,
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
     dirs,
     method,
     boundary,
+    vdirs = _default_vdirs(grid),
 )
     NV = length(grid.vaxes)
     all(in(1:NV), dirs) || throw(ArgumentError("advectV! direction $dirs out of 1:$NV"))
     boundary isa Periodic ||
         throw(ArgumentError("mirror boundaries apply to spatial axes only, as in bsl6d"))
     plan = _get_plan(sp.dist, grid)
-    contexts = (_v_context(sp, grid, simTime, e, dir, plan) for dir in dirs)
+    contexts = (_v_context(sp, grid, simTime, e, dir, plan, vdirs) for dir in dirs)
     _advect!(sp.dist, plan, method, boundary, contexts, length(grid.xaxes) .+ dirs)
     return nothing
 end
 
 advectX!(
-    sp::Species,
+    sp::DistSpecies,
     grid::CartGrid,
     simTime::SimulationTime;
     method = Fourier(),
     boundary = Periodic(),
-) = _advect_x!(sp, grid, simTime, 1:length(grid.xaxes), method, boundary)
+    vdirs = _default_vdirs(grid),
+) = _advect_x!(sp, grid, simTime, 1:length(grid.xaxes), method, boundary, vdirs)
 
 advectX!(
-    sp::Species,
+    sp::DistSpecies,
     grid::CartGrid,
     simTime::SimulationTime,
     dir::Int;
     method = Fourier(),
     boundary = Periodic(),
-) = _advect_x!(sp, grid, simTime, dir:dir, method, boundary)
+    vdirs = _default_vdirs(grid),
+) = _advect_x!(sp, grid, simTime, dir:dir, method, boundary, vdirs)
 
 advectV!(
-    sp::Species,
+    sp::DistSpecies,
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField;
     method = Fourier(),
     boundary = Periodic(),
-) = _advect_v!(sp, grid, simTime, e, 1:length(grid.vaxes), method, boundary)
+    vdirs = _default_vdirs(grid),
+) = _advect_v!(sp, grid, simTime, e, 1:length(grid.vaxes), method, boundary, vdirs)
 
 advectV!(
-    sp::Species,
+    sp::DistSpecies,
     grid::CartGrid,
     simTime::SimulationTime,
     e::VectorField,
     dir::Int;
     method = Fourier(),
     boundary = Periodic(),
-) = _advect_v!(sp, grid, simTime, e, dir:dir, method, boundary)
+    vdirs = _default_vdirs(grid),
+) = _advect_v!(sp, grid, simTime, e, dir:dir, method, boundary, vdirs)

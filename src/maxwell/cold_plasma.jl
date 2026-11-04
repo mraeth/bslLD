@@ -1,11 +1,11 @@
-# Linearised cold-fluid species for testing the EM field solvers.
+# Linearised cold-fluid model for testing the EM field solvers.
 #
-# A species is a charge q and mass m (ion units) plus a closure of the perpendicular motion,
-# linearised around n0 = 1, u = 0 and B0 = b0 ê_{Bdir}:
+# `ColdFluid` is a species model (species.jl): the state δn, δu and a closure of the perpendicular
+# motion, linearised around n0 = 1, u = 0 and B0 = b0 ê_{Bdir}; q and m are those of the `Species`:
 #   LorentzFluid:  ∂t δu = (q/m) (E + b0 δu × b̂)        (full cold fluid)
 #   DriftFluid:    δu⊥ = E × b̂ / b0 (E×B drift),  ∂t δu∥ = (q/m) E∥
 # with continuity ∂t δn = −∇·δu. Cold ions: `ColdIonFluid(grid)` = Lorentz, q = m = 1.
-# Drift-kinetic cold electrons: `ColdFluid(grid, DriftFluid(); q = -1, m = μ)`.
+# Drift-kinetic cold electrons: `Species(ColdFluid(grid, DriftFluid()); q = -1, m = μ)`.
 #
 # Moments fed to the rate-form EM solvers (`compute_moments`, Lorentz fluid):
 #   rho = n0 + δn, J = q δu⊥ (2-component, velocity-space indexed [1,2]), Pi_diff = 0.
@@ -18,24 +18,22 @@ abstract type FluidClosure end
 struct LorentzFluid <: FluidClosure end
 struct DriftFluid <: FluidClosure end
 
-struct ColdFluid{C<:FluidClosure,T<:AbstractFloat,SF<:ScalarField,VF<:VectorField}
+struct ColdFluid{C<:FluidClosure,SF<:ScalarField,VF<:VectorField} <: AbstractModel
     closure::C
-    q::T
-    m::T
     delta_n::SF    # δn
     u::VF          # δu, 3 field-space components (DriftFluid: only the ∥ component is state)
 end
 
-function ColdFluid(grid::Grid, closure::FluidClosure; q::Real = 1, m::Real = 1)
-    m > 0 || throw(ArgumentError("mass m must be positive"))
+function ColdFluid(grid::Grid, closure::FluidClosure)
     dims = Tuple(length(ax) for ax in grid.xaxes)
     delta_n = ScalarField(zeros(Float64, dims))
     u = VectorField([ScalarField(zeros(Float64, dims)) for _ = 1:3])
-    return ColdFluid(closure, Float64(q), Float64(m), delta_n, u)
+    return ColdFluid(closure, delta_n, u)
 end
 
-const ColdIonFluid = ColdFluid{LorentzFluid}
-ColdFluid{LorentzFluid}(grid::Grid) = ColdFluid(grid, LorentzFluid())
+const FluidSpecies{C} = Species{<:AbstractFloat,<:ColdFluid{C}}
+const ColdIonFluid = FluidSpecies{LorentzFluid}
+ColdIonFluid(grid::Grid) = Species(ColdFluid(grid, LorentzFluid()))
 
 # Build the Moments struct expected by the rate-form hybrid EM solvers (rho = 1 + δn, n0 = 1).
 function compute_moments(fluid::ColdIonFluid, grid::Grid)
@@ -58,7 +56,7 @@ function _advance_u_half!(fluid::ColdIonFluid, E::VectorField, grid::Grid, dt::R
 end
 
 # Gyration of δu by the angle θ = (q/m) b0 τ about ê_{Bdir}.
-function _rotate_u!(fluid::ColdFluid, grid::Grid, θ::Real)
+function _rotate_u!(fluid::FluidSpecies, grid::Grid, θ::Real)
     DT = eltype(fluid.u[1].data)
     pz = grid.Bdir
     perp_dirs = [d for d = 1:3 if d != pz]
@@ -74,7 +72,7 @@ function _rotate_u!(fluid::ColdFluid, grid::Grid, θ::Real)
 end
 
 # Half-step continuity update (spectral): δn += -(dt/2) * ∇·δu.
-function _advance_n_half!(fluid::ColdFluid, grid::Grid, dt::Real)
+function _advance_n_half!(fluid::FluidSpecies, grid::Grid, dt::Real)
     ndims_x = spatial_ndims(grid)
     # div only over spatial components
     u_spatial = VectorField([fluid.u[d] for d = 1:ndims_x])
@@ -125,7 +123,7 @@ end
 # Field-free half step (`half` = 1 before the kick, 2 after) and the kick by the stage field.
 # The cold fluids ignore `phase` (gyration is explicit).
 
-function push_free!(fluid::ColdFluid{LorentzFluid}, grid::Grid, dt::Real, half::Int; phase = 0)
+function push_free!(fluid::FluidSpecies{LorentzFluid}, grid::Grid, dt::Real, half::Int; phase = 0, B = nothing)
     θ = fluid.q / fluid.m * grid.b0 * dt / 2
     if half == 1
         _advance_n_half!(fluid, grid, dt)
@@ -138,17 +136,17 @@ function push_free!(fluid::ColdFluid{LorentzFluid}, grid::Grid, dt::Real, half::
 end
 
 # Parallel flux only: δu⊥ is not state and stays zero.
-push_free!(fluid::ColdFluid{DriftFluid}, grid::Grid, dt::Real, half::Int; phase = 0) =
+push_free!(fluid::FluidSpecies{DriftFluid}, grid::Grid, dt::Real, half::Int; phase = 0, B = nothing) =
     (_advance_n_half!(fluid, grid, dt); fluid)
 
-function push_field!(fluid::ColdFluid{LorentzFluid}, E::VectorField, grid::Grid, dt::Real; phase = 0)
+function push_field!(fluid::FluidSpecies{LorentzFluid}, E::VectorField, grid::Grid, dt::Real; phase = 0)
     a = fluid.q / fluid.m * dt
     foreach(d -> fluid.u[d].data .+= a .* E[d].data, 1:3)
     return fluid
 end
 
 # Parallel kick and the compression of the E×B flow, ∂t δn = −∇⊥·(E × b̂)/b0 = −b̂·∇×E / b0.
-function push_field!(fluid::ColdFluid{DriftFluid}, E::VectorField, grid::Grid, dt::Real; phase = 0)
+function push_field!(fluid::FluidSpecies{DriftFluid}, E::VectorField, grid::Grid, dt::Real; phase = 0)
     pz = grid.Bdir
     fluid.u[pz].data .+= (fluid.q / fluid.m * dt) .* E[pz].data
     fluid.delta_n.data .-= (dt / grid.b0) .* curl(E, grid)[pz].data
@@ -156,11 +154,11 @@ function push_field!(fluid::ColdFluid{DriftFluid}, E::VectorField, grid::Grid, d
 end
 
 # Charge density q δn and field-indexed current q δu (DriftFluid: the ∥ state current only).
-moments_at(fluid::ColdFluid, grid::Grid, phase::Real) =
+moments_at(fluid::FluidSpecies, grid::Grid, phase::Real) =
     (fluid.q .* fluid.delta_n.data, ntuple(d -> fluid.q .* fluid.u[d].data, 3))
 
-_save(fluid::ColdFluid) = (copy(fluid.delta_n.data), ntuple(d -> copy(fluid.u[d].data), 3))
-function _restore!(fluid::ColdFluid, s)
+_save(fluid::FluidSpecies) = (copy(fluid.delta_n.data), ntuple(d -> copy(fluid.u[d].data), 3))
+function _restore!(fluid::FluidSpecies, s)
     fluid.delta_n.data .= s[1]
     foreach(d -> fluid.u[d].data .= s[2][d], 1:3)
     return fluid

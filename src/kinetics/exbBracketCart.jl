@@ -153,30 +153,30 @@ function exb_euler!(
 end
 
 # Species forwarding overloads
-ExBBracketPlan(sp::Species, grid::CartGrid) = ExBBracketPlan(sp.dist, grid)
-_get_exb_plan(sp::Species, grid::CartGrid) = _get_exb_plan(sp.dist, grid)
-exb_bracket(sp::Species, phi::ScalarField, grid::CartGrid) = exb_bracket(sp.dist, phi, grid)
+ExBBracketPlan(sp::DistSpecies, grid::CartGrid) = ExBBracketPlan(sp.dist, grid)
+_get_exb_plan(sp::DistSpecies, grid::CartGrid) = _get_exb_plan(sp.dist, grid)
+exb_bracket(sp::DistSpecies, phi::ScalarField, grid::CartGrid) = exb_bracket(sp.dist, phi, grid)
 exb_bracket!(
     df::DistributionGrid,
-    sp::Species,
+    sp::DistSpecies,
     phi::ScalarField,
     grid::CartGrid,
     plan::ExBBracketPlan,
 ) = exb_bracket!(df, sp.dist, phi, grid, plan)
-exb_bracket!(df::DistributionGrid, sp::Species, phi::ScalarField, grid::CartGrid) =
+exb_bracket!(df::DistributionGrid, sp::DistSpecies, phi::ScalarField, grid::CartGrid) =
     exb_bracket!(df, sp.dist, phi, grid)
 exb_bracket!(
-    df::Species,
-    f_in::Species,
+    df::DistSpecies,
+    f_in::DistSpecies,
     phi::ScalarField,
     grid::CartGrid,
     plan::ExBBracketPlan,
 ) = exb_bracket!(df.dist, f_in.dist, phi, grid, plan)
-exb_bracket!(df::Species, f_in::Species, phi::ScalarField, grid::CartGrid) =
+exb_bracket!(df::DistSpecies, f_in::DistSpecies, phi::ScalarField, grid::CartGrid) =
     exb_bracket!(df.dist, f_in.dist, phi, grid)
 exb_euler!(
     f_out::DistributionGrid,
-    sp::Species,
+    sp::DistSpecies,
     phi::ScalarField,
     grid::CartGrid,
     dt::Real,
@@ -184,18 +184,18 @@ exb_euler!(
 ) = exb_euler!(f_out, sp.dist, phi, grid, dt, plan)
 exb_euler!(
     f_out::DistributionGrid,
-    sp::Species,
+    sp::DistSpecies,
     phi::ScalarField,
     grid::CartGrid,
     dt::Real,
 ) = exb_euler!(f_out, sp.dist, phi, grid, dt)
 exb_euler!(
-    f_out::Species,
-    f_in::Species,
+    f_out::DistSpecies,
+    f_in::DistSpecies,
     phi::ScalarField,
     grid::CartGrid,
     dt::Real,
     plan::ExBBracketPlan,
 ) = exb_euler!(f_out.dist, f_in.dist, phi, grid, dt, plan)
-exb_euler!(f_out::Species, f_in::Species, phi::ScalarField, grid::CartGrid, dt::Real) =
+exb_euler!(f_out::DistSpecies, f_in::DistSpecies, phi::ScalarField, grid::CartGrid, dt::Real) =
     exb_euler!(f_out.dist, f_in.dist, phi, grid, dt)

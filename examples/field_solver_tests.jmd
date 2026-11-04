@@ -123,7 +123,7 @@ stepQN!(state, sol, grid, simTime, solver; damping_rate=0.0) =
     bslLD.step_charge_form!(state, sol, grid, solver, simTime.dt; phase=simTime.phase, damping_rate)
 
 # Cold drift-kinetic electrons of the polarisation-density model.
-cold_electrons(grid, μ) = bslLD.ColdFluid(grid, bslLD.DriftFluid(); q=-1, m=μ)
+cold_electrons(grid, μ) = bslLD.Species(bslLD.ColdFluid(grid, bslLD.DriftFluid()); q = -1, m = μ)
 
 # ── Simulation helpers ─────────────────────────────────────────────────────────
 # Zero-mean random seed of amplitude ε in Ey (:Ey), Bz (:Bz) or the ion density (:n); returns (sol, δn).
@@ -217,19 +217,18 @@ end
 # ── Analytic references (KineticDR) ────────────────────────────────────────────
 # In the 1D runs E∥ ≡ 0 (k ∥ b̂ or k ⊥ b̂), so the modes are the roots of the perpendicular 2×2 block of 𝒟.
 # Electrons: massless Hall response (drift-kinetic, T_e → 0); μ does not enter that block.
-# pol = true adds the full electron polarisation (E2, `EMSolverDKPol`).
-darwin_model(β, μ, ions; pol=false) = KDR.Model(
+# pol = w adds the electron polarisation with weight w: form = :current is the full polarisation current
+# (E2, `EMSolverDKPol`), form = :density only the polarisation density (`EMSolverDKPolDensity`).
+darwin_model(β, μ, ions; pol=false, form=:current) = KDR.Model(
     (KDR.Species(response = ions),
-     KDR.Species(q = -1, m = μ, T = 1e-10, response = KDR.DriftKinetic(polarization = pol))),
+     KDR.Species(q = -1, m = μ, T = 1e-10, response = KDR.DriftKinetic(polarization = pol, polarization_form = form))),
     KDR.Darwin(beta = β))
 
 kvec(k, dir) = dir == :par ? KDR.Wavevector(ky = 0.0, kz = k) : KDR.Wavevector(kx = k, ky = 0.0)
 
-# 𝒟⊥(ω, k) of a KineticDR model, and of the polarisation-density model (`EMSolverDKPolDensity`):
-# DK plus w μ (k⊥²/k²) k̂k̂ᵀ, which at k = k⊥ x̂ is w μ on the xx entry.
+# 𝒟⊥(ω, k) of a KineticDR model, and of the polarisation-density model (`EMSolverDKPolDensity`).
 dperp(model::KDR.Model, dir) = (ω, k) -> KDR.dispersion_matrix(model, ω, kvec(k, dir))[1:2, 1:2]
-dperp_poldensity(β, μ, ions; w=1.0) = (D = dperp(darwin_model(β, μ, ions), :perp);
-                                       (ω, k) -> D(ω, k) + [w*μ 0; 0 0])
+dperp_poldensity(β, μ, ions; w=1.0) = dperp(darwin_model(β, μ, ions; pol=w, form=:density), :perp)
 
 const HARMONIC_SEEDS = sort(vcat(0.1:0.2:8.0, [n + s*d for n in 1:8 for s in (-1, 1) for d in (0.3, 0.1, 0.03, 0.01, 3e-3, 1e-3, 3e-4, 1e-4)]))
 
@@ -758,7 +757,7 @@ This is the "DK + polarisation density" electron model of the hybrid-model study
 
 $$\mathbf{J}_{\rm pol} = w\,\mathcal{P}_L\,\mu\,\partial_t\mathbf{E}_\perp = -i\omega\,w\mu\,\frac{\mathbf{k}\,(\mathbf{k}_\perp\cdot\mathbf{E}_\perp)}{k^2},$$
 
-which at $\mathbf{k} = k_\perp\hat{x}$ adds $w\mu$ to the $xx$ entry of the KineticDR electron susceptibility (`dperp_poldensity`).
+the KineticDR response `DriftKinetic(polarization = w, polarization_form = :density)` (`dperp_poldensity`); at $\mathbf{k} = k_\perp\hat{x}$ it adds $w\mu$ to the $xx$ entry of the electron susceptibility.
 
 DKPol keeps the full polarisation current, $\chi_e^{\rm DK} + \mu\,\mathbf{I}_\perp$ (KineticDR `DriftKinetic(polarization = true)`, model E2). Its transverse part adds a spurious cut-off at $|\omega| = \Omega_e/w + \Omega_i$. The density-only model has no root above $\Omega_e$ and caps the compressional branch at the lower-hybrid frequency $\omega_{LH}/\sqrt{w} = (w\mu)^{-1/2}\,\Omega_i$.
 
@@ -768,7 +767,7 @@ The solver imposes quasineutrality itself rather than its time derivative $\nabl
 
 $$n_i - N_e = w\mu\,\nabla_\perp\cdot\left(N_e\mathbf{E}_\perp\right) = w\mu\left[-c\,\Delta B_\parallel - \hat{b}\cdot\nabla\times\mathbf{J}_{i\perp}\right],$$
 
-and this form is imposed. The electrons are a linearised cold drift fluid (`ColdFluid(grid, DriftFluid(); q = -1, m = μ)`: guiding-centre density $\delta N_e$, parallel flux $\Gamma_e = u_{e\parallel}$),
+and this form is imposed. The electrons are a linearised cold drift fluid (`Species(ColdFluid(grid, DriftFluid()); q = -1, m = μ)`: guiding-centre density $\delta N_e$, parallel flux $\Gamma_e = u_{e\parallel}$),
 
 $$\partial_t\delta N_e = -\hat{b}\cdot\nabla\times\mathbf{E} - \partial_\parallel\Gamma_e, \qquad \partial_t\Gamma_e = -\frac{1}{\mu}E_\parallel,$$
 
@@ -782,7 +781,7 @@ The step is X–C–X. The stage field $\mathbf{E}^m$ solves, per Fourier mode (
 
 The ion response is linearised around the background density ($\mathbf{J}_i^m = \mathbf{J}^a + n_0\tfrac{\Delta t}{2}\mathbf{E}^m$, $n_i^{n+1} = n^a - \tfrac{\Delta t}{2}\nabla\cdot(\mathbf{J}^a + n_0\Delta t\,\mathbf{E}^m)$). A kinetic corrector replaces that model by the moments of a trial push and keeps the difference as a fixed defect. The electron fluid is linear and is treated exactly.
 
-Each species is a charge and mass plus an equation-of-motion model: kinetic (`Species`) or cold fluid with Lorentz or drift closure (`ColdFluid`). Every model provides the same building blocks (field-free half step, kick by the stage field, moments, and its linear stage response per Fourier mode), and `step_charge_form!` couples any set of them to this field solve; the cold ions are the Lorentz fluid with $q = m = 1$. Faraday's law holds by construction, quasineutrality up to the corrector error. The 1D version of commit `8478822` did the opposite: it reset $B_z^{n+1}$ from quasineutrality after the step and took $B_z^m$ from quasineutrality at the stage instead of the Faraday midpoint.
+Each species is a charge and mass plus an equation-of-motion model that owns the state (`Species(m, q, model)`): kinetic (`Kinetic`) or cold fluid with Lorentz or drift closure (`ColdFluid`). Every model provides the same building blocks (field-free half step, kick by the stage field, moments, and its linear stage response per Fourier mode), and `step_charge_form!` couples any set of them to this field solve; the cold ions are the Lorentz fluid with $q = m = 1$. Faraday's law holds by construction, quasineutrality up to the corrector error. The 1D version of commit `8478822` did the opposite: it reset $B_z^{n+1}$ from quasineutrality after the step and took $B_z^m$ from quasineutrality at the stage instead of the Faraday midpoint.
 
 For cold ions and $\mathbf{k}\perp\hat{b}$ the model gives
 
@@ -886,10 +885,10 @@ fig
 
 With $k_\parallel \neq 0$ the electrons are no longer frozen in: $\delta N_e$ changes through $\partial_\parallel\Gamma_e$, and $E_\parallel$, the parallel electron flow and the parallel ion current enter the stage solve. Kinetic ions cannot test this here (the 1D2v grid has no $v_\parallel$ for $\hat{b}\perp x_1$), so this section uses the cold-ion fluid on a 2D grid, $x_1 \perp \hat{b}$, $x_2 \parallel \hat{b}$ (`Bdir = 2`).
 
-The reference is the continuum dispersion relation of the model, $\mathsf{D}(\omega,\mathbf{k})\hat{\mathbf{E}} = 0$, with $\mathsf{D} = c\,i\,\mathbf{k}\times(\mathbf{k}\times\cdot)/\omega - \sigma$ and the conductivity $\sigma$ of cold magnetised ions, the cold electron fluid ($-\mathbf{E}\times\hat{b}$ and $\Gamma_e = E_\parallel/(i\omega\mu)$) and $\mathbf{J}_{\rm pol}$ above. At $w = 0$ its roots are roots of the KineticDR Darwin matrix (cold ions, cold `DriftKinetic` electrons), checked below. The scheme is compared through its one-step map: one `step_cold!` acting on the 9 Fourier amplitudes $(\delta n_i, \mathbf{u}_i, \mathbf{B}, \delta N_e, \Gamma_e)$ of a single mode. Its eigenvalues are $\lambda = e^{-i\omega\Delta t}$.
+The reference is the continuum dispersion relation of the model, $\mathsf{D}(\omega,\mathbf{k})\hat{\mathbf{E}} = 0$, with $\mathsf{D} = c\,i\,\mathbf{k}\times(\mathbf{k}\times\cdot)/\omega - \sigma$ and the conductivity $\sigma$ of cold magnetised ions, the cold electron fluid ($-\mathbf{E}\times\hat{b}$ and $\Gamma_e = E_\parallel/(i\omega\mu)$) and $\mathbf{J}_{\rm pol}$ above. Its roots come from KineticDR: a `Darwin` model with cold ions and cold `DriftKinetic(polarization = w, polarization_form = :density)` electrons. The scheme is compared through its one-step map: one `step_cold!` acting on the 9 Fourier amplitudes $(\delta n_i, \mathbf{u}_i, \mathbf{B}, \delta N_e, \Gamma_e)$ of a single mode. Its eigenvalues are $\lambda = e^{-i\omega\Delta t}$.
 
 ```julia; echo=false, results="hidden", label="sim-pol-oblique"
-β_ob = 0.5; μ_ob = 0.01; kz_ob = 0.5; c_ob = 2/β_ob
+β_ob = 0.5; μ_ob = 0.01; kz_ob = 0.5
 
 # One-step map of the charge-form step on the Fourier mode (k⊥, k∥); 2D grid, x₁ ⊥ b̂, x₂ ∥ b̂.
 function step_map(kp, kz, dt, solver; N=4, κ=0.0)
@@ -916,21 +915,10 @@ function step_modes(kp, kz, dt; w=1.0)
     return sort(collect(zip(real.(ω[sel]), abs.(λ[sel]))))
 end
 
-# Continuum D(ω)·E in the frame (a, b, ∥), k = (k⊥, 0, k∥), and its roots by Newton from ω.
-function D_model(ω, kp, kz; w=1.0)
-    κ = [kp, 0.0, kz]; K = [0 -κ[3] κ[2]; κ[3] 0 -κ[1]; -κ[2] κ[1] 0]
-    R = ComplexF64[0 1 0; -1 0 0; 0 0 0]                     # R u = u × b̂
-    σ = inv(-im*ω*I(3) - R) - R + Diagonal([0, 0, im/(ω*μ_ob)]) - im*ω*w*μ_ob*κ*[kp, 0.0, 0.0]'/sum(abs2, κ)
-    return c_ob*im*K*K/ω - σ
-end
-function model_root(ω, kp, kz; w=1.0)
-    f(z) = det(D_model(z, kp, kz; w))
-    for _ in 1:60
-        δ = 1e-7abs(ω); Δ = f(ω) / ((f(ω + δ) - f(ω - δ)) / 2δ); ω -= Δ
-        abs(Δ) < 1e-13abs(ω) && break
-    end
-    return real(ω)
-end
+# Continuum reference (KineticDR): cold ions, cold drift electrons with polarisation density w; root from ω.
+model_ob(w) = darwin_model(β_ob, μ_ob, KDR.Cold(); pol=w, form=:density)
+model_root(ω, kp, kz; w=1.0) =
+    real(first(KDR.find_root(model_ob(w), KDR.Wavevector(kx = kp, ky = 0.0, kz = kz), complex(ω); δ = 1e-6)))
 
 kps_ob = 0.25:0.25:4.0; dt_ob = 0.01
 modes_ob = Dict(w => [(kp, ω, model_root(complex(ω), kp, kz_ob; w)) for kp in kps_ob for (ω, _) in step_modes(kp, kz_ob, dt_ob; w)]
@@ -939,13 +927,6 @@ modes_ob = Dict(w => [(kp, ω, model_root(complex(ω), kp, kz_ob; w)) for kp in 
 # Convergence and amplitude error of the two branches at k = (2, 0.5)
 dts_ob = [0.04, 0.02, 0.01, 0.005]
 conv_ob = [(dt, step_modes(2.0, kz_ob, dt)) for dt in dts_ob]
-
-# KineticDR check of the continuum reference at w = 0
-kdr_ob = KDR.Model((KDR.Species(response = KDR.Cold()),
-                    KDR.Species(q = -1, m = μ_ob, T = 1e-10, response = KDR.DriftKinetic(polarization = false))),
-                   KDR.Darwin(beta = β_ob))
-kdr_sv = maximum(((sv = svdvals(KDR.dispersion_matrix(kdr_ob, r, KDR.Wavevector(kx = kp, ky = 0.0, kz = kz_ob))));
-                  sv[end] / sv[1]) for (kp, _, r) in modes_ob[0.0])
 
 # 2D random-seed run: quasineutrality residual over time
 function oblique_run(dt, Tmax; N=32)
@@ -999,7 +980,6 @@ for (dt, ms) in conv_ob
 end
 println("all k⊥, dt = $dt_ob: max relative error w = 1: ", round(maximum(abs(ω/r - 1) for (_, ω, r) in modes_ob[1.0]), sigdigits=3),
         ",  w = 0: ", round(maximum(abs(ω/r - 1) for (_, ω, r) in modes_ob[0.0]), sigdigits=3))
-println("w = 0 continuum roots vs KineticDR Darwin matrix: max σmin/σmax = ", round(kdr_sv, sigdigits=2))
 println("2D random seed, dt = 0.01, t ≤ 50: max quasineutrality residual ", round(maximum(run_ob[2]), sigdigits=2),
         " (δn ~ 1e-6), max|δn| ", round(maximum(run_ob[3]), sigdigits=3))
 println("stage shift θ = 1/2 + κ dt, k = (2, 0.5):")

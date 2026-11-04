@@ -1,34 +1,53 @@
 # Charge-form Darwin field solve (EMSolverDKPolDensity) over explicit species, and its X–C–X step.
 #
-# A species is a charge q and mass m plus an equation-of-motion model: kinetic (`Species`), or a
-# cold fluid with Lorentz or drift closure (`ColdFluid`, cold_plasma.jl). Every model provides
-#   push_free!(sp, grid, dt, half; phase)    field-free half step, half = 1 before / 2 after C
+# A species is a charge q and mass m plus an equation-of-motion model (species.jl): kinetic
+# (`Kinetic`), or a cold fluid with Lorentz or drift closure (`ColdFluid`, cold_plasma.jl). Every
+# model provides
+#   push_free!(sp, grid, dt, half; phase, B) field-free half step, half = 1 before / 2 after C;
+#                                            B = B^n (half 1) or B^{n+1} (half 2), used by DK models
 #   push_field!(sp, E, grid, dt; phase)      kick by the stage field over dt (C)
 #   moments_at(sp, grid, phase)              (charge density q n, field-indexed current J)
-#   stage_response(sp, grid, dt, θ; phase)   per Fourier mode, the affine map of the stage field
+#   stage_response(sp, grid, dt, θ; phase, B) per Fourier mode, the affine map of the stage field
 #                                            E^m to J^θ, ρ^{n+1} and J⊥^{n+1} (see below)
 # The field solve sums the species responses. Exact responses (drift fluid) need no corrector;
 # the others (Lorentz fluid, kinetic) get one kinetic corrector with a fixed defect.
+#
+# The response class of a model selects its coupling to the field solve:
+#   Magnetised   ⊥ current responds through (q²n/m) E (kinetic, Lorentz fluid)
+#   Drift        E×B current; carries the polarisation density (drift fluid). A drift species
+#                provides drift_density_hat(sp, sw) and set_drift_density!(sp, N̂, sw).
+
+abstract type ResponseClass end
+struct Magnetised <: ResponseClass end
+struct Drift <: ResponseClass end
+response_class(::Kinetic) = Magnetised()
+response_class(::ColdFluid{LorentzFluid}) = Magnetised()
+response_class(::ColdFluid{DriftFluid}) = Drift()
+response_class(sp::Species) = response_class(getfield(sp, :model))
+is_drift(sp) = response_class(sp) isa Drift
+
+drift_density_hat(sp::FluidSpecies{DriftFluid}, sw) = _fft_c(sp.delta_n.data, sw)
+set_drift_density!(sp::FluidSpecies{DriftFluid}, N, sw) = (ifft_spatial!(sp.delta_n.data, N, sw); sp)
 
 # ── Kinetic species ───────────────────────────────────────────────────────────
 # Velocities in units of the species thermal speed 1/√m: the physical current is q/√m times
 # `compute_current`, and its response to a kick is (q²/m) n E. The gyration is in the rotating
 # frame: the phase points ¼, ½, ¾, 1 of the step follow stepMidpoint!.
 
-function _kinetic_time(sp::Species, grid::Grid, dt, phase, at, fraction)
+function _kinetic_time(sp::KineticSpecies, grid::Grid, dt, phase, at, fraction)
     t = SimulationTime(dt, dt)
     t.phase = phase + at * gyro_frequency(sp, grid) * dt
     t.fraction_dt = fraction
     return t
 end
 
-push_free!(sp::Species, grid::Grid, dt::Real, half::Int; phase = 0) =
+push_free!(sp::KineticSpecies, grid::Grid, dt::Real, half::Int; phase = 0, B = nothing) =
     (advectX!(sp, grid, _kinetic_time(sp, grid, dt, phase, half == 1 ? 0.25 : 0.75, 0.5)); sp)
 
-push_field!(sp::Species, E::VectorField, grid::Grid, dt::Real; phase = 0) =
+push_field!(sp::KineticSpecies, E::VectorField, grid::Grid, dt::Real; phase = 0) =
     (advectV!(sp, grid, _kinetic_time(sp, grid, dt, phase, 0.5, 1.0), E); sp)
 
-function moments_at(sp::Species, grid::Grid, phase::Real)
+function moments_at(sp::KineticSpecies, grid::Grid, phase::Real)
     J = compute_current(sp, grid, phase)
     s = sp.q * thermal_velocity(sp)
     z = zero(J[1].data)
@@ -36,14 +55,14 @@ function moments_at(sp::Species, grid::Grid, phase::Real)
             ntuple(d -> d <= length(J) ? s .* J[d].data : z, 3))
 end
 
-_save(sp::Species) = copy(sp.dist.data)
-_restore!(sp::Species, s) = (sp.dist.data .= s; sp)
+_save(sp::KineticSpecies) = copy(sp.dist.data)
+_restore!(sp::KineticSpecies, s) = (sp.dist.data .= s; sp)
 
 # Phase of the stage (½) and of the end of the step (1) for the moments.
-_stage_phase(sp::Species, grid, dt, phase) = phase + 0.5 * gyro_frequency(sp, grid) * dt
-_end_phase(sp::Species, grid, dt, phase) = phase + gyro_frequency(sp, grid) * dt
-_stage_phase(::ColdFluid, grid, dt, phase) = phase
-_end_phase(::ColdFluid, grid, dt, phase) = phase
+_stage_phase(sp::KineticSpecies, grid, dt, phase) = phase + 0.5 * gyro_frequency(sp, grid) * dt
+_end_phase(sp::KineticSpecies, grid, dt, phase) = phase + gyro_frequency(sp, grid) * dt
+_stage_phase(::FluidSpecies, grid, dt, phase) = phase
+_end_phase(::FluidSpecies, grid, dt, phase) = phase
 
 # ── Stage responses ───────────────────────────────────────────────────────────
 # Frame (a, b, ∥), right-handed with ∥ = Bdir. An affine response is (c0, ca, cb, c∥): arrays of
@@ -88,13 +107,13 @@ function _magnetised_response(ρ, J, α, grid, dt, θ)
     return (J = Jθ, rho = rho, Jp = (Jend[1], Jend[2]), drift = nothing, exact = false)
 end
 
-function stage_response(fluid::ColdFluid{LorentzFluid}, grid::Grid, dt, θ; phase = 0)
+function stage_response(fluid::FluidSpecies{LorentzFluid}, grid::Grid, dt, θ; phase = 0, B = nothing)
     ρ, J = moments_at(fluid, grid, phase)
     α = ntuple(_ -> fluid.q^2 / fluid.m, 3)
     return _magnetised_response(ρ, J, α, grid, dt, θ)
 end
 
-function stage_response(sp::Species, grid::Grid, dt, θ; phase = 0)
+function stage_response(sp::KineticSpecies, grid::Grid, dt, θ; phase = 0, B = nothing)
     ρ, J = moments_at(sp, grid, _stage_phase(sp, grid, dt, phase))
     n0 = sum(ρ) / length(ρ) / sp.q
     a, b, pz = _cf_frame(grid)
@@ -105,7 +124,7 @@ end
 
 # Drift fluid (exact): J^θ = q (E × b̂)/b0 + q (u∥ + θ dt (q/m) E∥) b̂,
 # ρ^{n+1} = q [δN^a − dt b̂·∇×E / b0 − (dt/2) ∂∥(u∥ + dt (q/m) E∥)].
-function stage_response(fluid::ColdFluid{DriftFluid}, grid::Grid, dt, θ; phase = 0)
+function stage_response(fluid::FluidSpecies{DriftFluid}, grid::Grid, dt, θ; phase = 0, B = nothing)
     a, b, pz = _cf_frame(grid)
     q, m, b0 = fluid.q, fluid.m, grid.b0
     sw, ka, kb, kz = _cf_kviews(fluid.delta_n.data, grid)
@@ -121,7 +140,8 @@ end
 
 # Defect of a non-exact response: the actual moments after a trial push with the field Ep
 # (Ja, Jb: stage current before and after the kick; ρ1, J1 at the end of the step) minus the
-# model at Ep. Added to the constant parts.
+# model at Ep. Added to the constant parts. A drift species' moments carry only J∥: its E×B
+# current is exact in the model, so only J∥ and ρ are corrected.
 function _with_defect(r, Ja, Jb, ρ1, J1, Ep, grid, θ)
     a, b, pz = _cf_frame(grid)
     sw, _, _, _ = _cf_kviews(ρ1, grid)
@@ -129,8 +149,9 @@ function _with_defect(r, Ja, Jb, ρ1, J1, Ep, grid, θ)
     E = (F(Ep[a].data), F(Ep[b].data), F(Ep[pz].data))
     fix(A, actual) = (A[1] .+ (F(actual) .- _affine_at(A, E...)), A[2], A[3], A[4])
     idx = (a, b, pz)
-    J = ntuple(i -> fix(r.J[i], Ja[idx[i]] .+ θ .* (Jb[idx[i]] .- Ja[idx[i]])), 3)
-    Jp = ntuple(i -> fix(r.Jp[i], J1[idx[i]]), 2)
+    fixed = r.drift === nothing ? (1, 2, 3) : (3,)
+    J = ntuple(i -> i in fixed ? fix(r.J[i], Ja[idx[i]] .+ θ .* (Jb[idx[i]] .- Ja[idx[i]])) : r.J[i], 3)
+    Jp = r.drift === nothing ? ntuple(i -> fix(r.Jp[i], J1[idx[i]]), 2) : r.Jp
     return (J = J, rho = fix(r.rho, ρ1), Jp = Jp, drift = r.drift, exact = r.exact)
 end
 
@@ -233,7 +254,7 @@ function _qn_parts(species, B, grid, solver, phase)
     ρ, Ja, Jb = zero(F(B[1].data)), zero(F(B[1].data)), zero(F(B[1].data))
     drift = nothing
     for sp in species
-        if sp isa ColdFluid{DriftFluid}
+        if is_drift(sp)
             drift === nothing || throw(ArgumentError("the polarisation density needs a single drift species"))
             drift = sp
             continue
@@ -255,9 +276,9 @@ Set δn of the drift species from quasineutrality with the other species and `B`
 function quasineutral_drift!(species, B::VectorField, grid::Grid, solver::EMSolverDKPolDensity; phase = 0)
     r, k2, drift, sw = _qn_parts(species, B, grid, solver, phase)
     drift === nothing && throw(ArgumentError("no drift species"))
-    N = _fft_c(drift.delta_n.data, sw)
+    N = drift_density_hat(drift, sw)
     @. N = ifelse(iszero(k2), N, -r / drift.q)
-    ifft_spatial!(drift.delta_n.data, N, sw)
+    set_drift_density!(drift, N, sw)
     return species
 end
 
@@ -268,9 +289,9 @@ max over x of |Σ q n − (w m_d / q_d)[(2/β_i) ΔB_∥ + b̂·∇×J⊥]| with
 """
 function quasineutrality_residual(species, B::VectorField, grid::Grid, solver::EMSolverDKPolDensity; phase = 0)
     r, k2, drift, sw = _qn_parts(species, B, grid, solver, phase)
-    drift === nothing || (r .+= drift.q .* _fft_c(drift.delta_n.data, sw))
+    drift === nothing || (r .+= drift.q .* drift_density_hat(drift, sw))
     @. r = ifelse(iszero(k2), zero(r), r)
-    out = similar(drift === nothing ? B[1].data : drift.delta_n.data)
+    out = similar(B[1].data)
     ifft_spatial!(out, r, sw)
     return maximum(abs, out)
 end
@@ -280,7 +301,7 @@ end
 """
     step_charge_form!(species, sol, grid, solver::EMSolverDKPolDensity, dt; phase = 0, damping_rate = 0)
 
-One X–C–X step in charge form for a tuple of species (kinetic `Species`, `ColdFluid`): X(dt/2),
+One X–C–X step in charge form for a tuple of species (`Species` with a `Kinetic` or `ColdFluid` model): X(dt/2),
 stage field from the moment-implicit solve, one corrector for the non-exact species (trial push
 with the predicted field, fixed defect), C with the stage field, X(dt/2), then Faraday.
 `phase` is the gyro-phase of the kinetic species at t^n; `damping_rate` κ gives θ = 1/2 + κ dt.
@@ -295,19 +316,20 @@ function step_charge_form!(
     damping_rate::Real = 0,
 )
     θ = 1 / 2 + damping_rate * dt
-    foreach(sp -> push_free!(sp, grid, dt, 1; phase), species)
+    foreach(sp -> push_free!(sp, grid, dt, 1; phase, B = sol.B), species)
     saved = map(_save, species)
-    responses = [stage_response(sp, grid, dt, θ; phase) for sp in species]
+    responses = [stage_response(sp, grid, dt, θ; phase, B = sol.B) for sp in species]
     solve_fields_moment_implicit!(sol, responses, grid, solver, dt; theta = θ)
 
     if !all(r -> r.exact, responses)
         Ep = VectorField([copy(sol.Enew[d].data) for d = 1:3])
+        Bp = apply_faraday!(VectorField([copy(sol.B[d].data) for d = 1:3]), Ep, grid, dt)
         for (i, sp) in enumerate(species)
             responses[i].exact && continue
             Ja = moments_at(sp, grid, _stage_phase(sp, grid, dt, phase))[2]
             push_field!(sp, Ep, grid, dt; phase)
             Jb = moments_at(sp, grid, _stage_phase(sp, grid, dt, phase))[2]
-            push_free!(sp, grid, dt, 2; phase)
+            push_free!(sp, grid, dt, 2; phase, B = Bp)
             ρ1, J1 = moments_at(sp, grid, _end_phase(sp, grid, dt, phase))
             responses[i] = _with_defect(responses[i], Ja, Jb, ρ1, J1, Ep, grid, θ)
             _restore!(sp, saved[i])
@@ -315,11 +337,9 @@ function step_charge_form!(
         solve_fields_moment_implicit!(sol, responses, grid, solver, dt; theta = θ)
     end
 
-    foreach(species) do sp
-        push_field!(sp, sol.Enew, grid, dt; phase)
-        push_free!(sp, grid, dt, 2; phase)
-    end
+    foreach(sp -> push_field!(sp, sol.Enew, grid, dt; phase), species)
     apply_faraday!(sol.B, sol.Enew, grid, dt)
+    foreach(sp -> push_free!(sp, grid, dt, 2; phase, B = sol.B), species)
     sol.E .= sol.Enew
     return nothing
 end

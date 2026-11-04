@@ -13,7 +13,7 @@ function predict_midpoint_current(
     n_a::ScalarField,
     J_a::VectorField,
     E::VectorField,
-    sp::Species,
+    sp::DistSpecies,
     ::CartGrid,
     dt::Real,
 )
@@ -30,7 +30,7 @@ function predict_stage_current(
     n_a::ScalarField,
     J_a::VectorField,
     E::VectorField,
-    sp::Species,
+    sp::DistSpecies,
     ::CartGrid,
     dt::Real,
     theta::Real,
@@ -43,7 +43,7 @@ function predict_stage_current(
 end
 
 # Combined density + current computation to avoid two separate passes.
-function compute_density_current(sp::Species, grid::CartGrid, phase::Real)
+function compute_density_current(sp::DistSpecies, grid::CartGrid, phase::Real)
     n = compute_density(sp.dist, grid)
     J = compute_current(sp, grid, phase)
     return n, J

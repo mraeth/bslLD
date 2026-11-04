@@ -65,4 +65,67 @@ function add_kappaT!(
     return f
 end
 
-add_kappaT!(sp::Species, args...; kwargs...) = add_kappaT!(sp.dist, args...; kwargs...)
+add_kappaT!(sp::DistSpecies, args...; kwargs...) = add_kappaT!(sp.dist, args...; kwargs...)
+
+# --- Linear drift-kinetic kick ---------------------------------------------------------------
+#
+# Field kick of the linear DK model (dk_electrons.jl) on δF(x, v∥), velocities in units of
+# 1/√m, Maxwellian F0(v) = c0 exp(-v²/2T)/√(2πT) and F0'(v) = -c1 (v/T) exp(-v²/2T)/√(2πT):
+#
+#   δF -= dt [F0 C / b0 + (q/√m) E∥ F0'],   C = b̂·∇×E,
+#
+# the E×B compression and the parallel acceleration of the background. One velocity axis, along B.
+
+struct LinearDKKickContext{ET,CT,VT,SXT,SVT,DT}
+    Epar::ET
+    C::CT
+    v::VT
+    sizes_x::SXT
+    sizes_v::SVT
+    aC::DT   # dt c0 / b0
+    aE::DT   # dt (q/√m) c1 / T
+    T::DT
+end
+
+Adapt.@adapt_structure LinearDKKickContext
+
+@kernel function linear_dk_kick_kernel!(fdata, ctx)
+    I = @index(Global, Linear)
+    ixs, ivs = index_1d_to_combined(I, ctx.sizes_x, ctx.sizes_v)
+    @inbounds v = ctx.v[ivs[1]]
+    g = exp(-v * v / (2 * ctx.T)) / sqrt(2 * oftype(v, pi) * ctx.T)
+    @inbounds fdata[I] -= (ctx.aC * ctx.C[ixs...] - ctx.aE * ctx.Epar[ixs...] * v) * g
+end
+
+function add_linear_dk_kick!(
+    f::DistributionGrid{DT,NX,NV,NXNV,Cart},
+    grid::CartGrid,
+    dt,
+    Epar::ScalarField,
+    curlE_par::ScalarField;
+    q,
+    m,
+    T_e,
+    c0 = 1,
+    c1 = 1,
+    exec = bslLD.backend(),
+) where {DT,NX,NV,NXNV}
+    NV == 1 || throw(ArgumentError("the linear DK kick needs one (parallel) velocity axis, got $NV"))
+    sizes_x, sizes_v = _cartesian_axis_sizes(grid)
+    ctx = LinearDKKickContext(
+        Epar.data,
+        curlE_par.data,
+        backend_vector(grid.vaxes[1]),
+        sizes_x,
+        sizes_v,
+        DT(dt * c0 / grid.b0),
+        DT(dt * q / sqrt(m) * c1 / T_e),
+        DT(T_e),
+    )
+    k! = linear_dk_kick_kernel!(exec)
+    k!(f.data, ctx; ndrange = length(f.data))
+    KernelAbstractions.synchronize(exec)
+    return f
+end
+
+add_linear_dk_kick!(sp::DistSpecies, args...; kwargs...) = add_linear_dk_kick!(sp.dist, args...; kwargs...)

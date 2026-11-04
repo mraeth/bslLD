@@ -1,0 +1,344 @@
+---
+title: "Electron models for the charge-form Darwin solver: cold fluid, drift-kinetic, nonlinear"
+author: "Mario Raeth"
+---
+
+```julia; echo=false, results="hidden"
+import Pkg
+Pkg.activate(joinpath(@__DIR__))
+Pkg.instantiate()
+```
+
+```julia; echo=false, results="hidden"
+include(joinpath(@__DIR__, "..", "scripts", "select_backend.jl"))
+
+using Random, FFTW, Statistics, LinearAlgebra, CairoMakie
+import KineticDR as KDR
+
+set_theme!(Theme(
+    backgroundcolor = :white,
+    Axis = (
+        topspinevisible  = false, rightspinevisible = false,
+        xgridvisible     = false, ygridvisible      = false,
+        titlesize = 13, xlabelsize = 12, ylabelsize = 12,
+        xticklabelsize = 11, yticklabelsize = 11,
+    ),
+    Lines   = (linewidth = 1.8,),
+    Scatter = (markersize = 6,),
+))
+
+const WONG = [:black, "#E69F00", "#56B4E9", "#009E73",
+              "#F0E442", "#0072B2", "#D55E00", "#CC79A7"];
+```
+
+This file follows the electron model of the charge-form Darwin solver (`EMSolverDKPolDensity`, `step_charge_form!`) from cold drift-fluid electrons to linear drift-kinetic (DK) electrons and later to nonlinear runs. The field solver, its time integration and the tests of the cold model are documented in `field_solver_tests.jmd`; here each stage adds one electron model and checks it against an independent dispersion reference.
+
+## Roadmap
+
+| Stage | Electron model | Status | Reference |
+|---|---|---|---|
+| 1 | cold drift fluid (`ColdFluid`, `DriftFluid`) | implemented, tested (commit `314f744`) | KineticDR `Darwin`, `Cold` ions, `DriftKinetic(polarization = w, polarization_form = :density, mirror = false)` at $T_e \to 0$ |
+| 2 | linear DK, $T_e > 0$, $T_{e\perp} = 0$ (`LinearDK`) | implemented, tested against KineticDR (time domain) | KineticDR `DriftKinetic(mirror = false, polarization = w, polarization_form = :density)` |
+| 3 | nonlinear (fluid, then DK) | later | exact nonlinear invariants; small-amplitude limit of stages 1–2 |
+
+Fixed decisions:
+
+- The polarisation density stays in the field solver (identity form, mass and charge of the drift species).
+- The species/model interface stays in bslLD for now.
+- No mirror force: $T_{e\perp} = 0$. A mirror force needs its energy partner, the electron magnetisation current in perpendicular Ampère's law and in the quasineutrality identity; consistent only when taken from the long-wavelength limit of gyrokinetic electrons.
+
+## 1. Cold drift-fluid electrons (baseline)
+
+Electrons are a species with $q = -1$, $m = \mu$ and the drift closure, linearised around $N_0 = 1$:
+
+$$\partial_t\delta N_e = -\frac{1}{b_0}\,\hat{b}\cdot\nabla\times\mathbf{E} - \partial_\parallel u_{e\parallel}, \qquad \partial_t u_{e\parallel} = -\frac{1}{\mu}E_\parallel, \qquad \mathbf{u}_{e\perp} = \frac{\mathbf{E}\times\hat{b}}{b_0}.$$
+
+`step_charge_form!((ions, electrons), sol, grid, solver, dt)` couples them to kinetic or cold-fluid ions. The response of this model to the stage field is exact, so the electrons need no corrector.
+
+The check here: eigenfrequencies of one step (cold ions, oblique $\mathbf{k}$) against the roots of the continuum dispersion relation $\mathsf{D}(\omega, \mathbf{k})\hat{\mathbf{E}} = 0$ of the model (KineticDR: `Darwin`, `Cold` ions, `DriftKinetic(polarization = w, polarization_form = :density, mirror = false)` electrons at $T_e \to 0$). The second panel asks whether the cold electron model is physical for these branches: it is the inertial limit $\omega \gg k_\parallel v_{te}$, with $v_{te}^2 = T_e/(T_i\mu)$.
+
+```julia; echo=false, results="hidden", label="sim-fluid"
+β_f = 0.5; μ_f = 0.01; kz_f = 0.5; dt_f = 0.01
+cold_electrons(grid) = bslLD.Species(bslLD.ColdFluid(grid, bslLD.DriftFluid()); q = -1, m = μ_f)
+
+# One-step map of step_charge_form! on the Fourier mode (k⊥, k∥); 2D grid, x₁ ⊥ b̂, x₂ ∥ b̂.
+# State: (δn_i, u_i, B, δN_e, u_e∥).
+function step_map(kp, kz, dt; w=1.0, N=4)
+    grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [2π/kp, 2π/kz, 1.0, 1.0], [N, N, 1, 1], 2, 1.0, 2)
+    ph = [kp*x + kz*z for (x, z) in Iterators.product(grid.xaxes...)]
+    z3() = bslLD.VectorField([bslLD.ScalarField(zeros(N, N)) for _ in 1:3])
+    solver = bslLD.EMSolverDKPolDensity(β_f, μ_f; w)
+    state(fl, el, sol) = (fl.delta_n, fl.u..., sol.B..., el.delta_n, el.u[2])
+    amp(a) = sum(a .* exp.(-im .* ph)) / length(a)
+    G = zeros(ComplexF64, 9, 9)
+    for j in 1:9
+        fl, el, sol = bslLD.ColdIonFluid(grid), cold_electrons(grid), bslLD.FieldSolution(z3(), z3())
+        state(fl, el, sol)[j].data .= cos.(ph)
+        bslLD.step_charge_form!((fl, el), sol, grid, solver, dt)
+        G[:, j] .= [amp(v.data) for v in state(fl, el, sol)] ./ 0.5
+    end
+    return G
+end
+
+# Physical frequencies: |λ| > 1/2 and 0.05 < Re ω < π/(2dt).
+function step_frequencies(kp, kz, dt; w=1.0)
+    λ = eigvals(step_map(kp, kz, dt; w))
+    ω = im .* log.(λ) ./ dt
+    return sort(real.(ω[@. abs(λ) > 0.5 && 0.05 < real(ω) < π/(2dt)]))
+end
+
+# Continuum reference (KineticDR): cold ions, cold T⊥ = 0 drift electrons with polarisation density w.
+cold_model(w) = KDR.Model((KDR.Species(response = KDR.Cold()),
+                           KDR.Species(q = -1, m = μ_f, T = 1e-12, response = KDR.DriftKinetic(polarization = w,
+                                       polarization_form = :density, mirror = false))),
+                          KDR.Darwin(beta = β_f))
+cold_root(ω, kp, kz; w=1.0) = real(first(KDR.find_root(cold_model(w), KDR.Wavevector(kx = kp, ky = 0.0, kz = kz), complex(ω); δ = 1e-6)))
+
+kps_f = 0.25:0.25:4.0
+modes_f = Dict(w => [(kp, ω, cold_root(ω, kp, kz_f; w)) for kp in kps_f for ω in step_frequencies(kp, kz_f, dt_f; w)]
+               for w in (1.0, 0.0))
+vte(Te) = sqrt(Te / μ_f)
+```
+
+```julia; echo=false, label="fig-fluid", fig_cap="Cold ions and cold drift-fluid electrons, k∥ = 0.5, β = 0.5, μ = 0.01. Left: eigenfrequencies of one step (dt = 0.01, markers) and continuum roots of the model (lines), w = 1 and w = 0. Right: parallel phase speed of the same branches over the electron thermal speed for T_e = T_i; below the dashed line (ω < k∥ v_te) the electrons are adiabatic, not inertial, and the cold model is not physical."
+
+fig = Figure(size=(1000, 420))
+ax = Axis(fig[1, 1], xlabel="k⊥ ρᵢ", ylabel="ω/Ωᵢ", title="cold drift-fluid electrons, k∥ρᵢ = $kz_f", limits=((0, 4.1), (0, 12)))
+for (w, col) in ((1.0, WONG[6]), (0.0, WONG[7]))
+    m = modes_f[w]
+    for branch in (filter(x -> x[3] < 1, m), filter(x -> x[3] >= 1, m))
+        lines!(ax, first.(branch), last.(branch); color=(col, 0.6))
+    end
+    scatter!(ax, first.(m), getindex.(m, 2); color=col, label="w = $w")
+end
+hlines!(ax, [1/sqrt(μ_f)]; color=:gray, linestyle=:dash)
+axislegend(ax; position=:lt)
+ax2 = Axis(fig[1, 2], xlabel="k⊥ ρᵢ", ylabel="ω / (k∥ v_te)", yscale=log10, title="inertial vs adiabatic electrons (T_e = T_i)")
+for (b, (sel, col)) in enumerate(((x -> x[3] < 1, WONG[4]), (x -> x[3] >= 1, WONG[2])))
+    m = filter(sel, modes_f[1.0])
+    scatterlines!(ax2, first.(m), last.(m) ./ (kz_f * vte(1.0)); color=col, label=b == 1 ? "slow branch" : "fast branch")
+end
+hlines!(ax2, [1.0]; color=:gray, linestyle=:dash)
+axislegend(ax2; position=(1.0, 0.45))
+fig
+```
+
+```julia; echo=false, results="markup", label="tab-fluid"
+for w in (1.0, 0.0)
+    println("w = $w: max relative frequency error vs continuum (dt = $dt_f): ",
+            round(maximum(abs(ω/r - 1) for (_, ω, r) in modes_f[w]), sigdigits=3))
+end
+slow = filter(x -> x[3] < 1, modes_f[1.0])
+println("slow branch, w = 1: ω/(k∥ v_te) at T_e = T_i between ", round(minimum(last.(slow)) / (kz_f*vte(1.0)), sigdigits=2),
+        " and ", round(maximum(last.(slow)) / (kz_f*vte(1.0)), sigdigits=2),
+        "; the cold model needs T_e/T_i ≪ ", round((minimum(last.(slow)) / kz_f)^2 * μ_f, sigdigits=2))
+```
+
+The slow (Alfvénic) branch has $\omega \ll k_\parallel v_{te}$ already for $T_e = T_i$: at these $\beta_i \gg \mu$ the electrons respond adiabatically, and the cold model holds only for very cold electrons. The scheme is converged for this model (second order, `field_solver_tests.jmd`); the physics needs stage 2.
+
+## 2. Linear drift-kinetic electrons
+
+**Model.** Phase-space density perturbation $\delta F = \delta f + F_0\,\delta B_\parallel/b_0$ (perturbation of $B_\parallel^* f$), Maxwellian $F_0$ with $T_e$, $T_{e\perp} = 0$. The linearised guiding-centre Liouville equation is
+
+$$\partial_t\delta F + v_\parallel\partial_\parallel\delta f + \frac{F_0}{b_0}\,\hat{b}\cdot\nabla\times\mathbf{E} + \frac{q}{m}E_\parallel F_0' = 0 .$$
+
+The streaming acts on $\delta f$, not on $\delta F$: the Jacobian part $F_0\delta B_\parallel/b_0$ (the frozen-in $E\times B$ compression) does not stream. Streaming $\delta F$ would add $-v_\parallel\partial_\parallel(F_0\delta B_\parallel)/b_0$, the mirror force of an isotropic Maxwellian without its magnetisation current. With $T_{e\perp} = 0$, $\delta B_\parallel$ therefore does not couple to the parallel motion. The density and parallel-current moments reproduce stage 1 for $T_e \to 0$ and at $k_\parallel = 0$.
+
+**Implementation** (`Species(LinearDK(grid; T_e); q = -1, m = μ)`: a species is $(q, m)$ plus a model that owns the state; a first step towards a full DK model sharing the kinetic parallel advection; no change to the field solve; plan in `kinetics/plans/bslld-linear-dk-electrons.md`):
+
+| Building block | Linear DK | Shared with the kinetic ions |
+|---|---|---|
+| state | $\delta F(\mathbf{x}, v_\parallel)$ in a `Species` on its own 1V grid (field-grid x axes, $\lvert v_\parallel\rvert \le 6 v_{te}$); $q$, $m$, $T_e$ | `Species`, `DistributionGrid` |
+| `push_free!` | $\delta F \leftarrow S(\delta F - F_0 B_\parallel/b_0) + F_0 B_\parallel/b_0$, $S$ = `advectX!` along `Bdir` over $\Delta t/2$, with $B^n$ (first half) and $B^{n+1}$ (second half) | `advectX!`, with a new velocity-direction map `vdirs = (Bdir,)` |
+| `push_field!` | $\delta F \mathrel{-}= \Delta t\,[F_0\,\hat{b}\cdot\nabla\times\mathbf{E}/b_0 + (q/m)E_\parallel F_0']$ via `add_linear_dk_kick!` in `sources.jl` (linear only; full model: `advectV!` + $E\times B$ advection) | source-kernel pattern of `add_kappaT!` |
+| `moments_at` | $\rho = q\int\delta F$, $J_\parallel = q\int v\,\delta F$ | `compute_density`, `compute_current` |
+| `stage_response` | drift-fluid form; $\rho^{n+1}$ with the discrete streaming multipliers $e^{-ik_\parallel v\Delta t/2}$ and $B_\parallel^n$; exact for Fourier streaming | corrector of `step_charge_form!` for Lagrange |
+
+**Continuum reference** (KineticDR): `DriftKinetic(polarization = w, polarization_form = :density, mirror = false)`. With $\zeta = \omega/(\sqrt{2}k_\parallel v_{te})$ the electron parallel current is
+
+$$J_\parallel = -i\frac{q^2}{m}\,\frac{\omega\,[1+\zeta Z(\zeta)]}{k_\parallel^2 v_{te}^2}\,E_\parallel ,$$
+
+which gives the cold limit $iq^2/(m\omega)$, adiabatic electrons for $\omega \ll k_\parallel v_{te}$, and electron Landau damping. The $E\times B$ Hall current, the polarisation density and the $k_\parallel = 0$ response are those of stage 1. `mirror = false` drops the $\delta B_\parallel$ couplings $M_{yy}$ and $M_{yz}$ of the isotropic drift-kinetic tensor.
+
+**Verified so far.**
+- Unit tests (`test/solvers_test.jl`): the stage response equals the push to round-off; the Jacobian part $F_0\delta B_\parallel$ is stationary; $k_\parallel = 0$ is identical to stage 1; $T_e\to0$ converges at $O(T_e)$; second order in $\Delta t$; quasineutrality held; Lagrange streaming with the corrector converges.
+- One time-domain check, $k = (1, 0.5)$, $w = 1$, cold ions: all branches with their Landau damping agree with the KineticDR roots to $\sim10^{-4}$ (e.g. $T_e = 0.2$: $0.75084 - 0.028451i$ against $0.75084 - 0.028455i$).
+
+**Dispersion: DK versus fluid electrons.** Cold ions, $w = 1$, $\beta_i = 0.5$, $\mu = 0.01$, $k_\parallel = 0.5$ as in stage 1.
+- **Simulation:** one oblique Fourier mode on a $4\times4$ grid, `LinearDK` with $N_v = 512$ intervals on $\pm7v_{te}$, $\Delta t = 0.01$. The run lasts $t \le \min(60, 0.8\,T_{\rm rec})$, where $T_{\rm rec} = 2\pi/(k_\parallel\Delta v)$ is the recurrence time of the velocity grid.
+- **Fit:** the complex frequencies come from a matrix-pencil fit of a sum of damped exponentials to three signals together ($\delta B_\parallel$, $\delta n_i$, $\delta B_\perp$).
+- **Reference:** KineticDR `Darwin` with `Cold` ions and `DriftKinetic(polarization = 1, polarization_form = :density, mirror = false)` electrons (solid), and the same with cold electrons, $T_e \to 0$ (dashed).
+- **What is compared:** for every weakly damped KineticDR root ($\gamma < 0.3\,\mathrm{Re}\,\omega$), the nearest fitted frequency. Strongly damped roots ($\gamma \sim \omega$) are not resolved by a single-mode run and are not shown.
+
+```julia; echo=false, results="hidden", label="sim-dk"
+# KineticDR reference: cold ions, T⊥ = 0 drift-kinetic electrons with polarisation density w.
+dk_model(Te; w=1.0) = KDR.Model((KDR.Species(response = KDR.Cold()),
+    KDR.Species(q = -1, m = μ_f, T = Te, response = KDR.DriftKinetic(polarization = w, polarization_form = :density, mirror = false))),
+    KDR.Darwin(beta = β_f))
+kvec(kp; kz=kz_f) = KDR.Wavevector(kx = kp, ky = 0.0, kz = kz)
+weak(ω) = real(ω) > 0.02 && -imag(ω) < 0.3real(ω)          # resolved by the time-domain fit
+weak_roots(m, kp) = filter(weak, KDR.find_modes(m, kvec(kp); re = 0.02:0.1:6.0, imag = (-0.1, -0.01, 0.002)))
+
+# One oblique mode, cold ions + LinearDK electrons; samples of the (δB∥, δn_i, δB⊥) amplitudes.
+function dk_run(kp, Te; w=1.0, dt=0.01, Nv=512, vmax=7, Tmax=60.0, every=2)
+    grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [2π/kp, 2π/kz_f, 1.0, 1.0], [4, 4, 1, 1], 2, 1.0, 2)
+    z3() = bslLD.VectorField([bslLD.ScalarField(zeros(4, 4)) for _ in 1:3])
+    ph = [kp*x + kz_f*z for (x, z) in Iterators.product(grid.xaxes...)]
+    ions = bslLD.ColdIonFluid(grid)
+    ions.delta_n.data .= 1e-4 .* cos.(ph); ions.u[3].data .= 1e-4 .* sin.(ph)
+    el = bslLD.Species(bslLD.LinearDK(grid; T_e = Te, Nv, vmax); q = -1, m = μ_f)
+    sol = bslLD.FieldSolution(z3(), z3()); sol.B[2].data .= 1e-4 .* cos.(ph .+ 0.4)
+    solver = bslLD.EMSolverDKPolDensity(β_f, μ_f; w)
+    bslLD.quasineutral_drift!((ions, el), sol.B, grid, solver)
+    Trec = 2π / (kz_f * sqrt(Te/μ_f) * 2vmax/Nv)
+    amp(a) = sum(a .* exp.(-im .* ph)) / length(a)
+    S = Vector{ComplexF64}[]
+    for n in 1:round(Int, min(Tmax, 0.8Trec)/dt)
+        bslLD.step_charge_form!((ions, el), sol, grid, solver, dt)
+        n % every == 0 && push!(S, [amp(sol.B[2].data), amp(ions.delta_n.data), amp(sol.B[3].data)])
+    end
+    return reduce(hcat, S), every*dt
+end
+
+# Multi-signal matrix pencil: M damped exponentials e^{-iωt} common to all rows of S (sample step h).
+function pencil(S, h, M)
+    N = size(S, 2); L = N ÷ 2
+    Y = reduce(vcat, [[S[c, i+j-1] for i in 1:N-L, j in 1:L+1] for c in axes(S, 1)])
+    V = svd(Y).V[:, 1:M]
+    return im .* log.(eigvals(pinv(V[1:end-1, :]) * V[2:end, :])) ./ h
+end
+
+# For each weakly damped KineticDR root, the nearest fitted frequency.
+function compare(Te, kp; w=1.0, kw...)
+    roots = weak_roots(dk_model(Te; w), kp)
+    fit = pencil(dk_run(kp, Te; w, kw...)..., 10)
+    return [(r, fit[argmin(abs.(fit .- r))]) for r in roots]
+end
+relerr(pairs) = maximum(abs(f - r)/abs(r) for (r, f) in pairs; init = 0.0)
+
+Tes_dk = (1e-3, 1e-2, 0.1, 1.0)
+kps_dk = 0.25:0.25:2.5
+cmp_dk = Dict(Te => [(kp, compare(Te, kp)) for kp in kps_dk] for Te in Tes_dk)
+
+# Branch lines: weakly damped roots at the first k⊥, tracked in k⊥ (DK electrons; cold electrons T_e → 0).
+kfine = 0.25:0.025:2.5
+branches(m) = [KDR.track_branch(m, kvec.(kfine), r; δ = 1e-4) for r in weak_roots(m, first(kfine))]
+lines_dk = Dict(Te => branches(dk_model(Te)) for Te in Tes_dk)
+lines_cold = branches(dk_model(1e-12))
+```
+
+```julia; echo=false, label="fig-dk-disp", fig_cap="Cold ions with T⊥ = 0 drift-kinetic electrons, w = 1, k∥ = 0.5, β = 0.5, μ = 0.01. Top: real frequency, bottom: damping rate (Landau), against k⊥ for four electron temperatures. Lines: KineticDR roots, DK electrons (solid, colour per branch) and cold electrons (dashed grey). Markers: matrix-pencil fits of bslLD time-domain runs (Δt = 0.01, Nv = 512)."
+fig = Figure(size=(1300, 640))
+floor_γ = 1e-7
+# colour per branch, counted from the fastest (the ion-acoustic root is below the range at T_e = 10⁻³)
+BRANCH = ["fast", "shear Alfvén / KAW", "ion acoustic"]
+bcol(i, n) = WONG[[4, 3, 2][n + 1 - i]]
+for (j, Te) in enumerate(Tes_dk)
+    ax1 = Axis(fig[1, j], title = "T_e/T_i = $Te", yscale = log10, limits = ((0, 2.6), (0.01, 10)),
+               ylabel = j == 1 ? "Re ω/Ωᵢ" : "", xticklabelsvisible = false)
+    ax2 = Axis(fig[2, j], xlabel = "k⊥ρᵢ", yscale = log10, limits = ((0, 2.6), (floor_γ, 1)),
+               ylabel = j == 1 ? "γ/Ωᵢ" : "")
+    for b in lines_cold
+        lines!(ax1, kfine, max.(real.(b), 1e-3); color = (:gray, 0.8), linestyle = :dash)
+    end
+    n = length(lines_dk[Te])
+    for (i, b) in enumerate(lines_dk[Te])
+        lines!(ax1, kfine, max.(real.(b), 1e-3); color = bcol(i, n))
+        lines!(ax2, kfine, max.(-imag.(b), floor_γ); color = bcol(i, n))
+    end
+    pts = [(kp, f) for (kp, pairs) in cmp_dk[Te] for (_, f) in pairs]
+    scatter!(ax1, first.(pts), real.(last.(pts)); color = :black, markersize = 5)
+    scatter!(ax2, first.(pts), max.(-imag.(last.(pts)), floor_γ); color = :black, markersize = 5)
+end
+Legend(fig[3, :], [[LineElement(color = WONG[c]) for c in (4, 3, 2)]..., LineElement(color = :gray, linestyle = :dash),
+                   MarkerElement(color = :black, marker = :circle)],
+       [BRANCH..., "cold electrons (KineticDR)", "bslLD fit"]; orientation = :horizontal, framevisible = false)
+fig
+```
+
+```julia; echo=false, results="markup", label="tab-dk"
+println("max relative error |ω_fit − ω_KDR|/|ω_KDR| over k⊥ ∈ [0.25, 2.5], weakly damped roots, w = 1:")
+for Te in Tes_dk
+    println("  T_e = $Te: ", round(maximum(relerr(p) for (_, p) in cmp_dk[Te]), sigdigits=2),
+            "   (", sum(length(p) for (_, p) in cmp_dk[Te]), " roots)")
+end
+w0 = [relerr(compare(0.1, kp; w = 0.0)) for kp in (0.5, 1.0, 2.0)]
+println("w = 0, T_e = 0.1, k⊥ = 0.5, 1, 2: ", round.(w0, sigdigits=2))
+```
+
+The branches:
+- **Fast branch** ($\omega \gtrsim 2$): almost unchanged by $T_e$.
+- **Shear-Alfvén branch** ($\omega \approx 0.7$ for cold electrons): becomes the kinetic Alfvén wave as $T_e$ grows. Its frequency rises with $k_\perp\rho_s$, $\rho_s^2 = T_e/T_i$ in units of $\rho_i^2$, and it is Landau damped.
+- **Ion-acoustic branch** ($\omega \approx k_\parallel c_s$, $c_s^2 = T_e/m_i$): a branch the cold model does not have.
+
+The errors are the time discretisation of the scheme, second order in $\Delta t$ (below). They are largest for the fast branch, where $\omega\Delta t$ is largest ($\approx 2.5\times10^{-4}$ at $\omega\Delta t \approx 0.05$).
+
+```julia; echo=false, results="hidden", label="sim-dk-Te"
+# Branches against T_e at k⊥ = 2: KineticDR roots continued in T_e from T_e = 1, and simulation fits.
+kp_T = 2.0
+Tfine = 10 .^ range(0, -3, length = 61)
+function continue_in_T(r0)
+    out = fill(complex(NaN), length(Tfine)); r = r0
+    for (i, Te) in enumerate(Tfine)
+        ω, ok = KDR.find_root(dk_model(Te), kvec(kp_T), r; δ = 1e-4)
+        ok || break
+        out[i] = r = ω
+    end
+    return out
+end
+lines_T = [continue_in_T(r) for r in weak_roots(dk_model(1.0), kp_T)]
+cold_T = weak_roots(dk_model(1e-12), kp_T)
+Tsim = 10 .^ (-3:0.5:0)
+cmp_T = [(Te, compare(Te, kp_T)) for Te in Tsim]
+```
+
+```julia; echo=false, label="fig-dk-Te", fig_cap="Branches at k = (2, 0.5) against the electron temperature (cold ions, w = 1). Lines: KineticDR roots of the DK model, continued from T_e = T_i; dashed grey: cold electrons; dotted: k∥ c_s (ion acoustic) and k∥ v_te (above it the electrons are inertial, below adiabatic). Markers: bslLD fits."
+fig = Figure(size=(1000, 420))
+ax1 = Axis(fig[1, 1], xlabel = "T_e/T_i", ylabel = "Re ω/Ωᵢ", xscale = log10, yscale = log10, limits = ((1e-3, 1), (0.01, 10)))
+ax2 = Axis(fig[1, 2], xlabel = "T_e/T_i", ylabel = "γ/Ωᵢ", xscale = log10, yscale = log10, limits = ((1e-3, 1), (floor_γ, 1)))
+hlines!(ax1, real.(cold_T); color = (:gray, 0.8), linestyle = :dash)
+lines!(ax1, Tfine, kz_f .* sqrt.(Tfine); color = :gray, linestyle = :dot)
+lines!(ax1, Tfine, kz_f .* sqrt.(Tfine ./ μ_f); color = :gray, linestyle = :dot)
+for (i, b) in enumerate(lines_T)
+    lines!(ax1, Tfine, max.(real.(b), 1e-3); color = bcol(i, length(lines_T)))
+    lines!(ax2, Tfine, max.(-imag.(b), floor_γ); color = bcol(i, length(lines_T)), label = BRANCH[length(lines_T) + 1 - i])
+end
+axislegend(ax2; position = :rb, framevisible = false)
+pts = [(Te, f) for (Te, pairs) in cmp_T for (_, f) in pairs]
+scatter!(ax1, first.(pts), real.(last.(pts)); color = :black)
+scatter!(ax2, first.(pts), max.(-imag.(last.(pts)), floor_γ); color = :black)
+text!(ax1, 1.5e-3, 0.5*sqrt(1.5e-3) * 1.3; text = "k∥c_s", fontsize = 11, color = :gray)
+text!(ax1, 1.5e-3, 0.5*sqrt(1.5e-3/μ_f) * 1.3; text = "k∥v_te", fontsize = 11, color = :gray)
+fig
+```
+
+```julia; echo=false, results="markup", label="tab-dk-conv"
+println("k = (2, 0.5), max relative error per T_e (and the root where it occurs):")
+for (Te, p) in cmp_T
+    e, i = findmax([abs(f - r)/abs(r) for (r, f) in p])
+    println("  T_e = $(round(Te, sigdigits=2)): ", round(e, sigdigits=2), " at ω = ", round(p[i][1], sigdigits=4))
+end
+println("Convergence, T_e = 0.1, k⊥ = 1, w = 1 (max relative error over the weakly damped roots):")
+for dt in (0.04, 0.02, 0.01)
+    println("  Δt = $dt, Nv = 512: ", round(relerr(compare(0.1, 1.0; dt)), sigdigits=3))
+end
+for Nv in (128, 256)
+    Trec = 2π / (kz_f * sqrt(0.1/μ_f) * 14/Nv)
+    println("  Δt = 0.01, Nv = $Nv (T_rec = $(round(Trec, digits=1)), run to 0.8 T_rec): ", round(relerr(compare(0.1, 1.0; Nv)), sigdigits=3))
+end
+```
+
+The error falls by four per halving of $\Delta t$: the scheme is second order for DK electrons. The one larger error in the $T_e$ scan ($10^{-3}$) is the ion-acoustic root at $T_e = 3.2\times10^{-3}$, $\omega = 0.028$. Its period ($\approx 225$) is much longer than the fit window ($t \le 60$), so this is a limit of the fit, not of the scheme. With fewer velocity intervals the error stays at the $\Delta t$ level as long as the run stays below the recurrence time. The fit window, not the $v_\parallel$ resolution, limits the damping rates that can be measured.
+
+## 3. Nonlinear tests (later)
+
+Required changes, in order:
+
+1. **Variable-coefficient stage solve.** $N(\mathbf{x})$ in the $E\times B$ current and $n(\mathbf{x})$ in the ion response couple the Fourier modes: Krylov or Picard iteration with the per-mode solve at the mean density as preconditioner; the corrector iterated to convergence.
+2. **Nonlinear drift fluid**, then nonlinear DK: $E\times B$ advection of $N$ (and of $\delta F$), conservative form with the $B_\parallel^*$ Jacobian; for DK the kick becomes `advectV!` on full $f$ with the velocity-direction map of stage 2.
+3. **$\mathbf{v}\times\delta\mathbf{B}$ in the ion push** ($\delta B_\parallel/B_0 \sim \beta\,\delta n$ at large amplitude).
+4. **Positivity and dealiasing** of quadratic products (2/3 rule; also removes the Nyquist-mode inconsistency seen in the convergence test of `field_solver_tests.jmd`).
+
+The quasineutrality identity stays valid for nonlinear $N$ and $\lvert\mathbf{B}\rvert$ (same $N/B^2$ in the polarisation density and the $E\times B$ current, fixed $\hat{b}$), so the charge form carries over.
+
+Tests: frozen-in $N_e/B_z$ conservation along the $E\times B$ flow at $\mathbf{k}\perp\hat{b}$ (exact nonlinear invariant), pressure-balanced structures, charge and energy diagnostics, and the small-amplitude limit against stages 1–2.

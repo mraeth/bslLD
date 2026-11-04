@@ -607,7 +607,7 @@ end
         ions = bslLD.ColdIonFluid(grid)
         ions.delta_n.data .= 1e-3 .* cos.(ph)
         ions.u[3].data .= 2e-3 .* sin.(ph)
-        el = bslLD.ColdFluid(grid, bslLD.DriftFluid(); q = -1, m = mu)
+        el = bslLD.Species(bslLD.ColdFluid(grid, bslLD.DriftFluid()); q = -1, m = mu)
         B = bslLD.VectorField([bslLD.ScalarField(zeros(N, N)) for _ = 1:3])
         B[2].data .= 3e-4 .* cos.(ph)
         bslLD.quasineutral_drift!((ions, el), B, grid, solver)
@@ -618,7 +618,7 @@ end
         @test bslLD.quasineutrality_residual((ions, el), B, grid, solver) < 1e-17
     end
 
-    cold_electrons(grid) = bslLD.ColdFluid(grid, bslLD.DriftFluid(); q = -1, m = mu)
+    cold_electrons(grid) = bslLD.Species(bslLD.ColdFluid(grid, bslLD.DriftFluid()); q = -1, m = mu)
 
     # One-step map of the cold step on the Fourier mode k = (k⊥, k∥) (Bdir = 3 in 1D, Bdir = 2 in
     # 2D): 9 complex amplitudes (δn_i, u_i, B, δN_e, u_e∥).
@@ -732,5 +732,130 @@ end
         ω, _ = step_frequencies(20.0, 0.0, 0.005, 1.0)
         @test abs(ω[1] / ω_cold(1.0, 20.0) - 1) < 1e-3
         @test ω[1] < 1 / sqrt(mu)
+    end
+end
+
+@testset "Linear DK electrons (charge form)" begin
+    bslLD.set_execution_space!(exec = bslLD.backend())
+    beta_i, mu = 0.5, 0.01
+    grid2(N) = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [8pi, 16pi, 1.0, 1.0], [N, N, 1, 1], 2, 1.0, 2)
+    z3(dims) = bslLD.VectorField([bslLD.ScalarField(zeros(dims)) for _ = 1:3])
+    drift_fluid(grid) = bslLD.ColdFluid(grid, bslLD.DriftFluid())
+
+    # Cold ions + electrons (drift fluid or DK, same δN = 0 and u∥) on one oblique mode.
+    function setup(grid, model)
+        ph = [2pi * (x / grid.max[1] + z / grid.max[2]) + 0.3 for (x, z) in Iterators.product(grid.xaxes...)]
+        ions = bslLD.ColdIonFluid(grid)
+        ions.delta_n.data .= 1e-3 .* cos.(ph)
+        ions.u[3].data .= 1e-3 .* sin.(ph)
+        el = bslLD.Species(model; q = -1, m = mu)
+        u = 1e-3 .* cos.(ph .+ 1)
+        if model isa bslLD.ColdFluid
+            el.u[2].data .= u
+        else                                       # δF = -(u/v_th) F0' carries J∥ = q u
+            dF0 = bslLD._dk_maxwellian(model)[2]
+            el.dist.data .= reshape(-u .* sqrt(mu), size(u)..., 1) .* reshape(dF0, 1, 1, :)
+        end
+        return ions, el
+    end
+    function run(grid, model, dt, T)
+        solver = bslLD.EMSolverDKPolDensity(beta_i, mu)
+        ions, el = setup(grid, model)
+        sol = bslLD.FieldSolution(z3(size(ions.delta_n.data)), z3(size(ions.delta_n.data)))
+        bslLD.quasineutral_drift!((ions, el), sol.B, grid, solver)
+        res = 0.0
+        for _ = 1:round(Int, T / dt)
+            bslLD.step_charge_form!((ions, el), sol, grid, solver, dt)
+            res = max(res, bslLD.quasineutrality_residual((ions, el), sol.B, grid, solver))
+        end
+        return (ni = copy(ions.delta_n.data), B = copy(sol.B[2].data), res = res)
+    end
+    diff(a, b) = maximum(abs.(a.ni .- b.ni)) + maximum(abs.(a.B .- b.B))
+
+    @testset "Model, normalisation, trait" begin
+        md = bslLD.LinearDK(grid2(8); T_e = 0.2, Nv = 32)
+        sp = bslLD.Species(md; q = -1, m = mu)
+        F0, dF0 = bslLD._dk_maxwellian(md)
+        v, dv = collect(md.grid.vaxes[1]), bslLD._dk_dv(md)
+        @test sum(F0) * dv ≈ 1 atol = 1e-14
+        @test sum(v .* dF0) * dv ≈ -1 atol = 1e-14
+        @test bslLD.response_class(sp) isa bslLD.Drift
+        @test bslLD.response_class(bslLD.ColdIonFluid(grid2(8))) isa bslLD.Magnetised
+        @test sp.dist === md.dist
+        @test_throws ArgumentError bslLD.LinearDK(grid2(8); T_e = 0.0)
+    end
+
+    @testset "Stage response equals the push (Fourier streaming)" begin
+        grid, dt, θ = grid2(8), 0.05, 0.5
+        _, el = setup(grid, bslLD.LinearDK(grid2(8); T_e = 0.2, Nv = 32))
+        B = z3((8, 8))
+        B[2].data .= 2e-3 .* [sin(x / 4 + z / 8) for (x, z) in Iterators.product(grid.xaxes...)]
+        bslLD.push_free!(el, grid, dt, 1; B)
+        r = bslLD.stage_response(el, grid, dt, θ; B)
+        @test r.exact
+        E = z3((8, 8))
+        for d = 1:3
+            E[d].data .= 1e-3 * d .* [cos(x / 2 - z / 4 + d) for (x, z) in Iterators.product(grid.xaxes...)]
+        end
+        Ja = bslLD.moments_at(el, grid, 0)[2]
+        bslLD.push_field!(el, E, grid, dt)
+        Jb = bslLD.moments_at(el, grid, 0)[2]
+        bslLD.push_free!(el, grid, dt, 2; B = bslLD.apply_faraday!(B, E, grid, dt))
+        ρ1 = bslLD.moments_at(el, grid, 0)[1]
+        a, b, pz = bslLD._cf_frame(grid)
+        sw, _ = bslLD._cf_kviews(ρ1, grid)
+        F(x) = bslLD._fft_c(x, sw)
+        Eh = (F(E[a].data), F(E[b].data), F(E[pz].data))
+        @test maximum(abs.(F(ρ1) .- bslLD._affine_at(r.rho, Eh...))) < 1e-15
+        @test maximum(abs.(F(Ja[pz] .+ θ .* (Jb[pz] .- Ja[pz])) .- bslLD._affine_at(r.J[3], Eh...))) < 1e-15
+    end
+
+    @testset "Only δf streams: δF = F0 δB∥ is stationary" begin
+        grid = grid2(8)
+        md = bslLD.LinearDK(grid; T_e = 0.2, Nv = 32)
+        el = bslLD.Species(md; q = -1, m = mu)
+        B = z3((8, 8))
+        B[2].data .= 1e-3 .* [cos(x / 4 + z / 8) for (x, z) in Iterators.product(grid.xaxes...)]
+        el.dist.data .= B[2].data .* reshape(bslLD._dk_maxwellian(md)[1], 1, 1, :)
+        F = copy(el.dist.data)
+        bslLD.push_free!(el, grid, 0.1, 1; B)
+        @test maximum(abs.(el.dist.data .- F)) < 1e-17
+        @test_throws ArgumentError bslLD.push_free!(el, grid, 0.1, 1)
+    end
+
+    @testset "k∥ = 0: identical to the drift fluid" begin
+        grid = bslLD.Grid([0.0, -1.0, -1.0], [4pi, 1.0, 1.0], [8, 1, 1], 1, 1.0, 3)
+        solver = bslLD.EMSolverDKPolDensity(beta_i, mu)
+        x = collect(grid.xaxes[1])
+        out = map((drift_fluid(grid), bslLD.LinearDK(grid; T_e = 1.0))) do model
+            ions = bslLD.ColdIonFluid(grid)
+            ions.delta_n.data .= 1e-3 .* cos.(x ./ 2)
+            ions.u[2].data .= 1e-3 .* sin.(x)
+            el = bslLD.Species(model; q = -1, m = mu)
+            sol = bslLD.FieldSolution(z3(8), z3(8))
+            bslLD.quasineutral_drift!((ions, el), sol.B, grid, solver)
+            for _ = 1:50
+                bslLD.step_charge_form!((ions, el), sol, grid, solver, 0.02)
+            end
+            (copy(ions.delta_n.data), copy(sol.B[3].data), copy(sol.E[1].data))
+        end
+        @test all(maximum(abs.(a .- b)) < 1e-15 for (a, b) in zip(out...))
+    end
+
+    @testset "T_e → 0, second order in dt, QN, Lagrange streaming" begin
+        grid = grid2(8)
+        fl = run(grid, drift_fluid(grid), 0.02, 2.0)
+        e3 = diff(run(grid, bslLD.LinearDK(grid; T_e = 1e-3), 0.02, 2.0), fl)
+        e4 = diff(run(grid, bslLD.LinearDK(grid; T_e = 1e-4), 0.02, 2.0), fl)
+        @test 9 < e3 / e4 < 11                                    # O(T_e)
+
+        dk(dt) = run(grid, bslLD.LinearDK(grid; T_e = 0.1), dt, 1.0)
+        ref = dk(0.0025)
+        @test 3.5 < diff(dk(0.02), ref) / diff(dk(0.01), ref) < 4.5
+        @test ref.res < 1e-11                                     # absolute; amplitudes 1e-3
+
+        lag(N) = (g = grid2(N); diff(run(g, bslLD.LinearDK(g; T_e = 0.1, method = bslLD.Lagrange(6)), 0.02, 1.0),
+                                     run(g, bslLD.LinearDK(g; T_e = 0.1), 0.02, 1.0)))
+        @test lag(8) / lag(16) > 20                               # corrector: converges with the stencil
     end
 end
