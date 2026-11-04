@@ -552,3 +552,86 @@ end
         @test maximum(abs.(J_stage[d].data .- expected)) < 1e-12
     end
 end
+
+@testset "EMSolverDKPolDensity" begin
+    bslLD.set_execution_space!(exec = bslLD.backend())
+    beta_i, mu = 0.5, 0.01
+    c = 2 / beta_i
+    ω_cold(w, k) = sqrt(c * k^2 * (1 + w * mu) / (1 + w * mu + w * mu * c * k^2))
+    grid1d(L, Nx) = bslLD.Grid([0.0, -1.0, -1.0], [L, 1.0, 1.0], [Nx, 1, 1], 1, 1.0, 3)
+    zero3(Nx) = bslLD.VectorField([bslLD.ScalarField(zeros(Nx)) for _ = 1:3])
+
+    @testset "Argument validation" begin
+        solver = bslLD.EMSolverDKPolDensity(beta_i, mu)
+        sol = bslLD.FieldSolution(zero3(8), zero3(8))
+        rho = bslLD.ScalarField(ones(8))
+        J = bslLD.VectorField([zeros(8), zeros(8)])
+        g_par = bslLD.Grid([0.0, -1.0, -1.0], [2pi, 1.0, 1.0], [8, 1, 1], 1, 1.0, 1)
+        @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho, J), g_par, solver, 0.1)
+        @test_throws ArgumentError bslLD.solve_fields!(sol, bslLD.Moments(rho), grid1d(2pi, 8), solver, 0.1)
+    end
+
+    @testset "Quasineutral B_z, single mode" begin
+        Nx, L, m, w = 32, 4pi, 3, 0.7
+        grid = grid1d(L, Nx)
+        x = collect(grid.xaxes[1])
+        k = 2pi * m / L
+        rho = bslLD.ScalarField(1 .+ 1e-3 .* cos.(k .* x))
+        J = bslLD.VectorField([zeros(Nx), 2e-3 .* sin.(k .* x)])
+        B = zero3(Nx)
+        bslLD.quasineutral_B!(B, rho, J, grid, bslLD.EMSolverDKPolDensity(beta_i, mu; w))
+        # (1 + wμck²) B = δn + ∂_x(wμ J_y)
+        expected = (1e-3 .* cos.(k .* x) .+ w * mu * 2e-3 * k .* cos.(k .* x)) ./ (1 + w * mu * c * k^2)
+        @test maximum(abs.(B[3].data .- expected)) < 1e-15
+    end
+
+    @testset "k = 0 balance" begin
+        Nx = 8
+        grid = grid1d(2pi, Nx)
+        sol = bslLD.FieldSolution(zero3(Nx), zero3(Nx))
+        moments = bslLD.Moments(bslLD.ScalarField(ones(Nx)), bslLD.VectorField([fill(0.3, Nx), fill(0.7, Nx)]))
+        bslLD.solve_fields!(sol, moments, grid, bslLD.EMSolverDKPolDensity(beta_i, mu), 0.1)
+        @test maximum(abs.(sol.Enew[1].data .+ 0.7)) < 1e-14
+        @test maximum(abs.(sol.Enew[2].data .- 0.3)) < 1e-14
+    end
+
+    # Cold perpendicular standing wave: frequency from the recurrence a[s+1] + a[s-1] = 2cos(ωdt) a[s]
+    function cold_mode(w, k, dt; Nx = 32, m = 4, Tmax = 40.0)
+        L = 2pi * m / k
+        grid = grid1d(L, Nx)
+        solver = bslLD.EMSolverDKPolDensity(beta_i, mu; w)
+        fluid = bslLD.ColdIonFluid(grid)
+        fluid.delta_n.data .= 1e-6 .* cos.(k .* collect(grid.xaxes[1]))
+        sol = bslLD.FieldSolution(zero3(Nx), zero3(Nx))
+        bslLD.quasineutral_B!(sol.B, bslLD.ScalarField(1 .+ fluid.delta_n.data),
+                              bslLD.VectorField([zeros(Nx), zeros(Nx)]), grid, solver)
+        a = Float64[]
+        qn = 0.0
+        kk = 2pi .* bslLD.FFTW.fftfreq(Nx, Nx / L)
+        for _ = 1:round(Int, Tmax / dt)
+            bslLD.step_cold!(fluid, sol, grid, solver, dt)
+            nh = bslLD.FFTW.fft(fluid.delta_n.data)
+            push!(a, real(nh[m+1]))
+            r = (1 .+ w * mu * c .* kk .^ 2) .* bslLD.FFTW.fft(sol.B[3].data) .- nh .-
+                im .* kk .* w .* mu .* bslLD.FFTW.fft(fluid.u[2].data)
+            qn = max(qn, maximum(abs.(r[2:end])))
+        end
+        cosωdt = sum(a[2:end-1] .* (a[3:end] .+ a[1:end-2])) / (2 * sum(abs2, a[2:end-1]))
+        return acos(cosωdt) / dt, qn
+    end
+
+    @testset "Cold mode: frequency (2nd order) and exact quasineutrality, w = $w" for w in (1.0, 0.0)
+        k = 2.0
+        (ω1, qn), (ω2, _) = cold_mode(w, k, 0.02), cold_mode(w, k, 0.01)
+        e1, e2 = abs(ω1 / ω_cold(w, k) - 1), abs(ω2 / ω_cold(w, k) - 1)
+        @test e2 < 1e-4
+        @test e1 / e2 > 3.5            # second order
+        @test qn < 1e-14               # absolute; δn ~ 1e-6
+    end
+
+    @testset "Fast wave capped at ω_LH" begin
+        ω, _ = cold_mode(1.0, 20.0, 0.005; Tmax = 10.0)
+        @test abs(ω / ω_cold(1.0, 20.0) - 1) < 1e-3
+        @test ω < 1 / sqrt(mu)
+    end
+end

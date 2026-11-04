@@ -147,14 +147,15 @@ Ex  = sol.E[1]   # ScalarField
 
 ### Darwin / hybrid-kinetic (EM, low-frequency)
 
-The Darwin model retains electromagnetic effects while filtering out light waves by neglecting the transverse displacement current. Two variants are provided for kinetic-ion / fluid-electron plasmas, parametrised by $\beta_i$ (ion plasma beta) and $\mu = m_e/m_i$ (mass ratio).
+The Darwin model retains electromagnetic effects while filtering out light waves by neglecting the transverse displacement current. Three variants are provided for kinetic-ion / fluid-electron plasmas, parametrised by $\beta_i$ (ion plasma beta) and $\mu = m_e/m_i$ (mass ratio).
 
 | Solver | Description | Required moments |
 |--------|-------------|-----------------|
-| `EMSolverDKPol(β_i, μ)` | Darwin-Kinetic **with** polarisation-drift correction. Implicit $\mathbf{E}_\perp$ update via a $2\times2$ linear system per Fourier mode; Helmholtz solve for $E_\parallel$. Staggered Faraday for $\mathbf{B}$. | `rho`, `J` (⊥ current), `Pi_diff` (anisotropic pressure) |
+| `EMSolverDKPol(β_i, μ)` | Darwin-Kinetic **with** the electron polarisation current $\mu\partial_t\mathbf{E}_\perp$. Implicit $\mathbf{E}_\perp$ update via a $2\times2$ linear system per Fourier mode; Helmholtz solve for $E_\parallel$. Staggered Faraday for $\mathbf{B}$. | `rho`, `J` (⊥ current), `Pi_diff` (anisotropic pressure) |
 | `EMSolverDKNoPol(β_i, μ)` | Darwin-Kinetic **without** polarisation drift. Fully spectral $3\times3$ Cramer solve per Fourier mode; simultaneous Faraday update. | `rho`, `J`, `Pi_diff` |
+| `EMSolverDKPolDensity(β_i, μ; w = 1)` | Drift-kinetic electrons with the polarisation **density** only (weight $w$), in charge form: quasineutrality $(1 + w d_e^2 k^2)\hat{B}_z = \hat{n}_i + ikw\mu\hat{J}_{iy}$ is imposed at every time level. 1D with $\mathbf{k}\perp\hat{b}$ (`Bdir = 3`) only. Use `solve_fields_moment_implicit!` (moment-implicit stage field of an X–C–X step) and `quasineutral_B!`; `step_cold!` implements the step for `ColdIonFluid`. | `rho`, `J` |
 
-Both solvers use `solve_fields!(sol, moments, grid, solver, dt)` (in-place, stores result in `sol.Enew`):
+The rate-form solvers use `solve_fields!(sol, moments, grid, solver, dt)` (in-place, stores result in `sol.Enew`):
 
 ```julia
 solver  = bslLD.EMSolverDKPol(beta_i, mu)
@@ -195,7 +196,7 @@ Diagnostic helpers: `bslLD.electromagnetic_energy(E, B; params)` and `bslLD.maxw
 |-------|--------------|-------------|-----------------|
 | Vlasov–Poisson (electrostatic) | 1D1v or 1D2v | `PoissonSolver` | `landau_damping`, `ibw` |
 | Ion Bernstein Waves | 1D2v + background $B_0$ | `PoissonSolver` (with gyration) | `ibw` |
-| Darwin hybrid-kinetic | 1D2v + background $B_0$ | `EMSolverDKPol` / `EMSolverDKNoPol` | `em_cases` |
+| Darwin hybrid-kinetic | 1D2v + background $B_0$ | `EMSolverDKPol` / `EMSolverDKNoPol` / `EMSolverDKPolDensity` | `em_cases`, `field_solver_tests.jmd` |
 | E×B drift verification | 1D2v + external $E$, $B$ | none (imposed fields) | `exb_test` |
 | Vacuum EM wave propagation | 1D or 2D | `EMSolverVacuum` | `solve_maxwell` |
 
@@ -221,7 +222,7 @@ bslLD/
 │   │   ├── field_solver.jl            # AbstractFieldSolver, Moments, FieldSolution
 │   │   ├── solvers_electrostatic.jl   # PoissonSolver, AdiabaticSolver
 │   │   ├── solvers_vacuum.jl          # EMSolverVacuum, VacuumMaxwellParams
-│   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol
+│   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol, EMSolverDKPolDensity
 │   │   └── cold_plasma.jl             # ColdIonFluid for linear EM benchmarks
 │   └── execution.jl                   # use_cpu!, use_cuda!, backend switching
 ├── examples/                          # Jupyter notebooks (landau_damping, ibw, em_cases, …)
