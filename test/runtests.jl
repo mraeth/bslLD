@@ -11,5 +11,6 @@ using bslLD
     include("solvers_test.jl")
     include("maxwell_test.jl")
     include("exb_bracket_test.jl")
+    include("es_qn_test.jl")
     include("gpu_test.jl")
 end

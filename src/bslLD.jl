@@ -125,6 +125,7 @@ include("maxwell/solvers_hybrid.jl")
 include("maxwell/cold_plasma.jl")
 include("maxwell/charge_form.jl")
 include("maxwell/dk_electrons.jl")
+include("maxwell/es_quasineutral.jl")
 include("kinetics/exbBracketCart.jl")
 include("sources.jl")
 

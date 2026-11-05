@@ -48,11 +48,20 @@ push_field!(sp::KineticSpecies, E::VectorField, grid::Grid, dt::Real; phase = 0)
     (advectV!(sp, grid, _kinetic_time(sp, grid, dt, phase, 0.5, 1.0), E); sp)
 
 function moments_at(sp::KineticSpecies, grid::Grid, phase::Real)
-    J = compute_current(sp, grid, phase)
+    J = _lab_current_arrays(sp, grid, phase)
     s = sp.q * thermal_velocity(sp)
-    z = zero(J[1].data)
+    z = zero(J[1])
     return (sp.q .* compute_density(sp.dist, grid).data,
-            ntuple(d -> d <= length(J) ? s .* J[d].data : z, 3))
+            ntuple(d -> d <= length(J) ? s .* J[d] : z, 3))
+end
+
+# `compute_current(sp, grid, phase)` on backend arrays (that one collects to the CPU): the velocity
+# moments of the storage frame rotated back to the lab frame by R(Bdir, −(q/√m) phase).
+function _lab_current_arrays(sp::KineticSpecies, grid::Grid, phase::Real)
+    J = _current_arrays(sp.dist, grid)
+    NV = length(J)
+    Rot = R(grid.Bdir, -electric_acceleration_scale(sp) * phase)
+    return ntuple(a -> sum(Rot[a, b] .* J[b] for b = 1:NV), NV)
 end
 
 _save(sp::KineticSpecies) = copy(sp.dist.data)
