@@ -119,6 +119,18 @@ using LinearAlgebra
         @test maximum(abs.(ions.dist.data .- h)) < 1e-14
     end
 
+    @testset "E×B nonlinearity of ResistiveElectrons" begin
+        grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [2pi, 2pi, 1.0, 1.0], [16, 16, 1, 1], 2, 1.0, 3)
+        X = [(x, y) for x in grid.xaxes[1], y in grid.xaxes[2]]
+        φ = [sin(x) * cos(2y) for (x, y) in X]
+        δn = [cos(3x) * sin(y) for (x, y) in X]
+        # v_E = (−∂yφ, ∂xφ) = (2 sin x sin 2y, cos x cos 2y), ∇δn = (−3 sin 3x sin y, cos 3x cos y)
+        exact = [2sin(x) * sin(2y) * (-3sin(3x) * sin(y)) + cos(x) * cos(2y) * cos(3x) * cos(y) for (x, y) in X]
+        NL = bslLD._esqn_nonlinear(φ, δn, grid)
+        sw = bslLD.spectral_workspace(φ, grid)
+        @test maximum(abs.(bslLD.ifft_spatial!(similar(φ), NL, sw) .- exact)) < 1e-12
+    end
+
     @testset "BGK step (add_bgk!)" begin
         N, Nv, vmax = 6, 40, 6.0
         grid = bslLD.Grid([0.0, 0.0, -vmax, -vmax], [2pi, 2pi, vmax, vmax], [N, N, Nv, Nv], 2, 1.0, 3)
