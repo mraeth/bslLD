@@ -143,13 +143,27 @@ function _esqn_nonlinear(φ, δn, grid)
     return NL
 end
 
-# φ̂ = −Σ c0 / Σ cφ per mode; k = 0 and the filtered modes are zero.
+# 1 except on the Nyquist bin (index N/2 + 1, even N) of each axis, broadcastable against `arr`. The spectral
+# workspace sets k = 0 there, so the responses treat that bin as k = 0 along the axis while the kinetic ions carry
+# its real ±π/Δx structure: a φ̂ solved there is inconsistent and grows without bound (64 × 128 slab, panta_simulation
+# trials/s3_prod_nan_debug.jl: ×400 per 2 steps).
+function _esqn_nyquist_keep(arr)
+    masks = map(1:ndims(arr)) do d
+        N = size(arr, d)
+        v = [iseven(N) && N > 1 && i == N ÷ 2 + 1 ? 0.0 : 1.0 for i = 1:N]
+        reshape(copyto!(similar(real(arr), N), v), ntuple(i -> i == d ? N : 1, ndims(arr)))
+    end
+    return reduce((a, b) -> a .* b, masks)
+end
+
+# φ̂ = −Σ c0 / Σ cφ per mode; k = 0, the Nyquist bins and the filtered modes are zero.
 function _esqn_solve(responses, grid, solver::ElectrostaticQN)
     C0 = reduce((x, y) -> x .+ y, [r.c0 for r in responses])
     Cφ = reduce((x, y) -> x .+ y, [r.cφ for r in responses])
     _, _, _, k2 = _esqn_k(C0, grid)
+    keep = _esqn_nyquist_keep(C0)
     kcut2 = solver.filter^2 * maximum(k2)
-    return @. ifelse(iszero(k2) | (k2 > kcut2), zero(C0), -C0 / Cφ)
+    return @. ifelse(iszero(k2) | (k2 > kcut2) | iszero(keep), zero(C0), -C0 / Cφ)
 end
 
 function _esqn_store!(sol, Φ, grid)

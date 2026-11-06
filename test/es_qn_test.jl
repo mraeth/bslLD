@@ -119,6 +119,19 @@ using LinearAlgebra
         @test maximum(abs.(ions.dist.data .- h)) < 1e-14
     end
 
+    @testset "solve: Nyquist bins and filtered modes are zero" begin
+        Nx, Ny, Lx, Ly = 8, 16, 3.0, 5.0
+        grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [Lx, Ly, 1.0, 1.0], [Nx, Ny, 1, 1], 2, 1.0, 3)
+        C0 = ComplexF64.(randn(Nx, Ny) .+ im .* randn(Nx, Ny))
+        Φ = bslLD._esqn_solve([(c0 = C0, cφ = fill(-1.0 + 0im, Nx, Ny))], grid, bslLD.ElectrostaticQN(filter = 0.5))
+        kx = 2pi .* bslLD.FFTW.fftfreq(Nx, Nx) ./ Lx; ky = 2pi .* bslLD.FFTW.fftfreq(Ny, Ny) ./ Ly
+        kmax = sqrt(maximum(abs2, kx[[1:Nx÷2; Nx÷2+2:Nx]]) + maximum(abs2, ky[[1:Ny÷2; Ny÷2+2:Ny]]))
+        for i = 1:Nx, j = 1:Ny
+            cut = (i == Nx ÷ 2 + 1) || (j == Ny ÷ 2 + 1) || (i == 1 && j == 1) || hypot(kx[i], ky[j]) > 0.5kmax
+            @test Φ[i, j] == (cut ? 0 : C0[i, j])
+        end
+    end
+
     @testset "E×B nonlinearity of ResistiveElectrons" begin
         grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [2pi, 2pi, 1.0, 1.0], [16, 16, 1, 1], 2, 1.0, 3)
         X = [(x, y) for x in grid.xaxes[1], y in grid.xaxes[2]]
