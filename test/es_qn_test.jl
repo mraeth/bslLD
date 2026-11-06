@@ -146,7 +146,7 @@ using LinearAlgebra
         cφ = @. dt^2 * k2 / 2 + 0im                                             # kinetic-ion-like weak response
         er = bslLD._esqn_electron_response(el, grid, dt, zero(C0), nothing, zero(C0), 0.0)
         rs = [(c0 = C0, cφ = cφ, exact = false), er]
-        solver = bslLD.ElectrostaticQN(; tol = 1e-12)
+        solver = bslLD.ElectrostaticQN(; tol = 1e-12, maxiter = 1000)
         Φ = bslLD._esqn_solve_implicit(rs, el, δn̄, grid, solver, dt, 0.0)
         φ = bslLD.ifft_spatial!(similar(δn̄), Φ, sw)
         _, _, D, _ = bslLD._esqn_electron_coeffs(el, grid, dt, C0, 0.0)
