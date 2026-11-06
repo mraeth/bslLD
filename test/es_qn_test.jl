@@ -132,6 +132,39 @@ using LinearAlgebra
         end
     end
 
+    @testset "implicit E×B solve: quasineutral at the solved φ, strong coupling" begin
+        Nx, Ny = 16, 32
+        grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [2pi, 4pi, 1.0, 1.0], [Nx, Ny, 1, 1], 2, 1.0, 3)
+        X = [(x, y) for x in grid.xaxes[1], y in grid.xaxes[2]]
+        el = bslLD.Species(bslLD.ResistiveElectrons(grid; tau = τ, alpha = 0.0, alpha_zonal = 0.0, kappa_n = κn,
+                                                    D_perp = 0.05, nonlinear = true); q = -1, m = 1e-3)
+        dt = 0.02
+        # zonal → non-zonal → zonal loop gain ≈ (dt k_x k_y δn)²/(Cφ_zonal Cφ_non-zonal) ≈ 36: explicit diverges
+        δn̄ = [0.3 * cos(3x + 2y) + 0.2 * sin(x - 4y) for (x, y) in X]
+        sw, kx, ky, k2 = bslLD._esqn_k(δn̄, grid)
+        C0 = bslLD._fft_c([1e-3 * sin(x) + 2e-3 * cos(0.5y) for (x, y) in X], sw)
+        cφ = @. dt^2 * k2 / 2 + 0im                                             # kinetic-ion-like weak response
+        er = bslLD._esqn_electron_response(el, grid, dt, zero(C0), nothing, zero(C0), 0.0)
+        rs = [(c0 = C0, cφ = cφ, exact = false), er]
+        solver = bslLD.ElectrostaticQN(; tol = 1e-12)
+        Φ = bslLD._esqn_solve_implicit(rs, el, δn̄, grid, solver, dt, 0.0)
+        φ = bslLD.ifft_spatial!(similar(δn̄), Φ, sw)
+        _, _, D, _ = bslLD._esqn_electron_coeffs(el, grid, dt, C0, 0.0)
+        R = @. C0 + er.c0 + (cφ + er.cφ) * Φ - el.q * dt * $(bslLD._esqn_nonlinear(φ, δn̄, grid)) / D
+        keep = bslLD._esqn_nyquist_keep(C0)
+        mask = @. !iszero(k2) & !iszero(keep)
+        @test maximum(abs, R[mask]) < 1e-9 * maximum(abs, C0)
+        @test maximum(abs, imag(bslLD.FFTW.ifft(Φ))) < 1e-12 * maximum(abs, φ)
+        # the explicit fixed point (lagged φ) diverges for this coupling
+        ex = bslLD._esqn_solve(rs, grid, solver)
+        for _ = 1:5
+            NLx = bslLD._esqn_nonlinear(bslLD.ifft_spatial!(similar(δn̄), ex, sw), δn̄, grid)
+            ex = bslLD._esqn_solve([rs[1], bslLD._esqn_electron_response(el, grid, dt, zero(C0), NLx, zero(C0), 0.0)],
+                                   grid, solver)
+        end
+        @test maximum(abs, ex .- Φ) > 10 * maximum(abs, Φ)
+    end
+
     @testset "E×B nonlinearity of ResistiveElectrons" begin
         grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [2pi, 2pi, 1.0, 1.0], [16, 16, 1, 1], 2, 1.0, 3)
         X = [(x, y) for x in grid.xaxes[1], y in grid.xaxes[2]]

@@ -55,15 +55,27 @@ const ResistiveSpecies = Species{<:AbstractFloat,<:ResistiveElectrons}
 _is_resistive(sp) = getfield(sp, :model) isa ResistiveElectrons
 
 """
-    ElectrostaticQN(; filter = 1.0)
+    ElectrostaticQN(; filter = 1.0, implicit_exb = true, tol = 1e-10, maxiter = 200)
 
 Electrostatic quasineutral field solve for `step_es_qn!`. `filter` < 1 zeroes φ̂ for |k| > filter·max|k|.
+
+`implicit_exb` (used with `ResistiveElectrons(; nonlinear = true)`): the electron E×B term v_E(φ)·∇δn̄ enters the
+quasineutrality solve implicitly in φ (δn̄ fixed at its stage value), solved by GMRES with the diagonal per-mode
+solve as preconditioner (`tol` relative residual, `maxiter` iterations). With `false` it uses φ of the previous
+stage (explicit), which is unstable at low k once |∇δn|/(k dt) ≳ 1: the kinetic ions respond to a φ change only
+by ≈ dt²k²/2 within a step (panta_simulation trials/s3_nan_remedies.jl).
 """
 struct ElectrostaticQN{T<:AbstractFloat} <: AbstractFieldSolver
     filter::T
+    implicit_exb::Bool
+    tol::T
+    maxiter::Int
 end
-ElectrostaticQN(; filter::Real = 1.0) =
-    0 < filter <= 1 ? ElectrostaticQN(float(filter)) : throw(ArgumentError("filter must lie in (0, 1]"))
+function ElectrostaticQN(; filter::Real = 1.0, implicit_exb::Bool = true, tol::Real = 1e-10, maxiter::Integer = 200)
+    0 < filter <= 1 || throw(ArgumentError("filter must lie in (0, 1]"))
+    f, t = promote(float(filter), float(tol))
+    return ElectrostaticQN(f, implicit_exb, t, Int(maxiter))
+end
 
 function _check_es_qn_grid(grid::Grid)
     grid.Bdir == 3 && spatial_ndims(grid) == 2 ||
@@ -166,6 +178,75 @@ function _esqn_solve(responses, grid, solver::ElectrostaticQN)
     return @. ifelse(iszero(k2) | (k2 > kcut2) | iszero(keep), zero(C0), -C0 / Cφ)
 end
 
+# Implicit E×B: solve C0 + Cφ φ̂ − q_e dt N[δn̄](φ)/D = 0 (masked modes zero) for real φ by restarted GMRES on the
+# preconditioned system φ + P(−q_e dt N[δn̄](φ)/D) = P(−C0), P = the masked diagonal solve 1/Cφ. N[δn̄](φ) =
+# FFT(v_E(φ)·∇δn̄) is R-linear in φ, so GMRES works with the real φ in physical space. `responses` holds the
+# electron response without its nonlinear term. Returns φ̂.
+function _esqn_solve_implicit(responses, el, δn̄, grid, solver::ElectrostaticQN, dt, E0)
+    C0 = reduce((x, y) -> x .+ y, [r.c0 for r in responses])
+    Cφ = reduce((x, y) -> x .+ y, [r.cφ for r in responses])
+    sw, _, _, k2 = _esqn_k(C0, grid)
+    keep = _esqn_nyquist_keep(C0)
+    kcut2 = solver.filter^2 * maximum(k2)
+    Pinv = @. ifelse(iszero(k2) | (k2 > kcut2) | iszero(keep), zero(Cφ), 1 / Cφ)
+    _, _, D, _ = _esqn_electron_coeffs(el, grid, dt, C0, E0)
+    q = el.q
+    tmp = similar(δn̄)
+    real_of(X) = ifft_spatial!(similar(δn̄), X, sw)
+    # x ↦ x + P(−q dt N(x)/D), x real (masked)
+    A(x) = x .+ real_of(@.(Pinv * (-q * dt) * $(_esqn_nonlinear(x, δn̄, grid)) / D))
+    b = real_of(@.(-Pinv * C0))
+    x = _gmres_real(A, b, copy(b); tol = solver.tol, maxiter = solver.maxiter)
+    return @.(Pinv * Cφ * $(_fft_c(x, sw)))      # masked φ̂
+end
+
+# Restarted GMRES(m) for a real linear operator A on arrays (CPU or GPU); modified Gram–Schmidt, Givens rotations.
+function _gmres_real(A, b, x; tol = 1e-10, maxiter = 200, m = 40)
+    dotr(u, v) = sum(u .* v)
+    nb = sqrt(dotr(b, b))
+    iszero(nb) && return zero(b)
+    it = 0
+    while true
+        r = b .- A(x)
+        β = sqrt(dotr(r, r))
+        (β <= tol * nb || it >= maxiter) && break
+        V = [r ./ β]
+        H = zeros(m + 1, m)
+        cs, sn = zeros(m), zeros(m)
+        g = zeros(m + 1); g[1] = β
+        j = 0
+        while j < m && it < maxiter
+            j += 1; it += 1
+            w = A(V[j])
+            for i = 1:j
+                H[i, j] = dotr(w, V[i]); w = w .- H[i, j] .* V[i]
+            end
+            hn = sqrt(dotr(w, w))
+            H[j+1, j] = hn
+            for i = 1:j-1
+                t = cs[i] * H[i, j] + sn[i] * H[i+1, j]
+                H[i+1, j] = -sn[i] * H[i, j] + cs[i] * H[i+1, j]; H[i, j] = t
+            end
+            ρ = hypot(H[j, j], H[j+1, j])
+            cs[j], sn[j] = H[j, j] / ρ, H[j+1, j] / ρ
+            H[j, j] = ρ; H[j+1, j] = 0
+            g[j+1] = -sn[j] * g[j]; g[j] = cs[j] * g[j]
+            (abs(g[j+1]) <= tol * nb || hn == 0) && break
+            push!(V, w ./ hn)
+        end
+        y = zeros(j)                                   # back substitution H[1:j, 1:j] y = g[1:j]
+        for i = j:-1:1
+            y[i] = (g[i] - sum(H[i, l] * y[l] for l = i+1:j; init = 0.0)) / H[i, i]
+        end
+        for i = 1:j
+            x = x .+ y[i] .* V[i]
+        end
+    end
+    r = b .- A(x)
+    sqrt(dotr(r, r)) <= 10tol * nb || @warn "ElectrostaticQN implicit E×B: GMRES residual $(sqrt(dotr(r, r)) / nb) after $it iterations"
+    return x
+end
+
 function _esqn_store!(sol, Φ, grid)
     sw, kx, ky, _ = _esqn_k(Φ, grid)
     ifft_spatial!(sol.phi.data, Φ, sw)
@@ -236,8 +317,18 @@ function step_es_qn!(species, sol::FieldSolution, grid::Grid, solver::Electrosta
     sw = spectral_workspace(el.delta_n.data, grid)
     Nn = _fft_c(el.delta_n.data, sw)
     Φprev = _fft_c(sol.phi.data, sw)
+    imp = m.nonlinear && solver.implicit_exb
+    # field solve with the E×B term about δn̄: explicit (NL from the previous φ) or implicit in φ (NL returned is the
+    # one at the solved φ, so the electron update below is consistent with quasineutrality)
+    function fsolve(NL, δn̄)
+        imp || return _esqn_solve([responses..., _esqn_electron_response(el, grid, dt, Nn, NL, Φprev, E0)], grid, solver), NL
+        Φi = _esqn_solve_implicit([responses..., _esqn_electron_response(el, grid, dt, Nn, nothing, Φprev, E0)], el, δn̄,
+                                  grid, solver, dt, E0)
+        return Φi, _esqn_nonlinear(ifft_spatial!(similar(δn̄), Φi, sw), δn̄, grid)
+    end
+    δn0 = copy(el.delta_n.data)
     NL = m.nonlinear ? _esqn_nonlinear(sol.phi.data, el.delta_n.data, grid) : nothing
-    Φ = _esqn_solve([responses..., _esqn_electron_response(el, grid, dt, Nn, NL, Φprev, E0)], grid, solver)
+    Φ, NL = fsolve(NL, δn0)
 
     for _ = 1:(isempty(ions) && !m.nonlinear ? 0 : correctors)
         Ep = VectorField([ScalarField(similar(sol.E[d].data)) for d = 1:3])
@@ -259,8 +350,10 @@ function step_es_qn!(species, sol::FieldSolution, grid::Grid, solver::Electrosta
             half = @. (δp + el.delta_n.data) / 2
             el.delta_n.data .= δp
             NL = _esqn_nonlinear(φp, half, grid)
+            Φ, NL = fsolve(NL, half)
+        else
+            Φ, NL = fsolve(NL, δn0)
         end
-        Φ = _esqn_solve([responses..., _esqn_electron_response(el, grid, dt, Nn, NL, Φprev, E0)], grid, solver)
     end
 
     _esqn_store!(sol, Φ, grid)
