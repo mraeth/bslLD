@@ -38,7 +38,7 @@ This file follows the electron model of the charge-form Darwin solver (`EMSolver
 | Stage | Electron model | Status | Reference |
 |---|---|---|---|
 | 1 | cold drift fluid (`ColdFluid`, `DriftFluid`) | implemented, tested (commit `314f744`) | KineticDR `Darwin`, `Cold` ions, `DriftKinetic(polarization = w, polarization_form = :density, mirror = false)` at $T_e \to 0$ |
-| 2 | linear DK, $T_e > 0$, $T_{e\perp} = 0$ (`LinearDK`) | implemented, tested against KineticDR (time domain) | KineticDR `DriftKinetic(mirror = false, polarization = w, polarization_form = :density)` |
+| 2 | linear DK, $T_e > 0$, $T_{e\perp} = 0$ (`LinearDK`) | implemented, tested against KineticDR (time domain), with cold and full-orbit kinetic ions | KineticDR `DriftKinetic(mirror = false, polarization = w, polarization_form = :density)` |
 | 3 | nonlinear (fluid, then DK) | later | exact nonlinear invariants; small-amplitude limit of stages 1–2 |
 
 Fixed decisions:
@@ -163,6 +163,7 @@ which gives the cold limit $iq^2/(m\omega)$, adiabatic electrons for $\omega \ll
 **Verified so far.**
 - Unit tests (`test/solvers_test.jl`): the stage response equals the push to round-off; the Jacobian part $F_0\delta B_\parallel$ is stationary; $k_\parallel = 0$ is identical to stage 1; $T_e\to0$ converges at $O(T_e)$; second order in $\Delta t$; quasineutrality held; Lagrange streaming with the corrector converges.
 - One time-domain check, $k = (1, 0.5)$, $w = 1$, cold ions: all branches with their Landau damping agree with the KineticDR roots to $\sim10^{-4}$ (e.g. $T_e = 0.2$: $0.75084 - 0.028451i$ against $0.75084 - 0.028455i$).
+- Dispersion scans below: cold ions over $k_\perp$ and $T_e$ (all weakly damped branches), and full-orbit kinetic ions at $T_e = T_i$ (fast branch, against KineticDR `GordeyevSeries` ions).
 
 **Dispersion: DK versus fluid electrons.** Cold ions, $w = 1$, $\beta_i = 0.5$, $\mu = 0.01$, $k_\parallel = 0.5$ as in stage 1.
 - **Simulation:** one oblique Fourier mode on a $4\times4$ grid, `LinearDK` with $N_v = 512$ intervals on $\pm7v_{te}$, $\Delta t = 0.01$. The run lasts $t \le \min(60, 0.8\,T_{\rm rec})$, where $T_{\rm rec} = 2\pi/(k_\parallel\Delta v)$ is the recurrence time of the velocity grid.
@@ -329,6 +330,50 @@ end
 ```
 
 The error falls by four per halving of $\Delta t$: the scheme is second order for DK electrons. The one larger error in the $T_e$ scan ($10^{-3}$) is the ion-acoustic root at $T_e = 3.2\times10^{-3}$, $\omega = 0.028$. Its period ($\approx 225$) is much longer than the fit window ($t \le 60$), so this is a limit of the fit, not of the scheme. With fewer velocity intervals the error stays at the $\Delta t$ level as long as the run stays below the recurrence time. The fit window, not the $v_\parallel$ resolution, limits the damping rates that can be measured.
+
+**Kinetic ions.**
+- **Setup:** full-orbit ions on 2x3v ($4\times4$ in x; 32 points per velocity axis on $\pm5v_{ti}$), DK electrons with $T_e = T_i$, $k_\parallel = 0.5$, $\Delta t = 0.02$.
+- **Reference:** KineticDR with `GordeyevSeries` (full-orbit, hot) ions.
+- **Fit window:** $t \le 20$, half the ion recurrence time $2\pi/(k_\parallel\Delta v_i) \approx 40$. Longer fits pick up spurious growing exponentials.
+- **What can be compared:** at $T_e = T_i$ the ion Landau damping makes all roots but the fast branch strongly damped, so the fast branch is the clean comparison.
+
+```julia; echo=false, results="markup", label="tab-dk-kinetic-ions"
+function kinetic_ion_run(kp; Te=1.0, dt=0.02, Tmax=20.0, Nvi=32, vm=5.0)
+    grid = bslLD.Grid([0.0, 0.0, -vm, -vm, -vm], [2π/kp, 2π/kz_f, vm, vm, vm], [4, 4, Nvi, Nvi, Nvi], 2, 1.0, 2)
+    ph = [kp*x + kz_f*z for (x, z) in Iterators.product(grid.xaxes...)]
+    M(v) = exp(-v^2/2) / sqrt(2π); v = collect(grid.vaxes[1])
+    sf = bslLD.ScalarField([(1 + 1e-4cos(ph[i, j])) * M(a)*M(b)*M(c) for i in 1:4, j in 1:4, a in v, b in v, c in v])
+    ions = bslLD.Species(1.0, 1.0, bslLD.DistributionGridImpl{2,3,bslLD.Cart,typeof(sf)}(sf))
+    el = bslLD.Species(bslLD.LinearDK(grid; T_e = Te, Nv = 256, vmax = 7); q = -1, m = μ_f)
+    z3() = bslLD.VectorField([bslLD.ScalarField(zeros(4, 4)) for _ in 1:3])
+    sol = bslLD.FieldSolution(z3(), z3()); sol.B[2].data .= 1e-4 .* cos.(ph .+ 0.4)
+    solver = bslLD.EMSolverDKPolDensity(β_f, μ_f)
+    bslLD.quasineutral_drift!((ions, el), sol.B, grid, solver)
+    amp(a) = sum(a .* exp.(-im .* ph)) / length(a)
+    S = Vector{ComplexF64}[]; phase = 0.0; qn = 0.0
+    for n in 1:round(Int, Tmax/dt)
+        bslLD.step_charge_form!((ions, el), sol, grid, solver, dt; phase)
+        phase += dt                                              # Ω_i = 1
+        qn = max(qn, bslLD.quasineutrality_residual((ions, el), sol.B, grid, solver; phase))
+        n % 2 == 0 && push!(S, [amp(sol.B[2].data), amp(bslLD.compute_density(ions, grid).data), amp(sol.B[3].data)])
+    end
+    return pencil(reduce(hcat, S), 2dt, 12), qn
+end
+hot_model(Te) = KDR.Model((KDR.Species(response = KDR.GordeyevSeries()),
+    KDR.Species(q = -1, m = μ_f, T = Te, response = KDR.DriftKinetic(polarization = 1.0, polarization_form = :density, mirror = false))),
+    KDR.Darwin(beta = β_f))
+println("kinetic ions + DK electrons, T_e = T_i, k∥ = 0.5, Δt = 0.02, t ≤ 20 (weakly damped KineticDR roots):")
+for kp in (0.5, 1.0)
+    fit, qn = kinetic_ion_run(kp)
+    for r in weak_roots(hot_model(1.0), kp)
+        f = fit[argmin(abs.(fit .- r))]
+        println("  k⊥ = $kp: KineticDR ", round(r, sigdigits=5), ",  bslLD ", round(f, sigdigits=5),
+                ",  rel. error ", round(abs(f - r)/abs(r), sigdigits=2), ";  max QN residual ", round(qn, sigdigits=2))
+    end
+end
+```
+
+The fast branch with kinetic ions agrees with KineticDR in frequency and damping rate to $\sim5\times10^{-4}$ ($k_\perp = 0.5$ and $1$), the size of the $\Delta t$ error seen with cold ions. Quasineutrality holds to round-off throughout the run. The more strongly damped KAW and ion-acoustic roots at $T_e = T_i$ are not compared: a $t \le 20$ window does not resolve them.
 
 ## 3. Nonlinear tests (later)
 
