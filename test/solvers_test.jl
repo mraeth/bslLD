@@ -859,3 +859,45 @@ end
         @test lag(8) / lag(16) > 20                               # corrector: converges with the stencil
     end
 end
+
+@testset "Charge-form energy and charge, k ⊥ b̂" begin
+    bslLD.set_execution_space!(exec = bslLD.backend())
+    beta_i, mu, N = 0.5, 0.01, 8
+    L = 4pi
+    # ⊥ plane (x1, x2), b̂ = e3: k∥ = 0, where the energy is an invariant
+    grid = bslLD.Grid([0.0, 0.0, -1.0, -1.0], [L, L, 1.0, 1.0], [N, N, 1, 1], 2, 1.0, 3)
+    solver = bslLD.EMSolverDKPolDensity(beta_i, mu)
+    x, y = collect(grid.xaxes[1]), collect(grid.xaxes[2])'
+    k = 2pi / L
+    wave(a, b, φ) = @. 1e-3 * cos(a * k * x + b * k * y + φ)
+    function run(electrons, dt; T = 10.0)
+        ions = bslLD.ColdIonFluid(grid)
+        el = electrons(grid)
+        ions.delta_n.data .= wave(1, 0, 0.1) .+ wave(1, 2, 0.7)
+        ions.u[1].data .= wave(0, 1, 0.3); ions.u[2].data .= wave(2, 1, 1.1); ions.u[3].data .= wave(1, 1, 0.5)
+        sol = bslLD.FieldSolution(bslLD.zero_vectorfield3(grid), bslLD.zero_vectorfield3(grid))
+        # div-free: B1 = ∂2ψ, B2 = −∂1ψ with ψ = 1e-3 cos(k x + k y)/k; B∥ free
+        sol.B[1].data .= wave(1, 1, π / 2); sol.B[2].data .= -wave(1, 1, π / 2)
+        sol.B[3].data .= wave(2, 0, 0.2) .+ wave(1, 1, 0.9)
+        bslLD.quasineutral_drift!((ions, el), sol.B, grid, solver)
+        charge() = sum(sp -> sum(bslLD.moments_at(sp, grid, 0.0)[1]), (ions, el))
+        W0, Q0 = bslLD.charge_form_energy((ions, el), sol, grid, solver), charge()
+        dW = dQ = 0.0
+        for _ = 1:round(Int, T / dt)
+            bslLD.step_charge_form!((ions, el), sol, grid, solver, dt)
+            dW = max(dW, abs(bslLD.charge_form_energy((ions, el), sol, grid, solver).total - W0.total))
+            dQ = max(dQ, abs(charge() - Q0))
+        end
+        return dW / W0.total, dQ, W0
+    end
+    fluid(g) = bslLD.Species(bslLD.ColdFluid(g, bslLD.DriftFluid()); q = -1, m = mu)
+    dk(g) = bslLD.Species(bslLD.LinearDK(g; T_e = 0.1, Nv = 64); q = -1, m = mu)
+    for electrons in (fluid, dk)
+        e1, q1, W0 = run(electrons, 0.04)
+        e2, q2, _ = run(electrons, 0.02)
+        @test W0.polarisation > 0 && W0.magnetic > 0
+        @test 3.5 < e1 / e2 < 4.5                                # energy conserved at second order
+        @test e2 < 1e-4
+        @test max(q1, q2) < 1e-15                                # total charge to round-off
+    end
+end

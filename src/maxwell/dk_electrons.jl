@@ -91,6 +91,15 @@ function moments_at(sp::LinearDKSpecies, grid::Grid, phase::Real)
     return (sp.q .* n, ntuple(d -> d == grid.Bdir ? J : z, 3))
 end
 
+# Free energy ∫ T_e δf² / (2 F0), δf = δF − F0 δB∥/b0; its rate is ∫ E∥ J∥.
+function species_energy(sp::LinearDKSpecies, grid::Grid, B)
+    md = getfield(sp, :model)
+    nx = length(md.grid.xaxes)
+    F0 = reshape(_dk_maxwellian(md)[1], ntuple(_ -> 1, nx)..., :)
+    δf = md.dist.data .- (B[grid.Bdir].data ./ grid.b0) .* F0
+    return prod(md.grid.delta) * md.T_e / 2 * sum(δf .^ 2 ./ F0)
+end
+
 _save(sp::LinearDKSpecies) = copy(sp.dist.data)
 _restore!(sp::LinearDKSpecies, s) = (sp.dist.data .= s; sp)
 _stage_phase(::LinearDKSpecies, grid, dt, phase) = phase

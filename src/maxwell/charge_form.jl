@@ -296,6 +296,54 @@ function quasineutrality_residual(species, B::VectorField, grid::Grid, solver::E
     return maximum(abs, out)
 end
 
+# ── Energy ───────────────────────────────────────────────────────────────────
+# Energy of a species at t^n (`B` = δB^n, used by `LinearDK`). Kinetic: ½ ∫ v² f (velocities in
+# units of 1/√m, so ½ m v_phys² = ½ v²), including the thermal energy. Fluids, linearised around
+# n0 = 1: ½ m |δu|², the drift fluid only ½ m δu∥² (its E×B energy is the polarisation term).
+
+_cell_volume(grid::Grid) = prod(grid.delta[1:length(grid.xaxes)])
+
+function species_energy(sp::KineticSpecies, grid::Grid, B)
+    nx, nv = length(grid.xaxes), length(grid.vaxes)
+    shape(d) = ntuple(i -> i == nx + d ? length(grid.vaxes[d]) : 1, nx + nv)
+    v2 = sum(reshape(collect(grid.vaxes[d]) .^ 2, shape(d)) for d = 1:nv)
+    return prod(grid.delta) * sum(sp.dist.data .* v2) / 2
+end
+
+species_energy(sp::FluidSpecies{LorentzFluid}, grid::Grid, B) =
+    _cell_volume(grid) * sp.m / 2 * sum(sum(abs2, sp.u[d].data) for d = 1:3)
+species_energy(sp::FluidSpecies{DriftFluid}, grid::Grid, B) =
+    _cell_volume(grid) * sp.m / 2 * sum(abs2, sp.u[grid.Bdir].data)
+
+"""
+    charge_form_energy(species, sol, grid, solver::EMSolverDKPolDensity; phase = 0)
+
+Energy of the linear charge-form model at t^n, a named tuple `(magnetic, species, polarisation,
+total)`: magnetic (1/β_i) ∫|δB|², per species `species_energy(sp, grid, B)`, and the E×B energy of
+the drift species d from the state, (b0²/2 w m_d) ∫|∇⊥⁻¹ σ|² with the polarisation charge
+σ = −Σ_s q_s n_s. Conserved to O(dt²) for k ⊥ b̂ (k∥ = 0). For oblique k it is not an invariant:
+the density form keeps only the divergence of the polarisation current, whose longitudinal
+remainder also works on E∥, which leaves a defect independent of dt (~10⁻³ relative).
+"""
+function charge_form_energy(species, sol::FieldSolution, grid::Grid, solver::EMSolverDKPolDensity; phase = 0)
+    a, b, _ = _cf_frame(grid)
+    sw, ka, kb, _ = _cf_kviews(sol.B[1].data, grid)
+    dV = _cell_volume(grid)
+    magnetic = dV / solver.beta_i * sum(sum(abs2, sol.B[d].data) for d = 1:3)
+    Ws = map(sp -> species_energy(sp, grid, sol.B), species)
+    drifts = filter(is_drift, collect(species))
+    polarisation = if isempty(drifts)
+        zero(magnetic)
+    else
+        σ = -_fft_c(sum(sp -> moments_at(sp, grid, phase)[1], species), sw)
+        kp2 = @. ka^2 + kb^2
+        dV / length(σ) * grid.b0^2 / (2 * solver.w * only(drifts).m) *
+            sum(@. ifelse(iszero(kp2), zero(kp2), abs2(σ) / kp2))
+    end
+    return (magnetic = magnetic, species = Ws, polarisation = polarisation,
+            total = magnetic + sum(Ws) + polarisation)
+end
+
 # ── X–C–X step ───────────────────────────────────────────────────────────────
 
 """
