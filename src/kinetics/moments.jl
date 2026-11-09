@@ -41,7 +41,7 @@ function compute_current(
     return VectorField([collect(J) for J in _current_arrays(f, grid)])
 end
 
-function compute_current(sp::Species, grid::CartGrid, phase::Real)
+function compute_current(sp::DistSpecies, grid::CartGrid, phase::Real)
     f = sp.dist
     J = compute_current(f, grid)
     NV = length(J)
@@ -78,7 +78,7 @@ function compute_momentum_tensor(
     return MatrixField(_momentum_tensor_arrays(f, grid))
 end
 
-function compute_momentum_tensor(sp::Species, grid::CartGrid, phase::Real)
+function compute_momentum_tensor(sp::DistSpecies, grid::CartGrid, phase::Real)
     f = sp.dist
     Pi = compute_momentum_tensor(f, grid)
     NV = size(Pi, 1)
@@ -100,6 +100,6 @@ function compute_density(f::DistributionGrid, grid::PolarGrid)
 end
 
 # Species forwarding — pass through to underlying distribution
-compute_density(sp::Species, grid) = compute_density(sp.dist, grid)
-compute_current(sp::Species, grid) = compute_current(sp.dist, grid)
-compute_momentum_tensor(sp::Species, grid) = compute_momentum_tensor(sp.dist, grid)
+compute_density(sp::DistSpecies, grid) = compute_density(sp.dist, grid)
+compute_current(sp::DistSpecies, grid) = compute_current(sp.dist, grid)
+compute_momentum_tensor(sp::DistSpecies, grid) = compute_momentum_tensor(sp.dist, grid)

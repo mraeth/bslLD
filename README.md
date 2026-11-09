@@ -147,14 +147,17 @@ Ex  = sol.E[1]   # ScalarField
 
 ### Darwin / hybrid-kinetic (EM, low-frequency)
 
-The Darwin model retains electromagnetic effects while filtering out light waves by neglecting the transverse displacement current. Two variants are provided for kinetic-ion / fluid-electron plasmas, parametrised by $\beta_i$ (ion plasma beta) and $\mu = m_e/m_i$ (mass ratio).
+The Darwin model retains electromagnetic effects while filtering out light waves by neglecting the transverse displacement current. Three variants are provided for kinetic-ion / fluid-electron plasmas, parametrised by $\beta_i$ (ion plasma beta) and $\mu = m_e/m_i$ (mass ratio).
 
 | Solver | Description | Required moments |
 |--------|-------------|-----------------|
-| `EMSolverDKPol(β_i, μ)` | Darwin-Kinetic **with** polarisation-drift correction. Implicit $\mathbf{E}_\perp$ update via a $2\times2$ linear system per Fourier mode; Helmholtz solve for $E_\parallel$. Staggered Faraday for $\mathbf{B}$. | `rho`, `J` (⊥ current), `Pi_diff` (anisotropic pressure) |
+| `EMSolverDKPol(β_i, μ)` | Darwin-Kinetic **with** the electron polarisation current $\mu\partial_t\mathbf{E}_\perp$. Implicit $\mathbf{E}_\perp$ update via a $2\times2$ linear system per Fourier mode; Helmholtz solve for $E_\parallel$. Staggered Faraday for $\mathbf{B}$. | `rho`, `J` (⊥ current), `Pi_diff` (anisotropic pressure) |
 | `EMSolverDKNoPol(β_i, μ)` | Darwin-Kinetic **without** polarisation drift. Fully spectral $3\times3$ Cramer solve per Fourier mode; simultaneous Faraday update. | `rho`, `J`, `Pi_diff` |
+| `EMSolverDKPolDensity(β_i, μ; w = 1)` | Drift-kinetic electrons with the polarisation **density** only (weight $w$), in charge form: quasineutrality $\sum_s q_s n_s = w\mu[(2/\beta_i)\Delta B_\parallel + \hat b\cdot\nabla\times\mathbf{J}_{\perp}]\,/\,q_e$ replaces $\nabla\cdot\mathbf{J} = 0$. Works on explicit species (see below), any geometry: `step_charge_form!(species, sol, grid, solver, dt; phase, damping_rate)` is one X–C–X step (stage field from a $3\times3$ solve per Fourier mode, `solve_fields_moment_implicit!`; $\theta = 1/2 + \kappa\,dt$ damps the parallel-Ampère defect mode at second order). `quasineutral_drift!` sets a quasineutral start, `quasineutrality_residual` checks it. 1D, $\mathbf{k}\perp\hat b$ only: `quasineutral_B!` and the lagged `solve_fields!`. | explicit species |
 
-Both solvers use `solve_fields!(sol, moments, grid, solver, dt)` (in-place, stores result in `sol.Enew`):
+**Species and equation-of-motion models.** A species is a mass $m$ and charge $q$ plus a model, `Species(m, q, model)` or `Species(model; q, m)`. The model type carries the equations of motion and owns the whole state; methods dispatch on it (`Species{<:Any,<:Kinetic}`), and its fields are reachable from the species (`sp.dist`, `sp.delta_n`). Models: `Kinetic(dist)` (full orbit; `Species(m, q, dist)` wraps a distribution in it), and the linearised cold fluid `ColdFluid(grid, closure)` with closure `LorentzFluid()` (full cold fluid; `ColdIonFluid(grid)` = cold ions, $q = m = 1$) or `DriftFluid()` ($\mathbf{u}_\perp = \mathbf{E}\times\hat b$, parallel inertia; cold drift-kinetic electrons: `Species(ColdFluid(grid, DriftFluid()); q = -1, m = μ)`), and the linear drift-kinetic model `LinearDK(grid; T_e, Nv = 64, vmax = 6, method = Fourier())` ($\delta F(\mathbf x, v_\parallel)$ on its own 1V grid, $T_{e\perp} = 0$; electrons: `Species(LinearDK(grid; T_e); q = -1, m = μ)`). `LinearDK` streams with the kinetic `advectX!` along $\hat b$ (keyword `vdirs = (Bdir,)`: physical direction of each velocity axis, default `1:NV`) and kicks with `add_linear_dk_kick!` (sources.jl); with Fourier streaming its stage response is exact, with `Lagrange(W)` the corrector applies. Every model provides `push_free!(sp, grid, dt, half; phase, B)` (field-free half step; `B` = $\mathbf B^n$ or $\mathbf B^{n+1}$, used by `LinearDK`, whose streaming acts on $\delta f = \delta F - F_0\delta B_\parallel/b_0$), `push_field!` (kick), `moments_at` (charge density, current) and `stage_response(sp, grid, dt, θ; phase, B)` (linear response to the stage field per Fourier mode), so the charge-form step couples any set of them, e.g. `(ions, electrons)` with kinetic or cold-fluid ions. `response_class(sp)` selects the coupling: `Magnetised()` (⊥ current through $(q^2n/m)\mathbf{E}$; kinetic, Lorentz fluid) or `Drift()` ($E\times B$ current, carries the polarisation density; drift fluid, `LinearDK`).
+
+The rate-form solvers use `solve_fields!(sol, moments, grid, solver, dt)` (in-place, stores result in `sol.Enew`):
 
 ```julia
 solver  = bslLD.EMSolverDKPol(beta_i, mu)
@@ -195,7 +198,7 @@ Diagnostic helpers: `bslLD.electromagnetic_energy(E, B; params)` and `bslLD.maxw
 |-------|--------------|-------------|-----------------|
 | Vlasov–Poisson (electrostatic) | 1D1v or 1D2v | `PoissonSolver` | `landau_damping`, `ibw` |
 | Ion Bernstein Waves | 1D2v + background $B_0$ | `PoissonSolver` (with gyration) | `ibw` |
-| Darwin hybrid-kinetic | 1D2v + background $B_0$ | `EMSolverDKPol` / `EMSolverDKNoPol` | `em_cases` |
+| Darwin hybrid-kinetic | 1D2v + background $B_0$ | `EMSolverDKPol` / `EMSolverDKNoPol` / `EMSolverDKPolDensity` | `em_cases`, `field_solver_tests.jmd`, `electron_models.jmd` (electron models of the charge form: cold fluid → linear DK → nonlinear; roadmap) |
 | E×B drift verification | 1D2v + external $E$, $B$ | none (imposed fields) | `exb_test` |
 | Vacuum EM wave propagation | 1D or 2D | `EMSolverVacuum` | `solve_maxwell` |
 
@@ -213,6 +216,7 @@ bslLD/
 │   ├── kinetics/
 │   │   ├── distribution.jl            # DistributionGrid, compute_density/current/Pi
 │   │   ├── interpolation.jl           # arbitrary-order Lagrange weights (uniform grid)
+│   │   ├── species.jl                 # Species = (m, q, model); AbstractModel, DistributionModel, Kinetic
 │   │   ├── advectorCart.jl            # BSL advection (Cartesian, KernelAbstractions)
 │   │   └── advectorPolar.jl           # BSL advection (polar coordinates)
 │   ├── maxwell/
@@ -221,8 +225,10 @@ bslLD/
 │   │   ├── field_solver.jl            # AbstractFieldSolver, Moments, FieldSolution
 │   │   ├── solvers_electrostatic.jl   # PoissonSolver, AdiabaticSolver
 │   │   ├── solvers_vacuum.jl          # EMSolverVacuum, VacuumMaxwellParams
-│   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol
-│   │   └── cold_plasma.jl             # ColdIonFluid for linear EM benchmarks
+│   │   ├── solvers_hybrid.jl          # EMSolverDKPol, EMSolverDKNoPol, EMSolverDKPolDensity
+│   │   ├── cold_plasma.jl             # ColdFluid model (Lorentz / drift closure) for linear EM benchmarks
+│   │   ├── charge_form.jl             # species models ↔ charge-form solve, step_charge_form!
+│   │   └── dk_electrons.jl            # LinearDK model (linear drift-kinetic electrons)
 │   └── execution.jl                   # use_cpu!, use_cuda!, backend switching
 ├── examples/                          # Jupyter notebooks (landau_damping, ibw, em_cases, …)
 └── test/                              # Unit tests
@@ -255,6 +261,7 @@ bslLD/
 | `CairoMakie.jl` | Plotting in example notebooks |
 | `FFTW.jl` | Spectral diagnostics in notebooks (already a core dep) |
 | `DSP.jl` | Window functions (Kaiser) for ω–k spectra |
+| `KineticDR.jl` | Analytic dispersion references (BSLRegistry) in `field_solver_tests.jmd` |
 
 **PlasmaCore.jl status:** this package depends on `PlasmaCore.jl` via a remote git URL declared in `Project.toml`/`Manifest.toml`, not a local vendored copy, even though `PlasmaCore.jl` sits right next to this repo on disk. If full separation between development streams is later required, the recommended approach is to vendor a copy into `vendor/PlasmaCore.jl` within this project and repoint the dependency to that local path.
 

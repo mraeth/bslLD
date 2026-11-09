@@ -189,6 +189,19 @@ end
     @test f_default.data == f_fourier.data
     @test maximum(abs, f_default.data .- expected_x) < 1e-10
 
+    # One velocity axis along Bdir = 2 (`vdirs`): streams x2, exact (Fourier) or to the stencil order.
+    stream_err(N, method) = begin
+        g = bslLD.Grid([0.0, 0.0, -1.0], [4pi, 8pi, 1.0], [N, N, 16], 2, 1.0, 2)
+        sf = bslLD.ScalarField(zeros(N, N, 17))
+        sp = bslLD.Species(1.0, 1.0, bslLD.DistributionGridImpl{2,1,bslLD.Cart,typeof(sf)}(sf))
+        sp.dist.data .= [cos(z / 4 + x / 2) for x in g.xaxes[1], z in g.xaxes[2], v in g.vaxes[1]]
+        t = bslLD.SimulationTime(0.3, 0.3)
+        bslLD.advectX!(sp, g, t, 2; method, vdirs = (2,))
+        maximum(abs.(sp.dist.data .- [cos((z - 0.3v) / 4 + x / 2) for x in g.xaxes[1], z in g.xaxes[2], v in g.vaxes[1]]))
+    end
+    @test stream_err(8, bslLD.Fourier()) < 1e-13
+    @test 30 < stream_err(16, bslLD.Lagrange(6)) / stream_err(32, bslLD.Lagrange(6)) < 80   # → 2^6
+
     @test bslLD.Lagrange(8) === bslLD.Lagrange{8}()
     @test_throws ArgumentError bslLD.Lagrange(7)
     @test_throws ArgumentError bslLD.Lagrange(0)

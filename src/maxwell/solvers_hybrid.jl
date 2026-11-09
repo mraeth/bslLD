@@ -559,3 +559,92 @@ function initialize_staggered_B!(sol::FieldSolution, grid::Grid, dt::Real)
     end
     return sol
 end
+
+# ── EMSolverDKPolDensity ──────────────────────────────────────────────────────
+#
+# Darwin, kinetic ions, drift-kinetic electrons with the polarisation density only (weight w).
+# Charge form: quasineutrality replaces the longitudinal part of Ampère's law and is imposed
+# at the new time level, not in rate form (∇·J = 0). The general solve over explicit species
+# (charge_form.jl) uses, with c = 2/β_i and ⊥ Ampère, for the drift species d (electrons),
+#   Σ_s q_s n_s = w m_d ∇⊥·(N_d E⊥) = (w m_d / q_d) [c ΔB_∥ + b̂·∇×J_other⊥].
+#
+# 1D with k ⊥ b̂ (Bdir = 3) only: `quasineutral_B!` and the lagged `solve_fields!`. There the
+# guiding-centre density is frozen in, δN_e = δB_z, and quasineutrality reads
+#   (1 + w d_e² k²) B̂_z = n̂_i + i k w μ Ĵ_iy,   d_e² = cμ.
+
+struct EMSolverDKPolDensity{T<:AbstractFloat} <: AbstractFieldSolver
+    beta_i::T
+    mu::T
+    w::T
+end
+
+function EMSolverDKPolDensity(beta_i::Real, mu::Real; w::Real = 1.0)
+    T = promote_type(typeof(float(beta_i)), typeof(float(mu)), typeof(float(w)))
+    return EMSolverDKPolDensity{T}(T(beta_i), T(mu), T(w))
+end
+
+function _check_dk_pol_density(grid::Grid)
+    spatial_ndims(grid) == 1 && grid.Bdir == 3 || throw(
+        ArgumentError("quasineutral_B! and the lagged solve_fields! of EMSolverDKPolDensity support 1D grids with k ⊥ b̂ (Bdir = 3) only"),
+    )
+    return nothing
+end
+
+_fft_c(x::AbstractArray, sw) = fft_spatial!(similar(x, Complex{eltype(x)}), x, sw)
+
+"""
+    quasineutral_B!(B, rho, J, grid, solver::EMSolverDKPolDensity)
+
+Set δB_z from quasineutrality with the ion density `rho` and current `J`; the k = 0 mode is kept.
+"""
+function quasineutral_B!(
+    B::VectorField,
+    rho::ScalarField,
+    J::VectorField,
+    grid::Grid,
+    solver::EMSolverDKPolDensity,
+)
+    _check_dk_pol_density(grid)
+    DT = eltype(B[3].data)
+    sw = spectral_workspace(B[3].data, grid)
+    k = sw.k[1]
+    a, c = DT(solver.w * solver.mu), DT(2 / solver.beta_i)
+    nh, Jyh, Bh = _fft_c(rho.data, sw), _fft_c(J[2].data, sw), _fft_c(B[3].data, sw)
+    @. Bh = ifelse(iszero(k), Bh, (nh + im * k * a * Jyh) / (1 + a * c * k^2))
+    ifft_spatial!(B[3].data, Bh, sw)
+    return B
+end
+
+function _write_E_dk_pol_density!(sol::FieldSolution, Exh, Eyh, sw)
+    ifft_spatial!(sol.Enew[1].data, Exh, sw)
+    ifft_spatial!(sol.Enew[2].data, Eyh, sw)
+    fill!(sol.Enew[3].data, zero(eltype(sol.Enew[3].data)))
+    return sol
+end
+
+# First-order, lagged form: B_z^{n+1} from quasineutrality with the given moments,
+# E_y = −(B_z^{n+1} − B_z^n)/(dt ∂_x). Explicit in the ion response and unstable at any dt
+# (growth rate ≈ ω²dt/4 in the cold-fluid step); kept as a reference for the
+# moment-implicit stage solve below.
+function solve_fields!(
+    sol::FieldSolution,
+    moments::Moments,
+    grid::Grid,
+    solver::EMSolverDKPolDensity,
+    dt::Real,
+)
+    moments.J !== nothing ||
+        throw(ArgumentError("moments.J is required for EMSolverDKPolDensity"))
+    _check_dk_pol_density(grid)
+    DT = eltype(sol.B[3].data)
+    sw = spectral_workspace(sol.B[3].data, grid)
+    k = sw.k[1]
+    c, _dt = DT(2 / solver.beta_i), DT(dt)
+    Bnh = _fft_c(sol.B[3].data, sw)
+    quasineutral_B!(sol.B, moments.rho, moments.J, grid, solver)
+    Bh, Jxh, Jyh = _fft_c(sol.B[3].data, sw), _fft_c(moments.J[1].data, sw), _fft_c(moments.J[2].data, sw)
+    Exh = @. -c * im * k * Bh - Jyh
+    Eyh = @. ifelse(iszero(k), Jxh, im * (Bh - Bnh) / (k * _dt))
+    return _write_E_dk_pol_density!(sol, Exh, Eyh, sw)
+end
+

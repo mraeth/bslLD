@@ -8,7 +8,7 @@ end
 
 
 function advectX!(
-    sp::Species{PDT,<:DistributionGrid1d2v{DT,Polar}},
+    sp::Species{PDT,<:Kinetic{<:DistributionGrid1d2v{DT,Polar}}},
     grid::PolarGrid,
     advector = advect1DFourier!,
 ) where {PDT,DT}
@@ -51,7 +51,7 @@ end
 end
 
 function advectV!(
-    sp::Species{PDT,<:DistributionGrid1d2v{DT,Polar}},
+    sp::Species{PDT,<:Kinetic{<:DistributionGrid1d2v{DT,Polar}}},
     grid::PolarGrid,
     e::VectorField{DT,1},
 ) where {PDT,DT}
