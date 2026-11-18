@@ -109,6 +109,38 @@ end
         @test f.data ≈ reference
     end
 
+    @testset "exb_rk4!: local order 5 (step doubling)" begin
+        grid = exb_grid()
+        fdata, phi, _ = exb_test_fields(grid)
+        f = exb_distribution(grid, copy(fdata))
+        function doubling_error(dt)
+            f.data .= fdata
+            bslLD.exb_rk4!(f, phi, grid, dt)
+            a = copy(f.data)
+            f.data .= fdata
+            bslLD.exb_rk4!(f, phi, grid, dt / 2)
+            bslLD.exb_rk4!(f, phi, grid, dt / 2)
+            return maximum(abs, a .- f.data)
+        end
+        e = doubling_error.([0.04, 0.02, 0.01])
+        @test all(25 .< e[1:2] ./ e[2:3] .< 40)
+    end
+
+    @testset "exb_rk4!(; dealias): skew-symmetric stages, high modes frozen" begin
+        # Full-band random f, φ: the collocation bracket is not skew (Σ f{f,φ} ≈ 3e-2 |f||{f,φ}|); the
+        # dealiased RK4 conserves Σ (Pf)² to the RK4 dissipation O((λΔt)^6) and leaves (1 − P)f unchanged.
+        grid = exb_grid()
+        noise(sz, s) = reshape(sin.(s .* (1:prod(sz)) .^ 1.7), sz)       # deterministic, full band
+        fdata = noise(size(exb_test_fields(grid)[1]), 1.3)
+        phi = bslLD.ScalarField(1e-3 .* noise(Tuple(length.(grid.xaxes)), 0.7))
+        f = exb_distribution(grid, copy(fdata))
+        bslLD.exb_rk4!(f, phi, grid, 1e-3; dealias = true)
+        P(a) = bslLD.exb_dealias!(copy(a))
+        @test abs(sum(abs2, P(f.data)) - sum(abs2, P(fdata))) < 1e-12 * sum(abs2, fdata)
+        @test maximum(abs, (f.data .- P(f.data)) .- (fdata .- P(fdata))) < 1e-12
+        @test maximum(abs, f.data .- fdata) > 1e-6
+    end
+
     # No phase-space temporaries are allocated per call; the small residual is the
     # fixed per-launch overhead of the four KernelAbstractions kernels inside
     # `_differentiate_impl!` (~350 B each, independent of grid size).

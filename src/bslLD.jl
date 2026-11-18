@@ -2,6 +2,7 @@ module bslLD
 
 using AbstractFFTs, Adapt, FFTW, KernelAbstractions
 using Dierckx, Base.Threads, StaticArrays, ProgressMeter
+import JuliaGMG
 
 using PlasmaCore:
     # Backend infrastructure
@@ -127,5 +128,7 @@ include("maxwell/charge_form.jl")
 include("maxwell/dk_electrons.jl")
 include("kinetics/exbBracketCart.jl")
 include("sources.jl")
+include("maxwell/dk_full.jl")
+include("maxwell/es_charge_form.jl")
 
 end # module bslLD

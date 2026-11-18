@@ -152,6 +152,47 @@ function exb_euler!(
     return exb_euler!(f_out, f_in, phi, grid, dt, _get_exb_plan(f_in, grid))
 end
 
+# 2/3-rule Galerkin truncation over x1, x2 in place: keeps the modes |k_d| ≤ N_d/3.
+function exb_dealias!(a::AbstractArray{Float64})
+    N1, N2 = size(a, 1), size(a, 2)
+    keep(N) = abs.(fftfreq(N, N)) .<= N / 3
+    mask = reshape(keep(N1) .* keep(N2)', N1, N2, ntuple(_ -> 1, ndims(a) - 2)...)
+    a .= real(ifft(fft(a, 1:2) .* mask, 1:2))
+    return a
+end
+
+# Classical RK4 over dt for ∂f/∂t = {f, φ/B_0} with φ frozen; overwrites f. `dealias`: each stage is
+# P{Pf, Pφ} with P the 2/3 truncation (exb_dealias!), skew-symmetric to round-off (Σ f P{Pf, Pφ} = 0);
+# the modes of f above 2/3 are left unchanged.
+function exb_rk4!(
+    f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
+    phi::ScalarField,
+    grid::CartGrid,
+    dt::Real;
+    dealias::Bool = false,
+) where {NX,NV,NXNV}
+    plan = _get_exb_plan(f, grid)
+    f0 = copy(f.data)
+    k = _similar_distribution(f)
+    if dealias
+        phi = ScalarField(exb_dealias!(copy(phi.data)))
+        fP = _similar_distribution(f)
+        rhs! = (k, f) -> (fP.data .= f.data; exb_dealias!(fP.data);
+                          exb_bracket!(k, fP, phi, grid, plan); exb_dealias!(k.data))
+    else
+        rhs! = (k, f) -> exb_bracket!(k, f, phi, grid, plan)
+    end
+    rhs!(k, f)
+    acc = f0 .+ dt / 6 .* k.data
+    for (c, w) in ((0.5, 1 / 3), (0.5, 1 / 3), (1.0, 1 / 6))
+        f.data .= f0 .+ c * dt .* k.data
+        rhs!(k, f)
+        acc .+= w * dt .* k.data
+    end
+    f.data .= acc
+    return f
+end
+
 # Species forwarding overloads
 ExBBracketPlan(sp::DistSpecies, grid::CartGrid) = ExBBracketPlan(sp.dist, grid)
 _get_exb_plan(sp::DistSpecies, grid::CartGrid) = _get_exb_plan(sp.dist, grid)
@@ -199,3 +240,4 @@ exb_euler!(
 ) = exb_euler!(f_out.dist, f_in.dist, phi, grid, dt, plan)
 exb_euler!(f_out::DistSpecies, f_in::DistSpecies, phi::ScalarField, grid::CartGrid, dt::Real) =
     exb_euler!(f_out.dist, f_in.dist, phi, grid, dt)
+exb_rk4!(sp::DistSpecies, phi::ScalarField, grid::CartGrid, dt::Real; kw...) = (exb_rk4!(sp.dist, phi, grid, dt; kw...); sp)
