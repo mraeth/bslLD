@@ -11,7 +11,8 @@
 # bracket with φ frozen over the step: one Euler step (`exb = :euler`, `exb_euler!`), exact at linear
 # order about an x-dependent F but first order in the E×B nonlinearity, or classical RK4
 # (`exb = :rk4`, `exb_rk4!`; stable for k_max|u_E|Δt ≤ 2.8), optionally dealiased by the 2/3 Galerkin
-# truncation that keeps the bracket skew-symmetric (`dealias = true`, RK4 only).
+# truncation that keeps the bracket skew-symmetric (`dealias = true`, RK4 only). In the charge-form step the
+# kick is applied in halves around the E×B push (`_push_stage!`), second order in their commutator.
 # A drift species: E×B density response and polarisation density in the field solve.
 
 struct FullDK{DG<:DistributionGrid,G<:Grid,MT} <: DistributionModel

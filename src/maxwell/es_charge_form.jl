@@ -6,7 +6,8 @@
 #
 # is imposed at t^{n+1}. The species are kicked by the stage field E^m = −∇φ^m with
 # φ^m = θ φ^{n+1} + (1 − θ) φ^n, θ = 1/2 + κ dt. The charge density after the step, ρ^{n+1}(φ^m), is
-# measured by a trial push (push_field!, push_drift!, push_free!) at a predicted φ^p and continued
+# measured by a trial push (push_field!, push_drift!, push_free!; for FullDK the kick in halves around the
+# E×B push, `_push_stage!`) at a predicted φ^p and continued
 # linearly with a model operator A of the species responses:
 #
 #   (A + P/θ) φ^m = −ρ^{n+1}(φ^p) + A φ^p + (1 − θ)/θ P φ^n,     P = w m_d ∇⊥·(n̄_d ∇⊥)/b0²,
@@ -275,11 +276,23 @@ function es_quasineutral_phi!(sol::FieldSolution, species, grid::Grid, solver::E
     return sol
 end
 
+# C of one species at the stage field: kick, then E×B push. For FullDK the parallel kick is split in halves
+# around the E×B push: the two do not commute for k_z ≠ 0 at finite amplitude (their commutator is the E×B
+# advection of E∥), and kick-then-push is first order in it.
+function _push_stage!(sp, E, φ, grid, dt; phase)
+    push_field!(sp, E, grid, dt; phase)
+    push_drift!(sp, φ, grid, dt)
+end
+function _push_stage!(sp::FullDKSpecies, E, φ, grid, dt; phase)
+    push_field!(sp, E, grid, dt / 2; phase)
+    push_drift!(sp, φ, grid, dt)
+    push_field!(sp, E, grid, dt / 2; phase)
+end
+
 function _es_trial_rho(species, saved, φ, E, grid, dt, phase)
     ρ = zero(φ)
     for (i, sp) in enumerate(species)
-        push_field!(sp, E, grid, dt; phase)
-        push_drift!(sp, ScalarField(φ), grid, dt)
+        _push_stage!(sp, E, ScalarField(φ), grid, dt; phase)
         push_free!(sp, grid, dt, 2; phase)
         ρ .+= moments_at(sp, grid, _end_phase(sp, grid, dt, phase))[1]
         _restore!(sp, saved[i])
@@ -293,7 +306,8 @@ end
 
 One electrostatic X–C–X step: X(dt/2); stage potential φ^m from quasineutrality at t^{n+1} with
 φ^m = θφ^{n+1} + (1 − θ)φ^n, θ = 1/2 + κ dt (`damping_rate` κ), from `corrections` trial pushes (the
-first at φ^p = φ^n) continued by the model operator; C (kick, E×B) with φ^m; X(dt/2); then φ^{n+1}
+first at φ^p = φ^n) continued by the model operator; C (kick, E×B; for FullDK half kick, E×B, half kick) with
+φ^m; X(dt/2); then φ^{n+1}
 from quasineutrality of the new state (`sol.phi`, `sol.E`). `sol.phi` must hold φ^n on entry
 ([`es_quasineutral_phi!`](@ref) before the first step). With `solver.variable_coefficients`, the GMRES
 iteration counts of the stage solves and of the final solve are pushed to `iters` if given. Returns φ^m.
@@ -336,8 +350,7 @@ function step_es_charge_form!(species, sol::FieldSolution, grid::Grid, solver::E
     end
     E = es_field(φm, grid, g)
     for sp in species
-        push_field!(sp, E, grid, dt; phase)
-        push_drift!(sp, ScalarField(φm), grid, dt)
+        _push_stage!(sp, E, ScalarField(φm), grid, dt; phase)
         push_free!(sp, grid, dt, 2; phase)
     end
     es_quasineutral_phi!(sol, species, grid, solver; phase, iters)

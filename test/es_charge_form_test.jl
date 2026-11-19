@@ -1,5 +1,5 @@
 # Electrostatic charge form with an x1 profile (step_es_charge_form!) and the full-f DK species (FullDK).
-using LinearAlgebra: eigvals, pinv
+using LinearAlgebra: eigvals, pinv, norm
 
 function es_setup(; Nx = 16, Ny = 4, Nv = 8, ε = 1e-8, Lx = 100.0, Ly = 100.0, a = 0.05Lx / 2π, μ = 1 / 3670)
     vm = 5.0
@@ -143,5 +143,29 @@ end
         Pφ = μ .* bslLD._es_perp(nstar, (φm .- (1 - θ) .* φn) ./ θ, g)
         @test maximum(abs, bslLD._es_project(bslLD.moments_at(el, grid, 0.0)[1] .+ n0 .+ Pφ, g)) /
               maximum(abs, Pφ) < 1e-6
+    end
+    @testset "C step at k_z ≠ 0: half kick, E×B, half kick is second order" begin
+        # Frozen φ(x, y, z): the parallel kick and the E×B push do not commute (commutator = E×B advection of
+        # E∥). Local error of one C step against 64 sub-steps: Δt³ for _push_stage!, Δt² for kick-then-push.
+        L, μ, a = 100.0, 1 / 3670, 0.05
+        grid = bslLD.Grid([0.0, 0.0, 0.0, -1.0], [L, L, L, 1.0], [8, 8, 4, 2], 3, 1.0, 3)
+        x, y, z = collect.(grid.xaxes)
+        φa = [a * sin(2π * x[i] / L + 0.3) * cos(2π * (y[j] / L + z[l] / L)) for i in 1:8, j in 1:8, l in 1:4]
+        φ = bslLD.ScalarField(φa)
+        Ef = bslLD.es_field(φa, grid)
+        E = bslLD.VectorField([bslLD.ScalarField(Ef[d].data) for d in 1:3])
+        n0 = [exp(0.05L / 2π * sin(2π * x[i] / L)) for i in 1:8, j in 1:8, l in 1:4]
+        fresh() = bslLD.Species(bslLD.FullDK(grid, n0; T_e = 1.0, Nv = 16, exb = :rk4, dealias = true); q = -1.0, m = μ)
+        F(sp) = getfield(sp, :model).dist.data
+        lie!(sp, dt) = (bslLD.push_field!(sp, E, grid, dt); bslLD.push_drift!(sp, φ, grid, dt))
+        sym!(sp, dt) = bslLD._push_stage!(sp, E, φ, grid, dt; phase = 0)
+        err = map((0.2, 0.1)) do dt
+            r = fresh(); foreach(_ -> sym!(r, dt / 64), 1:64)
+            l = fresh(); lie!(l, dt)
+            s = fresh(); sym!(s, dt)
+            (norm(F(l) .- F(r)), norm(F(s) .- F(r)))
+        end
+        @test 3.6 < err[1][1] / err[2][1] < 4.4      # Δt²
+        @test 7.0 < err[1][2] / err[2][2] < 9.0      # Δt³
     end
 end
