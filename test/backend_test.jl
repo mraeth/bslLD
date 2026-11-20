@@ -84,6 +84,20 @@ function _backend_cases()
     out["FullDK moments ρ"] = _host(ρ)
     out["FullDK moments J∥"] = _host(J[3])
 
+    # 3x1v electrons on a fixed background, k_z ≠ 0: one charge-form step (variable coefficients, GMRES, the
+    # parallel-streaming factor of the stage operator).
+    el = bslLD.Species(bslLD.FullDK(grid, n0; T_e = 1.0, Nv = 16, exb = :rk4, dealias = true); q = -1.0, m = μ)
+    nb = n0 .* (1 .+ 1e-4 .* φa ./ maximum(abs, φa))
+    zk() = bslLD.VectorField([bslLD.ScalarField(zeros(size(n0))) for _ in 1:3])
+    sol = bslLD.FieldSolution(zk(), zk())
+    solver = bslLD.ESChargeForm(; background = nb, variable_coefficients = true)
+    bslLD.es_quasineutral_phi!(sol, (el,), grid, solver)
+    fe0 = _host(F(el))
+    φm = bslLD.step_es_charge_form!((el,), sol, grid, solver, 0.1; damping_rate = 1.0, corrections = 2)
+    out["step 3x1v k_z φm"] = _host(φm)
+    out["step 3x1v k_z φ"] = _host(sol.phi.data)
+    out["step 3x1v k_z Δf_e"] = Δ(F(el), fe0)
+
     # Kinetic ions (2x3v) with FullDK electrons: quasineutral φ and one charge-form step with variable
     # coefficients (GMRES) and the dealiased RK4 E×B push.
     Nx, Ny, Nv, Lx, vm = 16, 8, 8, 100.0, 5.0

@@ -142,7 +142,8 @@ _spectral_buffers(
     f::DistributionGrid{DT,NX,NV,NXNV},
 ) where {DT,NX,NV,NXNV} = _buffer!(plan, :spectral) do
     ff_buf = similar(f.data, Complex{DT})
-    plans = ntuple(d -> _fft_plans!(ff_buf, d), Val(NXNV))
+    shared = Ref{Any}(nothing)            # one permuted-copy buffer for all axes that need it
+    plans = ntuple(d -> _fft_plans!(ff_buf, d, shared), Val(NXNV))
     (ff_buf, map(first, plans), map(last, plans))
 end
 
@@ -162,14 +163,16 @@ function Base.:*(p::PermutedFFTPlan, x)
     return x
 end
 
-# Forward and inverse in-place plans along axis `d` of `buf`; the permuted fallback shares one buffer for both.
-function _fft_plans!(buf, d)
+# Forward and inverse in-place plans along axis `d` of `buf`. The permuted fallback uses one buffer for both, and
+# `shared[]` (created on first use, the size of `buf`) for every axis: each axis reshapes it to its permuted shape.
+function _fft_plans!(buf, d, shared = Ref{Any}(nothing))
     try
         return (plan_fft!(buf, d), plan_ifft!(buf, d))
     catch err
         err isa ArgumentError || rethrow()
         perm = (d, filter(!=(d), ntuple(identity, ndims(buf)))...)
-        tmp = similar(buf, map(i -> size(buf, i), perm))
+        shared[] === nothing && (shared[] = similar(buf))
+        tmp = reshape(shared[], map(i -> size(buf, i), perm))
         iperm = Tuple(invperm(collect(perm)))
         return (PermutedFFTPlan(tmp, perm, iperm, plan_fft!(tmp, 1)),
                 PermutedFFTPlan(tmp, perm, iperm, plan_ifft!(tmp, 1)))
