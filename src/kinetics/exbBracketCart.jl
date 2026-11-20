@@ -5,21 +5,26 @@
 #
 #   ∂f/∂t = {f, g} = ∂f/∂x1 ∂g/∂x2 − ∂g/∂x1 ∂f/∂x2 ,   g = φ / B_0 ,
 #
-# for B_0 = grid.b0 along x3. Derivatives are spectral (`differentiate!` from
-# spectral_operators.jl), so the bracket is skew-symmetric by construction and no
+# for B_0 = grid.b0 along x3. Derivatives are spectral (Nyquist wavenumber zero, as `differentiate!`
+# from spectral_operators.jl), so the bracket is skew-symmetric by construction and no
 # Arakawa-style averaging of finite-difference forms is needed. The bracket is batched
-# over x3 (when NX == 3) and over all velocity dimensions purely by broadcasting.
+# over x3 (when NX == 3) and over all velocity dimensions purely by broadcasting. The FFTs run over
+# the leading axes (x1, x2) together, which every FFT backend can batch (rocFFT cannot batch a 1D
+# transform along x2 over axes on both sides of it).
 #
 # Time integration is left to the caller; `exb_euler!` provides a single fused explicit
 # stage from which multi-stage schemes can be built.
 
-struct ExBBracketPlan{FB,DGX,DG,WF,WP}
+struct ExBBracketPlan{FB,DGX,DG,CF,CX,PF,PX,K}
     df_buf1::FB  # ∂f/∂x1, phase-space sized
     df_buf2::FB  # ∂f/∂x2, phase-space sized
-    dg_x::DGX    # (∂g/∂x1, ∂g/∂x2), x-shaped, written by differentiate!
+    dg_x::DGX    # (∂g/∂x1, ∂g/∂x2), x-shaped
     dg::DG       # same memory reshaped to full phase-space rank for broadcasting
-    ws_f::WF     # spectral workspace for the phase-space array
-    ws_phi::WP   # spectral workspace for the potential
+    fhat::CF     # complex buffer, phase-space sized
+    ghat::CX     # complex buffer, x-shaped
+    plans_f::PF  # in-place (forward, inverse) FFT over x1, x2 of fhat
+    plans_g::PX  # same for ghat
+    k::K         # (k1, k2) on the backend, Nyquist zeroed
 end
 
 function ExBBracketPlan(
@@ -33,14 +38,31 @@ function ExBBracketPlan(
     broadcast_shape = ntuple(i -> i <= NX ? xshape[i] : 1, Val(NXNV))
     dg_x = ntuple(_ -> similar(f.data, Float64, xshape), Val(2))
     dg = map(a -> reshape(a, broadcast_shape), dg_x)
+    fhat = similar(f.data, ComplexF64)
+    ghat = similar(f.data, ComplexF64, xshape)
+    plans(a) = (plan_fft!(a, 1:2), plan_ifft!(a, 1:2))
     return ExBBracketPlan(
         similar(f.data, Float64),
         similar(f.data, Float64),
         dg_x,
         dg,
-        spectral_workspace(f.data, grid),
-        spectral_workspace(dg_x[1], grid),
+        fhat,
+        ghat,
+        plans(fhat),
+        plans(ghat),
+        ntuple(d -> spectral_wavenumbers(f.data, grid, d), 2),
     )
+end
+
+# out = ∂a/∂x_d (d = 1, 2) through the complex buffer `buf` and its FFT plans over x1, x2.
+function _exb_derivative!(out, a, buf, (P, iP), k, d)
+    buf .= a
+    P * buf
+    kd = reshape(k[d], ntuple(i -> i == d ? length(k[d]) : 1, ndims(buf)))
+    buf .*= im .* kd
+    iP * buf
+    out .= real.(buf)
+    return out
 end
 
 const _exb_plan_cache = IdDict{Any,Dict{Any,ExBBracketPlan}}()
@@ -89,12 +111,12 @@ function _exb_setup!(
     grid.b0 == 0.0 && error("ExB bracket requires nonzero b0")
     inv_b0 = inv(grid.b0)
     for d = 1:2
-        differentiate!(plan.dg_x[d], phi.data, plan.ws_phi, d)
+        _exb_derivative!(plan.dg_x[d], phi.data, plan.ghat, plan.plans_g, plan.k, d)
         plan.dg_x[d] .*= inv_b0
     end
 
-    differentiate!(plan.df_buf1, f.data, plan.ws_f, 1)
-    differentiate!(plan.df_buf2, f.data, plan.ws_f, 2)
+    _exb_derivative!(plan.df_buf1, f.data, plan.fhat, plan.plans_f, plan.k, 1)
+    _exb_derivative!(plan.df_buf2, f.data, plan.fhat, plan.plans_f, plan.k, 2)
     return nothing
 end
 
@@ -152,12 +174,13 @@ function exb_euler!(
     return exb_euler!(f_out, f_in, phi, grid, dt, _get_exb_plan(f_in, grid))
 end
 
-# 2/3-rule Galerkin truncation over x1, x2 in place: keeps the modes |k_d| ≤ N_d/3.
+# 2/3-rule Galerkin truncation over x1, x2 in place: keeps the modes |k_d| ≤ N_d/3. The mask is
+# built on the host and copied to the array's backend.
 function exb_dealias!(a::AbstractArray{Float64})
     N1, N2 = size(a, 1), size(a, 2)
     keep(N) = abs.(fftfreq(N, N)) .<= N / 3
-    mask = reshape(keep(N1) .* keep(N2)', N1, N2, ntuple(_ -> 1, ndims(a) - 2)...)
-    a .= real(ifft(fft(a, 1:2) .* mask, 1:2))
+    mask = copyto!(similar(a, N1, N2), Float64.(keep(N1) .* keep(N2)'))
+    a .= real(ifft(fft(a, 1:2) .* reshape(mask, N1, N2, ntuple(_ -> 1, ndims(a) - 2)...), 1:2))
     return a
 end
 

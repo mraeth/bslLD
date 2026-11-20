@@ -52,7 +52,13 @@ Base.@kwdef struct ESChargeForm{BG}
     rtol::Float64 = 1e-10
 end
 
-_fixed_charge(s::ESChargeForm) = something(s.background, 0)
+_fixed_charge(s::ESChargeForm) = s.background === nothing ? 0 : _to_host(s.background)
+
+# The field solve runs on the host (dense per-mode operators, GMRES on host vectors). Species moments are
+# copied to the host where they enter it; φ and E go back to the species' backend through ScalarField
+# (`backend_array`) or `copyto!` into the solution fields.
+_to_host(a::Array) = a
+_to_host(a::AbstractArray) = Array(a)
 
 # Periodic spectral differentiation matrix on N nodes (N even) of a period L.
 function _spectral_diff_matrix(N::Int, L::Real)
@@ -116,7 +122,7 @@ end
 _drift_species(species) = (d = filter(is_drift, collect(species)); length(d) == 1 ? only(d) :
     throw(ArgumentError("the polarisation density needs exactly one drift species, got $(length(d))")))
 
-_species_density(sp, grid, phase) = moments_at(sp, grid, phase)[1] ./ sp.q
+_species_density(sp, grid, phase) = _to_host(moments_at(sp, grid, phase)[1]) ./ sp.q
 
 # Per Fourier index: (A, P) with P = w m_d ∇⊥·(n̄_d ∇⊥)/b0².
 function _es_operators(species, grid, solver::ESChargeForm, g::_ESGeometry, dt, phase)
@@ -256,22 +262,23 @@ function es_quasineutral_phi!(sol::FieldSolution, species, grid::Grid, solver::E
     md = _drift_species(species)
     n = _es_mean_x(_species_density(md, grid, phase), g)
     cp = solver.w * md.m / grid.b0^2
-    ρ = sum(moments_at(sp, grid, phase)[1] for sp in species) .+ _fixed_charge(solver)
+    ρ = sum(_to_host(moments_at(sp, grid, phase)[1]) for sp in species) .+ _fixed_charge(solver)
     F = map(J -> _es_factor(complex(cp * _es_perp(g.D, n, g.k[J][1])), g.k[J], g.nyquist[J]), CartesianIndices(g.k))
     if solver.variable_coefficients
         nd = _species_density(md, grid, phase)
         φ, it, _ = _es_krylov(φ -> cp .* _es_perp(nd, φ, g), -ρ, F, g; solver.rtol)
         iters === nothing || push!(iters, it)
-        sol.phi.data .= φ
+        copyto!(sol.phi.data, φ)
     else
         ρ̂ = _es_fft(ρ, g)
         φ̂ = similar(ρ̂)
         for J in CartesianIndices(g.k)
             @views φ̂[:, Tuple(J)...] .= _es_solve(F[J], -ρ̂[:, Tuple(J)...])
         end
-        sol.phi.data .= _es_ifft(φ̂, g)
+        φ = _es_ifft(φ̂, g)
+        copyto!(sol.phi.data, φ)
     end
-    E = es_field(sol.phi.data, grid, g)
+    E = es_field(φ, grid, g)
     foreach(d -> sol.E[d].data .= E[d].data, 1:3)
     return sol
 end
@@ -294,7 +301,7 @@ function _es_trial_rho(species, saved, φ, E, grid, dt, phase)
     for (i, sp) in enumerate(species)
         _push_stage!(sp, E, ScalarField(φ), grid, dt; phase)
         push_free!(sp, grid, dt, 2; phase)
-        ρ .+= moments_at(sp, grid, _end_phase(sp, grid, dt, phase))[1]
+        ρ .+= _to_host(moments_at(sp, grid, _end_phase(sp, grid, dt, phase))[1])
         _restore!(sp, saved[i])
     end
     return ρ
@@ -320,11 +327,12 @@ function step_es_charge_form!(species, sol::FieldSolution, grid::Grid, solver::E
     foreach(sp -> push_free!(sp, grid, dt, 1; phase, B = sol.B), species)
     ops = _es_operators(species, grid, solver, g, dt, phase)
     saved = map(_save, species)
-    φm = copy(sol.phi.data)
+    φn = _to_host(sol.phi.data)
+    φm = copy(φn)
     if solver.variable_coefficients
         A, P = _es_full_operators(species, grid, solver, g, dt, phase)
         F = map(J -> _es_factor(ops[J].A + ops[J].P / θ, g.k[J], g.nyquist[J]), CartesianIndices(g.k))
-        Pφn = P(sol.phi.data)
+        Pφn = P(φn)
         for _ in 1:corrections
             ρ = _es_trial_rho(species, saved, φm, es_field(φm, grid, g), grid, dt, phase) .+ _fixed_charge(solver)
             M(φ) = A(φ) .+ P(φ) ./ θ
@@ -337,7 +345,7 @@ function step_es_charge_form!(species, sol::FieldSolution, grid::Grid, solver::E
             end
         end
     else
-        Pφn = _es_apply(ops, :P, _es_fft(sol.phi.data, g))
+        Pφn = _es_apply(ops, :P, _es_fft(φn, g))
         for _ in 1:corrections
             ρ = _es_trial_rho(species, saved, φm, es_field(φm, grid, g), grid, dt, phase) .+ _fixed_charge(solver)
             rhs = -_es_fft(ρ, g) .+ _es_apply(ops, :A, _es_fft(φm, g)) .+ (1 - θ) / θ .* Pφn

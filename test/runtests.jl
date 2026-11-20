@@ -13,4 +13,5 @@ using bslLD
     include("exb_bracket_test.jl")
     include("es_charge_form_test.jl")
     include("gpu_test.jl")
+    include("backend_test.jl")
 end

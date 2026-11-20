@@ -38,7 +38,7 @@ function compute_current(
     f::DistributionGrid{DT,NX,NV,NXNV,Cart},
     grid::CartGrid,
 ) where {DT,NX,NV,NXNV}
-    return VectorField([collect(J) for J in _current_arrays(f, grid)])
+    return VectorField([copy(J) for J in _current_arrays(f, grid)])
 end
 
 function compute_current(sp::DistSpecies, grid::CartGrid, phase::Real)
@@ -48,7 +48,8 @@ function compute_current(sp::DistSpecies, grid::CartGrid, phase::Real)
     1 <= NV <= 3 || error("This function expects 1 <= NV <= 3.")
     phi = -electric_acceleration_scale(sp) * phase
     Rot = R(grid.Bdir, phi)
-    return Rot[1:NV, 1:NV] * J
+    # Component-wise on the arrays (a host matrix times a VectorField indexes the device arrays by scalar).
+    return VectorField([sum(Rot[a, b] .* J[b].data for b in 1:NV) for a in 1:NV])
 end
 
 function _momentum_tensor_arrays(

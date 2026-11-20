@@ -142,11 +142,38 @@ _spectral_buffers(
     f::DistributionGrid{DT,NX,NV,NXNV},
 ) where {DT,NX,NV,NXNV} = _buffer!(plan, :spectral) do
     ff_buf = similar(f.data, Complex{DT})
-    (
-        ff_buf,
-        ntuple(d -> plan_fft!(ff_buf, d), Val(NXNV)),
-        ntuple(d -> plan_ifft!(ff_buf, d), Val(NXNV)),
-    )
+    plans = ntuple(d -> _fft_plans!(ff_buf, d), Val(NXNV))
+    (ff_buf, map(first, plans), map(last, plans))
+end
+
+# In-place FFT along axis `perm[1]` through a permuted copy with that axis first. For FFT backends that cannot
+# batch over dimensions on both sides of the transformed one (AMDGPU's rocFFT: "batching dims must be sequential").
+struct PermutedFFTPlan{A,P,N}
+    tmp::A
+    perm::NTuple{N,Int}
+    iperm::NTuple{N,Int}
+    plan::P
+end
+
+function Base.:*(p::PermutedFFTPlan, x)
+    permutedims!(p.tmp, x, p.perm)
+    p.plan * p.tmp
+    permutedims!(x, p.tmp, p.iperm)
+    return x
+end
+
+# Forward and inverse in-place plans along axis `d` of `buf`; the permuted fallback shares one buffer for both.
+function _fft_plans!(buf, d)
+    try
+        return (plan_fft!(buf, d), plan_ifft!(buf, d))
+    catch err
+        err isa ArgumentError || rethrow()
+        perm = (d, filter(!=(d), ntuple(identity, ndims(buf)))...)
+        tmp = similar(buf, map(i -> size(buf, i), perm))
+        iperm = Tuple(invperm(collect(perm)))
+        return (PermutedFFTPlan(tmp, perm, iperm, plan_fft!(tmp, 1)),
+                PermutedFFTPlan(tmp, perm, iperm, plan_ifft!(tmp, 1)))
+    end
 end
 
 _work_buffer(plan::AdvectionPlan, f) =
