@@ -224,13 +224,14 @@ function _es_mask_x(N)
 end
 
 # G(k∥) = ⟨e^{−i k∥ v∥ dt/2}⟩ over the drift species' Maxwellian on its v∥ grid: its parallel streaming over the
-# second X(dt/2) (real: the v∥ grid is symmetric). 1 for species without one.
+# second X(dt/2) (real: the v∥ grid is symmetric). FullDK: a vector along x1 (the Maxwellian at T_e(x1)); 1 for species
+# without one.
 _streaming_factor(sp, k3, dt) = 1.0
 function _streaming_factor(sp::FullDKSpecies, k3, dt)
     md = getfield(sp, :model)
     v = collect(md.grid.vaxes[1])
-    w = exp.(-v .^ 2 ./ (2md.T_e))
-    return real(sum(w .* cis.(-k3 * thermal_velocity(sp) .* v .* dt / 2)) / sum(w))
+    ph = cis.(-k3 * thermal_velocity(sp) .* v .* dt / 2)
+    return [(w = exp.(-v .^ 2 ./ (2T)); real(sum(w .* ph) / sum(w))) for T in md.T_e]
 end
 _streaming_factor(sp, k3, dt, solver::ESChargeForm) =
     is_drift(sp) && solver.parallel_streaming ? _streaming_factor(sp, k3, dt) : 1.0
@@ -274,9 +275,9 @@ function _es_operators(species, grid, solver::ESChargeForm, g::_ESGeometry, dt, 
         for p in parts
             if is_drift(p.sp)
                 G = _streaming_factor(p.sp, k3, dt, solver)
-                Am .+= (G * p.c * -k3^2) .* p.N
+                Am .+= G .* ((p.c * -k3^2) .* p.N)                         # G scales the rows (x1)
                 p.ex === nothing || (p.dealiased && abs(k2) * L2 / 2π > N2 / 3 + 1e-9) ||
-                    (Am .+= (G * p.sp.q * dt / grid.b0 * im * k2) .* p.ex)
+                    (Am .+= G .* ((p.sp.q * dt / grid.b0 * im * k2) .* p.ex))
             else
                 Am .+= p.c .* (p.DnD .- (k2^2 + k3^2) .* p.N)
             end
@@ -473,7 +474,8 @@ function _es_full_operators(species, grid, solver::ESChargeForm, g::_ESGeometry,
     cp = solver.w * _drift_species(species).m / grid.b0^2
     G = map(species) do sp
         (g.nx == 3 && is_drift(sp) && solver.parallel_streaming) || return nothing
-        _on(g.Dd, reshape([_streaming_factor(sp, k3, dt) for k3 in g.kax[2]], 1, 1, :))
+        _on(g.Dd, reduce(hcat, [_streaming_factor(sp, k3, dt) .* ones(size(g.D, 1)) for k3 in g.kax[2]]) |>
+                  G -> reshape(G, size(G, 1), 1, :))                       # (x1, 1, k3)
     end
     stream(y, Gs) = Gs === nothing ? y : _es_ifft(Gs .* _es_fft(y, g), g)
     function A(φ)

@@ -77,6 +77,29 @@ end
         @test abs(mass(md.dist.data) - m0) / m0 < 1e-13
     end
 
+    @testset "FullDK with T_e(x)" begin
+        grid, x, y, L = walls_setup(; N1 = 17, Ny = 4)
+        N, Ny = length(x), length(y)
+        n = [1 + 0.1 * cos(π * x[i] / L) for i in 1:N, j in 1:Ny]
+        a = bslLD.FullDK(grid, n; T_e = 1.0, Nv = 32, x_boundary = :mirror)
+        b = bslLD.FullDK(grid, n; T_e = fill(1.0, N), Nv = 32, x_boundary = :mirror)
+        @test a.dist.data == b.dist.data
+        Te(x) = 1 + 0.5 * cos(π * x / L)
+        md = bslLD.FullDK(grid, n; T_e = Te, Nv = 64, vmax = 8, x_boundary = :mirror)
+        v = collect(md.grid.vaxes[1])
+        dv = md.grid.delta[3]
+        F = md.dist.data
+        dens = dropdims(sum(F; dims = 3); dims = 3) .* dv
+        v2 = dropdims(sum(F .* reshape(v .^ 2, 1, 1, :); dims = 3); dims = 3) .* dv ./ dens
+        @test maximum(abs, dens .- n) < 1e-13
+        @test maximum(abs, v2 .- Te.(x)) < 1e-8
+        el = bslLD.Species(md; q = -1.0, m = 1 / 3670)
+        G = bslLD._streaming_factor(el, 0.06, 0.25)
+        Gs(T) = (w = exp.(-v .^ 2 ./ (2T)); real(sum(w .* cis.(-0.06 * sqrt(3670) .* v .* 0.125)) / sum(w)))
+        @test maximum(abs, G .- Gs.(Te.(x))) < 1e-14
+        @test G[1] < G[end] < 1                          # hotter wall streams farther
+    end
+
     @testset "Anderson acceleration of a slow linear fixed-point map" begin
         # G(x) = Bx + c with three slow modes (0.95, 0.9, −0.9) over fast ones (|λ| ≤ 0.1), as the wall modes of the
         # corrections: plain iteration stalls at the slow modes, Anderson(3) removes them.
