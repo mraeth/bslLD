@@ -46,6 +46,17 @@ using LinearAlgebra: norm
         @test norm(P(bslLD.exb_bracket_padded!(similar(ff), ff, gg, k1, k2)) .- P(col)) / norm(P(col)) < 1e-12
     end
 
+    @testset "cached-buffer path = exb_bracket_padded! (with a velocity axis)" begin
+        grid = bslLD.Grid([0.0, 0.0, -1.0], [L1, L2, 1.0], [N1, N2, 6], 2, 1.0, 3)
+        fv = cat((c .* f for c in 1:7)...; dims = 3) .+ reshape(collect(1:7) .* 0.1, 1, 1, :) .* g
+        P = bslLD._get_pad_plan(fv, grid)
+        g1, g2 = bslLD._padded_gradient(g, k1, k2, P.M)
+        a = bslLD._exb_bracket_padded!(similar(fv), fv, g1, g2, P)
+        b = bslLD.exb_bracket_padded!(similar(fv), fv, g, k1, k2)
+        @test norm(a .- b) / norm(b) < 1e-13
+        bslLD.release_pad_buffers!(fv)
+    end
+
     @testset "padded RK4 push conserves mass, with and without walls" begin
         μ = 1 / 3670
         for walls in (false, true)

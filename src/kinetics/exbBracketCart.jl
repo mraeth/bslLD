@@ -263,6 +263,108 @@ function exb_bracket_padded!(df::AbstractArray, f::AbstractArray, g::AbstractArr
     return df
 end
 
+# Buffers and in-place FFT plans of the padded bracket for one distribution array (cached per array, as the ExB plan):
+# fh the spectrum of f (N1, N2, rest), d1/d2 the padded derivatives (M1, M2, rest).
+struct PaddedBracketPlan{C,P,K}
+    fh::C
+    d1::C
+    d2::C
+    pf::P        # (forward, inverse) over x1, x2 of fh
+    pd::P        # same for d1 (d2 has the same shape and uses the same plans)
+    k::K         # (k1, k2) reshaped for broadcasting
+    M::Tuple{Int,Int}
+end
+
+const _pad_plan_cache = IdDict{Any,Any}()
+const _pad_plan_lock = ReentrantLock()
+
+function _get_pad_plan(fdata::AbstractArray, grid::CartGrid)
+    lock(_pad_plan_lock) do
+        get!(_pad_plan_cache, fdata) do
+            N1, N2 = size(fdata, 1), size(fdata, 2)
+            M = (cld(3N1, 2), cld(3N2, 2))
+            fh = similar(fdata, ComplexF64)
+            d1 = similar(fdata, ComplexF64, (M..., size(fdata)[3:end]...))
+            d2 = similar(d1)
+            k1, k2 = spectral_wavenumbers(fdata, grid, 1), spectral_wavenumbers(fdata, grid, 2)
+            PaddedBracketPlan(fh, d1, d2, (plan_fft!(fh, 1:2), plan_ifft!(fh, 1:2)),
+                              (plan_fft!(d1, 1:2), plan_ifft!(d1, 1:2)), (reshape(k1, :, 1), reshape(k2, 1, :)), M)
+        end
+    end
+end
+
+"""
+    bslLD.release_pad_buffers!(f)
+
+Drop the cached padded-bracket buffers of the distribution array `f` (device memory).
+"""
+release_pad_buffers!(f) = lock(() -> (delete!(_pad_plan_cache, f); nothing), _pad_plan_lock)
+
+# z .= pad(â) without allocating (z zeroed first).
+function _pad12!(Z, â)
+    N1, N2 = size(â, 1), size(â, 2)
+    M1, M2 = size(Z, 1), size(Z, 2)
+    rest = ntuple(_ -> Colon(), ndims(â) - 2)
+    fill!(Z, 0)
+    for (s1, d1) in _pad_blocks(N1, M1), (s2, d2) in _pad_blocks(N2, M2)
+        (isempty(s1) || isempty(s2)) && continue
+        @views Z[d1, d2, rest...] .= â[s1, s2, rest...]
+    end
+    return Z
+end
+
+function _trunc12!(a, Ẑ)
+    N1, N2 = size(a, 1), size(a, 2)
+    M1, M2 = size(Ẑ, 1), size(Ẑ, 2)
+    rest = ntuple(_ -> Colon(), ndims(Ẑ) - 2)
+    fill!(a, 0)
+    for (s1, d1) in _pad_blocks(N1, M1), (s2, d2) in _pad_blocks(N2, M2)
+        (isempty(s1) || isempty(s2)) && continue
+        @views a[s1, s2, rest...] .= Ẑ[d1, d2, rest...]
+    end
+    return a
+end
+
+# The padded derivatives (∂1 g, ∂2 g) of the x-shaped g, real, on the padded grid (once per push: φ is frozen).
+function _padded_gradient(g, k1, k2, M)
+    N1, N2 = size(g, 1), size(g, 2)
+    sc = (M[1] * M[2]) / (N1 * N2)
+    gh = fft(complex(g), 1:2)
+    up(â) = real(ifft(_pad12(â, M...), 1:2)) .* sc
+    return up(im .* reshape(k1, :, 1) .* gh), up(im .* reshape(k2, 1, :) .* gh)
+end
+
+# df = {f, g} with the plan's buffers and the precomputed padded gradient (g1, g2) of g; as exb_bracket_padded!.
+function _exb_bracket_padded!(df, f, g1, g2, P::PaddedBracketPlan)
+    N1, N2 = size(f, 1), size(f, 2)
+    sc = (P.M[1] * P.M[2]) / (N1 * N2)
+    K1, K2 = P.k
+    P.fh .= f
+    P.pf[1] * P.fh
+    _pad12!(P.d1, P.fh); P.d1 .*= im .* K1_pad(K1, P, N1)
+    _pad12!(P.d2, P.fh); P.d2 .*= im .* K2_pad(K2, P, N2)
+    P.pd[2] * P.d1
+    P.pd[2] * P.d2
+    @. P.d1 = complex(sc * (real(P.d1) * g2 - g1 * real(P.d2)))
+    P.pd[1] * P.d1
+    _trunc12!(P.fh, P.d1)
+    P.fh ./= sc
+    P.pf[2] * P.fh
+    df .= real.(P.fh)
+    return df
+end
+
+# Wavenumbers of the kept modes placed on the padded axes (0 elsewhere), for multiplying padded spectra.
+K1_pad(K1, P, N1) = _pad_k(vec(K1), N1, P.M[1], 1)
+K2_pad(K2, P, N2) = _pad_k(vec(K2), N2, P.M[2], 2)
+function _pad_k(k, N, M, d)
+    kp = fill!(similar(k, M), 0)
+    for (s, t) in _pad_blocks(N, M)
+        isempty(s) || (@views kp[t] .= k[s])
+    end
+    return d == 1 ? reshape(kp, :, 1) : reshape(kp, 1, :)
+end
+
 _exb_mode(d::Bool) = d ? :truncate : :none
 _exb_mode(d::Symbol) = (d in (:none, :truncate, :pad) || throw(ArgumentError("dealias must be :none, :truncate or :pad, got :$d")); d)
 
@@ -285,9 +387,9 @@ function exb_rk4!(
         NX >= 2 || throw(ArgumentError("the ExB bracket requires at least two spatial dimensions, got $NX"))
         grid.Bdir == 3 || throw(ArgumentError("the ExB bracket assumes B along x3, got grid.Bdir = $(grid.Bdir)"))
         grid.b0 == 0.0 && error("ExB bracket requires nonzero b0")
-        g = phi.data ./ grid.b0
-        k1, k2 = spectral_wavenumbers(f.data, grid, 1), spectral_wavenumbers(f.data, grid, 2)
-        rhs! = (k, f) -> exb_bracket_padded!(k.data, f.data, g, k1, k2)
+        P = _get_pad_plan(f.data, grid)
+        g1, g2 = _padded_gradient(phi.data ./ grid.b0, vec(P.k[1]), vec(P.k[2]), P.M)
+        rhs! = (k, f) -> _exb_bracket_padded!(k.data, f.data, g1, g2, P)
     elseif mode === :truncate
         plan = _get_exb_plan(f, grid)
         phi = ScalarField(exb_dealias!(copy(phi.data)))
