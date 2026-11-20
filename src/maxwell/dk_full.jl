@@ -14,28 +14,36 @@
 # truncation that keeps the bracket skew-symmetric (`dealias = true`, RK4 only). In the charge-form step the
 # kick is applied in halves around the E×B push (`_push_stage!`), second order in their commutator.
 # A drift species: E×B density response and polarisation density in the field solve.
+# Walls along x1 (`x_boundary = :mirror`, the `Mirror()` grid with walls on the first and last node): the E×B push
+# runs on the extension of F (even) and φ (odd, φ = 0 on the walls) to the periodic grid of 2(N−1) nodes and is
+# restricted back; u_x = −∂_yφ/b0 vanishes on the walls, so nothing crosses them. Kick and streaming are pointwise
+# in x1 and unchanged.
 
-struct FullDK{DG<:DistributionGrid,G<:Grid,MT} <: DistributionModel
+struct FullDK{DG<:DistributionGrid,G<:Grid,MT,EX} <: DistributionModel
     dist::DG      # F on `grid`
     grid::G       # x axes of the field grid, one v∥ axis
     T_e::Float64
     method::MT    # Fourier() or Lagrange(order) for the parallel streaming
     exb::Symbol   # :euler or :rk4 E×B push
     dealias::Bool # 2/3 truncation of the :rk4 bracket
+    ext::EX       # nothing (periodic x1), or (grid, F buffer) of the extended x1 grid with walls
 end
 
 """
-    FullDK(field_grid, n; T_e, Nv = 64, vmax = 6, method = Fourier(), exb = :euler, dealias = false)
+    FullDK(field_grid, n; T_e, Nv = 64, vmax = 6, method = Fourier(), exb = :euler, dealias = false,
+           x_boundary = :periodic)
 
 Full-f drift-kinetic model on the x axes of `field_grid` with a v∥ axis of `Nv` intervals (`Nv + 1`
 nodes) on ±`vmax` √T_e, initialised as n(x) F_M(v∥) with the density `n` (an array of the spatial
 shape) and a Maxwellian normalised on the grid. Species: `Species(FullDK(grid, n; T_e); q = -1, m = μ)`.
 The E×B advection needs b̂ = x̂3 (`field_grid.Bdir == 3`); `exb` is its time integrator over the
 step, `:euler` (one stage) or `:rk4`; `dealias` applies the 2/3 Galerkin truncation to the `:rk4` bracket.
+`x_boundary = :mirror`: walls on the first and last x1 node (pair with `ESChargeForm(x_boundary = :dirichlet)`).
 """
 function FullDK(field_grid::CartGrid, n::AbstractArray; T_e::Real, Nv::Int = 64, vmax::Real = 6,
-                method = Fourier(), exb::Symbol = :euler, dealias::Bool = false)
+                method = Fourier(), exb::Symbol = :euler, dealias::Bool = false, x_boundary::Symbol = :periodic)
     exb in (:euler, :rk4) || throw(ArgumentError("exb must be :euler or :rk4, got :$exb"))
+    x_boundary in (:periodic, :mirror) || throw(ArgumentError("x_boundary must be :periodic or :mirror"))
     dealias && exb !== :rk4 && throw(ArgumentError("dealias needs exb = :rk4"))
     T_e > 0 || throw(ArgumentError("T_e must be positive"))
     field_grid.Bdir == 3 || throw(ArgumentError("FullDK needs b̂ = x̂3 (Bdir = 3) for the E×B bracket"))
@@ -51,7 +59,17 @@ function FullDK(field_grid::CartGrid, n::AbstractArray; T_e::Real, Nv::Int = 64,
     g ./= dv * sum(g)
     sf = ScalarField(backend_array(Float64.(n) .* reshape(g, ntuple(_ -> 1, nx)..., :)))
     dist = DistributionGridImpl{nx,1,Cart,typeof(sf)}(sf)
-    return FullDK(dist, grid, Float64(T_e), method, exb, dealias)
+    ext = nothing
+    if x_boundary === :mirror
+        N1, h = length(grid.xaxes[1]), grid.delta[1]
+        xmax = copy(Vector{Float64}(grid.max))
+        xmax[1] = grid.min[1] + (2N1 - 2) * h
+        egrid = Grid(Vector{Float64}(grid.min), xmax, vcat(2N1 - 2, collect(length.(field_grid.xaxes))[2:nx], Nv), nx,
+                     field_grid.b0, field_grid.Bdir)
+        esf = ScalarField(similar(sf.data, Float64, (2N1 - 2, size(sf.data)[2:end]...)))
+        ext = (egrid, DistributionGridImpl{nx,1,Cart,typeof(esf)}(esf))
+    end
+    return FullDK(dist, grid, Float64(T_e), method, exb, dealias, ext)
 end
 
 const FullDKSpecies = Species{<:AbstractFloat,<:FullDK}
@@ -83,7 +101,16 @@ push_drift!(sp, φ::ScalarField, grid::Grid, dt::Real) = sp
 
 function push_drift!(sp::FullDKSpecies, φ::ScalarField, grid::Grid, dt::Real)
     md = getfield(sp, :model)
-    md.exb === :rk4 ? exb_rk4!(md.dist, φ, md.grid, dt; md.dealias) : exb_euler!(md.dist, md.dist, φ, md.grid, dt)
+    adv!(f, ϕ, g) = md.exb === :rk4 ? exb_rk4!(f, ϕ, g, dt; md.dealias) : exb_euler!(f, f, ϕ, g, dt)
+    if md.ext === nothing
+        adv!(md.dist, φ, md.grid)
+    else
+        egrid, ef = md.ext
+        N1 = size(md.dist.data, 1)
+        ef.data .= _x1_extend(md.dist.data, 1)
+        adv!(ef, ScalarField(_x1_extend(φ.data, -1)), egrid)
+        md.dist.data .= selectdim(ef.data, 1, 1:N1)
+    end
     return sp
 end
 

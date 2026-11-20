@@ -41,7 +41,7 @@
 
 """
     ESChargeForm(; w = 1, implicit_drift = true, background = nothing, variable_coefficients = false,
-                 krylov = true, rtol = 1e-10, parallel_streaming = true)
+                 krylov = true, rtol = 1e-10, parallel_streaming = true, x_boundary = :periodic)
 
 Electrostatic quasineutral charge-form solve with the polarisation density (weight `w`) of the single
 drift species and an x1-dependent profile. `implicit_drift` puts the E×B response of the drift
@@ -51,7 +51,8 @@ added to the species charge, e.g. immobile ions with only a drift species in `sp
 (nonlinear runs), solved by GMRES to the relative residual `rtol` (`krylov = false`: one defect
 correction with the averaged operator per correction instead); otherwise their average over the Fourier axes.
 `parallel_streaming`: the drift species' response in the stage operator includes its parallel streaming over
-the second half step (the factor G(k∥)). See [`step_es_charge_form!`](@ref).
+the second half step (the factor G(k∥)). `x_boundary`: `:periodic`, or `:dirichlet` for walls on the first and last
+x1 node (the `Mirror()` grid, Δx = L/(N−1)) with φ = 0 there. See [`step_es_charge_form!`](@ref).
 """
 Base.@kwdef struct ESChargeForm{BG}
     w::Float64 = 1.0
@@ -61,6 +62,7 @@ Base.@kwdef struct ESChargeForm{BG}
     krylov::Bool = true
     rtol::Float64 = 1e-10
     parallel_streaming::Bool = true
+    x_boundary::Symbol = :periodic
 end
 
 _to_host(a::Array) = a
@@ -80,27 +82,51 @@ function _spectral_diff_matrix(N::Int, L::Real)
     return [i == j ? 0.0 : 0.5 * (-1)^(i - j) * cot((i - j) * h / 2) * (2π / L) for i in 1:N, j in 1:N]
 end
 
-struct _ESGeometry{M,K,B,DD,KK,MK,ZV}
-    D::M          # d/dx1 (host)
+# x1 with walls (`x_boundary = :dirichlet`). The N nodes of the `Mirror()` grid, walls on nodes 1 and N, extend to the
+# periodic grid of 2(N−1) nodes, even (s = 1: n, f) or odd (s = −1: φ, zero on the walls):
+# ã_j = a_j (j ≤ N), ã_{2N−j} = s a_j (2 ≤ j ≤ N−1). E_s is that extension as a 2(N−1) × N matrix, R the restriction.
+function _wall_extension(N::Int, s)
+    E = zeros(2N - 2, N)
+    for j in 1:N
+        E[j, j] = 1
+    end
+    for j in 2:N-1
+        E[2N-j, j] = s
+    end
+    s < 0 && (E[:, 1] .= 0; E[:, N] .= 0)
+    return E
+end
+
+struct _ESGeometry{M,K,B,DD,KK,MK,UV,UW}
+    D::M          # d/dx1 on odd inputs (φ; host); periodic: the spectral matrix
+    De::M         # d/dx1 on even inputs (n, f; host); periodic: = D
+    Mxo::M        # 2/3 mask along x1 on odd inputs (host)
+    Mxe::M        # 2/3 mask along x1 on even inputs (host)
     k::K          # (k2, k3) per Fourier index, k3 = 0 without an x3 axis (host)
     nyquist::B    # Nyquist index along x2 or x3 (host)
     nx::Int
+    wall::Bool    # x1 walls (Dirichlet φ)
     kax::Vector{Vector{Float64}}  # k2 (and k3) axes (host)
     Dd::DD        # D on the backend of the field arrays
+    Ded::DD       # De on the backend
     kk::KK        # (k2, k3) on the backend, shaped (1, N2[, N3])
     keep::MK      # 0 at the Nyquist indices, 1 elsewhere, shaped as kk
-    kzero::MK     # 1 at k2 = 0 (the x1-constant is projected out there), shaped as kk
-    z::ZV         # x1 zigzag (−1)^j/√N1, shaped (N1, 1[, 1])
-    o::ZV         # x1 constant 1/√N1, shaped as z
+    u::UV         # x1 vectors projected out of φ (normalised), each shaped (N1, 1[, 1]), on the backend
+    w::UW         # their weights per index: 1 or an array shaped as kk
+    uh::Vector{Vector{Float64}}   # u on the host
+    wh::Vector{Array{Float64}}    # w per index on the host (shape of k)
 end
 
 """
-    _es_geometry(grid, like = Float64[])
+    _es_geometry(grid, like = Float64[]; x_boundary = :periodic)
 
 Geometry of the ES solve; its backend arrays live on the backend of `like` (an array, e.g. `sol.phi.data`).
+Periodic x1: the projected vectors are the zigzag (−1)^j (all indices) and the constant (k2 = 0). Walls
+(`:dirichlet`): the wall nodes, so that φ = 0 there and quasineutrality holds on the interior nodes.
 """
-function _es_geometry(grid::Grid, like::AbstractArray = Float64[])
+function _es_geometry(grid::Grid, like::AbstractArray = Float64[]; x_boundary::Symbol = :periodic)
     grid.Bdir == 3 || throw(ArgumentError("ESChargeForm needs b̂ = x̂3 (Bdir = 3)"))
+    x_boundary in (:periodic, :dirichlet) || throw(ArgumentError("x_boundary must be :periodic or :dirichlet"))
     nx = length(grid.xaxes)
     2 <= nx <= 3 || throw(ArgumentError("ESChargeForm needs 2 or 3 spatial axes, got $nx"))
     N = length.(grid.xaxes)
@@ -109,30 +135,49 @@ function _es_geometry(grid::Grid, like::AbstractArray = Float64[])
     I = CartesianIndices(Tuple(N[2:nx]))
     k = map(J -> (kax[1][J[1]], nx == 3 ? kax[2][J[2]] : 0.0), I)
     nyq = map(J -> any(d -> iseven(N[d+1]) && J[d] == N[d+1] ÷ 2 + 1, 1:nx-1), I)
-    D = _spectral_diff_matrix(N[1], L[1])
     up(a) = _on(like, a)
     ms = (1, size(I)...)
     kk = ntuple(d -> up(reshape(getindex.(k, d), ms)), 2)
     keep = up(reshape(Float64.(.!nyq), ms))
-    kzero = up(reshape(Float64.(iszero.(getindex.(k, 1))), ms))
     vs = (N[1], ntuple(_ -> 1, nx - 1)...)
-    z = up(reshape([(-1.0)^j for j in 0:N[1]-1] ./ sqrt(N[1]), vs))
-    o = up(reshape(ones(N[1]) ./ sqrt(N[1]), vs))
-    return _ESGeometry(D, k, nyq, nx, kax, up(D), kk, keep, kzero, z, o)
+    N1 = N[1]
+    wall = x_boundary === :dirichlet
+    if wall
+        h = grid.delta[1]
+        Ee, Eo = _wall_extension(N1, 1), _wall_extension(N1, -1)
+        R = hcat(_es_diag(ones(N1)), zeros(N1, N1 - 2))     # restriction to nodes 1…N
+        Dt = _spectral_diff_matrix(2N1 - 2, (2N1 - 2) * h)
+        Mt = _es_mask_x(2N1 - 2)
+        D, De, Mxo, Mxe = R * Dt * Eo, R * Dt * Ee, R * Mt * Eo, R * Mt * Ee
+        e(j) = (v = zeros(N1); v[j] = 1; v)
+        uh = [e(1), e(N1)]
+        wh = Array{Float64}[ones(size(I)), ones(size(I))]
+    else
+        D = _spectral_diff_matrix(N1, L[1])
+        De = D
+        Mxo = Mxe = _es_mask_x(N1)
+        uh = [[(-1.0)^j for j in 0:N1-1] ./ sqrt(N1), ones(N1) ./ sqrt(N1)]
+        wh = Array{Float64}[ones(size(I)), Float64.(iszero.(getindex.(k, 1)))]
+    end
+    u = Tuple(up(reshape(v, vs)) for v in uh)
+    w = Tuple(all(isone, x) ? 1 : up(reshape(x, ms)) for x in wh)
+    return _ESGeometry(D, De, Mxo, Mxe, k, nyq, nx, wall, kax, up(D), up(De), kk, keep, u, w, uh, wh)
 end
+
+_es_geometry(grid::Grid, like::AbstractArray, solver::ESChargeForm) = _es_geometry(grid, like; solver.x_boundary)
 
 _es_fft(a, g::_ESGeometry) = fft(complex(a), 2:g.nx)
 _es_ifft(a, g::_ESGeometry) = real(ifft(a, 2:g.nx))
 _es_mean_x(a, g::_ESGeometry) = vec(sum(a; dims = 2:g.nx)) ./ prod(size(a)[2:g.nx])
 
-# ∂/∂x1 by the differentiation matrix: BLAS on host arrays, a kernel on device arrays (AMDGPU 1.x has no dense
-# matrix product on Julia ≥ 1.13).
-_es_dx1(a::Array, g::_ESGeometry) = reshape(g.D * reshape(a, size(a, 1), :), size(a))
-function _es_dx1(a, g::_ESGeometry)
+# ∂/∂x1 by the differentiation matrix for an input of x1-parity s (−1: φ, 1: densities; only relevant with walls):
+# BLAS on host arrays, a kernel on device arrays (AMDGPU 1.x has no dense matrix product on Julia ≥ 1.13).
+_es_dx1(a::Array, g::_ESGeometry, s = -1) = reshape((s < 0 ? g.D : g.De) * reshape(a, size(a, 1), :), size(a))
+function _es_dx1(a, g::_ESGeometry, s = -1)
     X = reshape(a, size(a, 1), :)
     Y = similar(X)
     be = get_backend(X)
-    _es_matmul_kernel!(be)(Y, g.Dd, X; ndrange = size(X))
+    _es_matmul_kernel!(be)(Y, s < 0 ? g.Dd : g.Ded, X; ndrange = size(X))
     KernelAbstractions.synchronize(be)
     return reshape(Y, size(a))
 end
@@ -149,6 +194,7 @@ end
 # ∇⊥·(n ∇⊥) and ∂∥(n ∂∥) at (k2, k3) as x1-matrices.
 _es_diag(v) = [i == j ? v[i] : zero(eltype(v)) for i in eachindex(v), j in eachindex(v)]
 _es_perp(D, n, k2) = D * (n .* D) - k2^2 * _es_diag(n)
+_es_perp(g::_ESGeometry, n, k2) = g.De * (n .* g.D) - k2^2 * _es_diag(n)
 _es_par(n, k3) = -k3^2 * _es_diag(n)
 
 # `dl`: nothing, or (Mx, keep) for a species whose E×B push is 2/3-dealiased (`_exb_dealiased`): the E×B
@@ -205,18 +251,17 @@ function _es_operators(species, grid, solver::ESChargeForm, g::_ESGeometry, dt, 
     d = findfirst(is_drift, collect(species))
     md = _drift_species(species)
     cp = solver.w * md.m / grid.b0^2
-    D = g.D
+    D, De, Mxo, Mxe = g.D, g.De, g.Mxo, g.Mxe
     N1 = size(D, 1)
-    Mx = _es_mask_x(N1)
     N2, L2 = length(grid.xaxes[2]), grid.max[2] - grid.min[2]
     parts = map(zip(species, ns)) do (sp, n)
         c = dt^2 / 2 * sp.q^2 / sp.m
         ex = !(is_drift(sp) && solver.implicit_drift) ? nothing :
-             _exb_dealiased(sp) ? Mx * _es_diag(D * (Mx * n)) * Mx : _es_diag(D * n)
-        (sp = sp, c = c, DnD = is_drift(sp) ? nothing : D * (n .* D), N = _es_diag(n), ex = ex,
+             _exb_dealiased(sp) ? Mxe * _es_diag(De * (Mxe * n)) * Mxo : _es_diag(De * n)
+        (sp = sp, c = c, DnD = is_drift(sp) ? nothing : De * (n .* D), N = _es_diag(n), ex = ex,
          dealiased = _exb_dealiased(sp))
     end
-    DnDd = D * (ns[d] .* D)
+    DnDd = De * (ns[d] .* D)
     Nd = _es_diag(ns[d])
     modes = vec(g.k)
     A = zeros(ComplexF64, N1, N1, length(modes))
@@ -247,16 +292,22 @@ end
 # (Regularising only M + cΠ, with r projected, leaves a Π component in x through M and makes the
 # θ-step map non-neutral: |g| up to 1.46 at Δt = 0.5, θ = 1/2, electrons only.)
 function _es_factor(M, k, nyquist::Bool)
-    nyquist && return nothing
     N = size(M, 1)
     Z = [(-1)^j for j in 0:N-1] ./ sqrt(N)
     iszero(k[1]) && (Z = hcat(ones(N) ./ sqrt(N), Z))
+    return _es_factor(M, Z, nyquist)
+end
+# With the projected vectors Z (columns) of an index; `_es_Z(g, J)` gives them for a geometry.
+function _es_factor(M, Z::AbstractMatrix, nyquist::Bool)
+    nyquist && return nothing
+    N = size(M, 1)
     Π = Z * Z'
     Πc = _es_diag(ones(N)) - Π
     return (Πc * M * Πc + maximum(abs, M) * Π, Πc)
 end
 _es_solve(F, r) = F === nothing ? zero(r) : F[1] \ (F[2] * r)
 _es_solve(M, r, k, nyquist::Bool) = _es_solve(_es_factor(M, k, nyquist), r)
+_es_Z(g::_ESGeometry, J) = reduce(hcat, [g.uh[a] for a in eachindex(g.uh) if g.wh[a][J] != 0])
 
 # The solution operators W = (Π⊥ M Π⊥ + cΠ)⁻¹ Π⊥ (0 at Nyquist indices) of the host operators M (N1, N1, modes),
 # on the backend of the geometry: LAPACK per index on the host; on a device M is uploaded, the Galerkin matrices
@@ -266,7 +317,7 @@ function _es_inverses(M::Array{<:Complex,3}, g::_ESGeometry)
         W = zeros(ComplexF64, size(M))
         I = vec(CartesianIndices(g.k))
         Threads.@threads for m in eachindex(I)
-            Fm = _es_factor(M[:, :, m], g.k[I[m]], g.nyquist[I[m]])
+            Fm = _es_factor(M[:, :, m], _es_Z(g, I[m]), g.nyquist[I[m]])
             Fm === nothing || (W[:, :, m] .= Fm[1] \ Fm[2])
         end
         return W
@@ -277,21 +328,26 @@ function _es_inverses(M::Array{<:Complex,3}, g::_ESGeometry)
 end
 
 # (Π⊥ M Π⊥ + cΠ, Π⊥) of all indices as in _es_factor, on the backend of M (N1, N1, modes), by broadcasts:
-# Π = Σ_a w_a u_a u_aᵀ with u = (zigzag, constant), w = (1, [k2 = 0]), c = max|M| per index, and
+# Π = Σ_a w_a u_a u_aᵀ with the geometry's vectors u and weights w (periodic: zigzag, and the constant at k2 = 0;
+# walls: the wall nodes), c = max|M| per index, and
 # Π⊥MΠ⊥ = M − ΠM − MΠ + ΠMΠ. At Nyquist indices (identity, 0), so that the solve gives W = 0 there.
 function _es_galerkin(M, g::_ESGeometry)
     N = size(M, 1)
-    u = (reshape(g.z, N, 1, 1), reshape(g.o, N, 1, 1))
-    ut = (reshape(g.z, 1, N, 1), reshape(g.o, 1, N, 1))
-    w = (1, reshape(g.kzero, 1, 1, :))
+    u = map(v -> reshape(v, N, 1, 1), g.u)
+    ut = map(v -> reshape(v, 1, N, 1), g.u)
+    w = map(x -> x isa Number ? x : reshape(x, 1, 1, :), g.w)
     keep = reshape(g.keep, 1, 1, :)
     Id = _on(g.Dd, reshape(_es_diag(ones(ComplexF64, N)), N, N, 1))
-    r = map(a -> sum(u[a] .* M; dims = 1), (1, 2))            # u_aᵀ M, (1, N, modes)
-    c = map(a -> sum(M .* ut[a]; dims = 2), (1, 2))           # M u_a, (N, 1, modes)
+    A = eachindex(u)
+    r = map(a -> sum(u[a] .* M; dims = 1), A)                 # u_aᵀ M, (1, N, modes)
+    c = map(a -> sum(M .* ut[a]; dims = 2), A)                # M u_a, (N, 1, modes)
     s(a, b) = sum(r[a] .* ut[b]; dims = 2)                    # u_aᵀ M u_b, (1, 1, modes)
-    Π = u[1] .* ut[1] .+ w[2] .* u[2] .* ut[2]
-    F = M .- u[1] .* r[1] .- w[2] .* u[2] .* r[2] .- c[1] .* ut[1] .- w[2] .* c[2] .* ut[2]
-    for a in 1:2, b in 1:2
+    Π = reduce((p, q) -> p .+ q, (w[a] .* u[a] .* ut[a] for a in A))
+    F = copy(M)
+    for a in A
+        F .-= w[a] .* (u[a] .* r[a] .+ c[a] .* ut[a])
+    end
+    for a in A, b in A
         F .+= w[a] .* w[b] .* u[a] .* s(a, b) .* ut[b]
     end
     F .+= maximum(abs, M; dims = (1, 2)) .* Π
@@ -378,7 +434,7 @@ end
 
 # E = −∇φ: x1 by the differentiation matrix, the Fourier axes spectrally; three components.
 function es_field(φ::AbstractArray, grid::Grid, g::_ESGeometry = _es_geometry(grid, φ))
-    E1 = -_es_dx1(φ, g)
+    E1 = -_es_dx1(φ, g, -1)
     φ̂ = _es_fft(φ, g)
     E2 = _es_ifft(-im .* g.kk[1] .* φ̂, g)
     E3 = g.nx == 3 ? _es_ifft(-im .* g.kk[2] .* φ̂, g) : zero(E1)
@@ -387,18 +443,23 @@ end
 
 # --- Variable coefficients -------------------------------------------------------------------------
 
-# ∂/∂x_d of a real spatial array: x1 by the differentiation matrix, the Fourier axes spectrally.
-function _es_deriv(a, g::_ESGeometry, d)
-    d == 1 && return _es_dx1(a, g)
+# ∂/∂x_d of a real spatial array of x1-parity s (−1: φ-like, 1: density-like): x1 by the differentiation matrix, the
+# Fourier axes spectrally.
+function _es_deriv(a, g::_ESGeometry, d, s = -1)
+    d == 1 && return _es_dx1(a, g, s)
     d > g.nx && return zero(a)
     return _es_ifft(im .* g.kk[d-1] .* _es_fft(a, g), g)
 end
 
-_es_perp(n, φ, g::_ESGeometry) = (∂ = (a, d) -> _es_deriv(a, g, d);
-    ∂(n .* ∂(φ, 1), 1) .+ ∂(n .* ∂(φ, 2), 2))
-_es_par(n, φ, g::_ESGeometry) = (∂ = (a, d) -> _es_deriv(a, g, d); ∂(n .* ∂(φ, 3), 3))
-_es_exb(n, φ, g::_ESGeometry) = (∂ = (a, d) -> _es_deriv(a, g, d);
-    ∂(n, 1) .* ∂(φ, 2) .- ∂(n, 2) .* ∂(φ, 1))
+_es_perp(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s);
+    ∂(n .* ∂(φ, 1, -1), 1, 1) .+ ∂(n .* ∂(φ, 2, -1), 2, 1))
+_es_par(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s); ∂(n .* ∂(φ, 3, -1), 3, 1))
+_es_exb(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s);
+    ∂(n, 1, 1) .* ∂(φ, 2, -1) .- ∂(n, 2, 1) .* ∂(φ, 1, -1))
+
+# 2/3 truncation (exb_dealias!) of a copy of a spatial array of x1-parity s; with walls on its extension (1).
+_es_dealias(a, g::_ESGeometry, s) =
+    g.wall ? _x1_restrict(exb_dealias!(_x1_extend(a, s)), size(a, 1)) : exb_dealias!(copy(a))
 
 # A and P of the module header with the predictor densities n(x), as functions on real arrays (on the backend
 # of the geometry). The drift species' response is filtered by G(k∥) along x3.
@@ -418,7 +479,7 @@ function _es_full_operators(species, grid, solver::ESChargeForm, g::_ESGeometry,
             if is_drift(sp)
                 yd = c .* _es_par(n, φ, g)
                 solver.implicit_drift && (yd .+= sp.q * dt / grid.b0 .* (_exb_dealiased(sp) ?
-                    exb_dealias!(_es_exb(exb_dealias!(copy(n)), exb_dealias!(copy(φ)), g)) : _es_exb(n, φ, g)))
+                    _es_dealias(_es_exb(_es_dealias(n, g, 1), _es_dealias(φ, g, -1), g), g, 1) : _es_exb(n, φ, g)))
                 y .+= stream(yd, Gs)
             else
                 y .+= c .* (_es_par(n, φ, g) .+ _es_perp(n, φ, g))
@@ -433,8 +494,9 @@ end
 # Removes the Nyquist modes and the x1-constant at k2 = 0 (see _es_solve) from a real array.
 function _es_project(a, g::_ESGeometry)
     â = _es_fft(a, g)
-    â .-= g.z .* sum(g.z .* â; dims = 1)
-    â .-= g.o .* (g.kzero .* sum(g.o .* â; dims = 1))
+    for (u, w) in zip(g.u, g.w)
+        â .-= u .* (w .* sum(u .* â; dims = 1))
+    end
     â .*= g.keep
     return _es_ifft(â, g)
 end
@@ -461,13 +523,13 @@ With `solver.variable_coefficients`, GMRES iteration counts are pushed to `iters
 """
 function es_quasineutral_phi!(sol::FieldSolution, species, grid::Grid, solver::ESChargeForm; phase = 0,
                               iters = nothing)
-    g = _es_geometry(grid, sol.phi.data)
+    g = _es_geometry(grid, sol.phi.data, solver)
     md = _drift_species(species)
     n = _to_host(_es_mean_x(_species_density(md, grid, phase), g))
     cp = solver.w * md.m / grid.b0^2
     ρ = sum(_charge_density(sp, grid, phase) for sp in species) .+ _fixed_charge(solver, g)
     Pm = zeros(ComplexF64, length(n), length(n), length(g.k))
-    DnD = g.D * (n .* g.D)
+    DnD = g.De * (n .* g.D)
     Nd = _es_diag(n)
     for (m, k) in enumerate(vec(g.k))
         Pm[:, :, m] .= cp .* (DnD .- k[1]^2 .* Nd)
@@ -527,7 +589,7 @@ function step_es_charge_form!(species, sol::FieldSolution, grid::Grid, solver::E
                               phase::Real = 0, damping_rate::Real = 0, corrections::Int = 2, iters = nothing)
     θ = 1 / 2 + damping_rate * dt
     1 / 2 <= θ <= 1 || throw(ArgumentError("θ = 1/2 + κ dt must lie in [1/2, 1], got $θ"))
-    g = _es_geometry(grid, sol.phi.data)
+    g = _es_geometry(grid, sol.phi.data, solver)
     foreach(sp -> push_free!(sp, grid, dt, 1; phase, B = sol.B), species)
     ops = _es_operators(species, grid, solver, g, dt, phase)
     W = _es_inverses(ops.A .+ ops.P ./ θ, g)

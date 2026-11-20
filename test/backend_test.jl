@@ -98,6 +98,25 @@ function _backend_cases()
     out["step 3x1v k_z φ"] = _host(sol.phi.data)
     out["step 3x1v k_z Δf_e"] = Δ(F(el), fe0)
 
+    # The same with walls along x1 (Mirror() grid, φ = 0 on the walls).
+    N1 = 9
+    gw = bslLD.Grid([0.0, 0.0, 0.0, -1.0], [N1 * 100.0 / (N1 - 1), 100.0, 100.0, 1.0], [N1, 8, 4, 2], 3, 1.0, 3)
+    xw, yw, zw = collect.(gw.xaxes)
+    nw = [exp(0.1 * cos(π * xw[i] / 100)) * (1 + 0.1 * sin(2π * zw[l] / 100)) for i in 1:N1, j in 1:8, l in 1:4]
+    nbw = nw .* [1 + 1e-4 * sin(2π * xw[i] / 100) * cos(2π * (yw[j] + zw[l]) / 100) for i in 1:N1, j in 1:8, l in 1:4]
+    el = bslLD.Species(bslLD.FullDK(gw, nw; T_e = 1.0, Nv = 16, exb = :rk4, dealias = true, x_boundary = :mirror);
+                       q = -1.0, m = μ)
+    zw3() = bslLD.VectorField([bslLD.ScalarField(zeros(size(nw))) for _ in 1:3])
+    sol = bslLD.FieldSolution(zw3(), zw3())
+    solver = bslLD.ESChargeForm(; background = nbw, variable_coefficients = true, x_boundary = :dirichlet)
+    bslLD.es_quasineutral_phi!(sol, (el,), gw, solver)
+    out["walls es_quasineutral_phi φ"] = _host(sol.phi.data)
+    fe0 = _host(F(el))
+    φm = bslLD.step_es_charge_form!((el,), sol, gw, solver, 0.1; damping_rate = 1.0, corrections = 3)
+    out["walls step φm"] = _host(φm)
+    out["walls step φ"] = _host(sol.phi.data)
+    out["walls step Δf_e"] = Δ(F(el), fe0)
+
     # Kinetic ions (2x3v) with FullDK electrons: quasineutral φ and one charge-form step with variable
     # coefficients (GMRES) and the dealiased RK4 E×B push.
     Nx, Ny, Nv, Lx, vm = 16, 8, 8, 100.0, 5.0
@@ -142,7 +161,7 @@ end
             d = _reldiff(dev[k], ref[k])
             @info "backend $_backend_name: $k" reldiff = d norm = norm(ref[k])
             @test norm(ref[k]) > 0
-            @test d < (startswith(k, "step") || startswith(k, "es_") ? 1e-9 : 1e-12)
+            @test d < (startswith(k, "step") || startswith(k, "es_") || startswith(k, "walls") ? 1e-9 : 1e-12)
         end
     else
         @info "backend $_backend_name not available: device comparison skipped"

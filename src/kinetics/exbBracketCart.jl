@@ -174,6 +174,30 @@ function exb_euler!(
     return exb_euler!(f_out, f_in, phi, grid, dt, _get_exb_plan(f_in, grid))
 end
 
+# Walls along x1 (`Mirror()` grid: N nodes, walls on nodes 1 and N): the extension to the periodic grid of 2(N−1)
+# nodes, even (s = 1) or odd (s = −1; the wall values are then taken as 0), ã_j = a_j (j ≤ N), ã_{2N−j} = s a_j
+# (2 ≤ j ≤ N−1), and the restriction back to nodes 1…N.
+@kernel function _x1_extend_kernel!(e, a, s, N)
+    i, c = @index(Global, NTuple)
+    if i <= N
+        e[i, c] = (s < 0 && (i == 1 || i == N)) ? zero(eltype(e)) : a[i, c]
+    else
+        e[i, c] = s * a[2N - i, c]
+    end
+end
+
+function _x1_extend(a::AbstractArray, s)
+    N = size(a, 1)
+    A = reshape(a, N, :)
+    E = similar(A, 2N - 2, size(A, 2))
+    be = get_backend(A)
+    _x1_extend_kernel!(be)(E, A, eltype(a)(s), N; ndrange = size(E))
+    KernelAbstractions.synchronize(be)
+    return reshape(E, 2N - 2, size(a)[2:end]...)
+end
+
+_x1_restrict(e::AbstractArray, N::Int) = copy(selectdim(e, 1, 1:N))
+
 # 2/3-rule Galerkin truncation over x1, x2 in place: keeps the modes |k_d| ≤ N_d/3. The mask is
 # built on the host and copied to the array's backend.
 function exb_dealias!(a::AbstractArray{Float64})
