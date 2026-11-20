@@ -41,8 +41,24 @@ function _kinetic_time(sp::KineticSpecies, grid::Grid, dt, phase, at, fraction)
     return t
 end
 
-push_free!(sp::KineticSpecies, grid::Grid, dt::Real, half::Int; phase = 0, B = nothing) =
-    (advectX!(sp, grid, _kinetic_time(sp, grid, dt, phase, half == 1 ? 0.25 : 0.75, 0.5)); sp)
+# With walls (`Kinetic.xwall`): x1 by Lagrange with `Mirror()`, sub-stepped at the same phase (the straight-line shift
+# of the half step in pieces of at most one cell, the reach of the mirror halo), then the other x axes as before.
+function push_free!(sp::KineticSpecies, grid::Grid, dt::Real, half::Int; phase = 0, B = nothing)
+    at = half == 1 ? 0.25 : 0.75
+    t = _kinetic_time(sp, grid, dt, phase, at, 0.5)
+    xw = getfield(sp, :model).xwall
+    xw === nothing && (advectX!(sp, grid, t); return sp)
+    vmax = maximum(ax -> maximum(abs, ax), grid.vaxes)
+    nsub = max(1, ceil(Int, sqrt(2) * vmax * thermal_velocity(sp) * dt * 0.5 / grid.delta[1]))
+    t1 = _kinetic_time(sp, grid, dt, phase, at, 0.5 / nsub)
+    for _ in 1:nsub
+        advectX!(sp, grid, t1, 1; method = xw, boundary = Mirror())
+    end
+    for d in 2:length(grid.xaxes)
+        advectX!(sp, grid, t, d)
+    end
+    return sp
+end
 
 push_field!(sp::KineticSpecies, E::VectorField, grid::Grid, dt::Real; phase = 0) =
     (advectV!(sp, grid, _kinetic_time(sp, grid, dt, phase, 0.5, 1.0), E); sp)

@@ -13,9 +13,16 @@ struct Species{PDT<:AbstractFloat,M<:AbstractModel}
     model::M
 end
 
-# Full-orbit kinetic model (gyration in the rotating frame of the advectors).
-struct Kinetic{DG<:DistributionGrid} <: DistributionModel
+# Full-orbit kinetic model (gyration in the rotating frame of the advectors). `xwall`: nothing (periodic x), or the
+# Lagrange method of the x1 advection with `Mirror()` walls on the first and last x1 node (`Kinetic(dist; x_boundary =
+# :mirror, order)`, used by the charge-form steps).
+struct Kinetic{DG<:DistributionGrid,XW} <: DistributionModel
     dist::DG
+    xwall::XW
+end
+function Kinetic(dist::DistributionGrid; x_boundary::Symbol = :periodic, order::Int = 8)
+    x_boundary in (:periodic, :mirror) || throw(ArgumentError("x_boundary must be :periodic or :mirror"))
+    return Kinetic(dist, x_boundary === :mirror ? Lagrange(order) : nothing)
 end
 
 function Species(m::Real, q::Real, model::AbstractModel)
@@ -42,5 +49,5 @@ Base.propertynames(sp::Species) = (fieldnames(Species)..., propertynames(getfiel
 gyro_frequency(s::Species, grid::Grid) = abs(s.q) / s.m * grid.b0
 
 import PlasmaCore: backend_copy
-backend_copy(model::Kinetic) = Kinetic(backend_copy(model.dist))
+backend_copy(model::Kinetic) = Kinetic(backend_copy(model.dist), model.xwall)
 backend_copy(sp::Species) = Species(sp.m, sp.q, backend_copy(getfield(sp, :model)))

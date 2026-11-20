@@ -258,7 +258,7 @@ function _es_operators(species, grid, solver::ESChargeForm, g::_ESGeometry, dt, 
         c = dt^2 / 2 * sp.q^2 / sp.m
         ex = !(is_drift(sp) && solver.implicit_drift) ? nothing :
              _exb_dealiased(sp) ? Mxe * _es_diag(De * (Mxe * n)) * Mxo : _es_diag(De * n)
-        (sp = sp, c = c, DnD = is_drift(sp) ? nothing : De * (n .* D), N = _es_diag(n), ex = ex,
+        (sp = sp, c = c, DnD = is_drift(sp) ? nothing : (g.wall ? D : De) * (n .* D), N = _es_diag(n), ex = ex,
          dealiased = _exb_dealiased(sp))
     end
     DnDd = De * (ns[d] .* D)
@@ -451,8 +451,10 @@ function _es_deriv(a, g::_ESGeometry, d, s = -1)
     return _es_ifft(im .* g.kk[d-1] .* _es_fft(a, g), g)
 end
 
-_es_perp(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s);
-    ∂(n .* ∂(φ, 1, -1), 1, 1) .+ ∂(n .* ∂(φ, 2, -1), 2, 1))
+# `sf`: x1-parity taken for the flux n ∂xφ: 1 (even, the polarisation of the drift species), −1 (zero on the walls:
+# the response of magnetised species, which `Mirror()` reflects).
+_es_perp(n, φ, g::_ESGeometry, sf = 1) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s);
+    ∂(n .* ∂(φ, 1, -1), 1, sf) .+ ∂(n .* ∂(φ, 2, -1), 2, 1))
 _es_par(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s); ∂(n .* ∂(φ, 3, -1), 3, 1))
 _es_exb(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s);
     ∂(n, 1, 1) .* ∂(φ, 2, -1) .- ∂(n, 2, 1) .* ∂(φ, 1, -1))
@@ -482,7 +484,7 @@ function _es_full_operators(species, grid, solver::ESChargeForm, g::_ESGeometry,
                     _es_dealias(_es_exb(_es_dealias(n, g, 1), _es_dealias(φ, g, -1), g), g, 1) : _es_exb(n, φ, g)))
                 y .+= stream(yd, Gs)
             else
-                y .+= c .* (_es_par(n, φ, g) .+ _es_perp(n, φ, g))
+                y .+= c .* (_es_par(n, φ, g) .+ _es_perp(n, φ, g, -1))
             end
         end
         return y
