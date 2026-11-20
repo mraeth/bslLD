@@ -1,6 +1,6 @@
 # Walls along x1: ESChargeForm(x_boundary = :dirichlet) and FullDK(x_boundary = :mirror) on the Mirror() grid (walls on
 # the first and last node), φ = 0 on the walls, quasineutrality on the interior nodes.
-using LinearAlgebra: norm
+using LinearAlgebra: norm, qr, Diagonal
 
 function walls_setup(; N1 = 17, Ny = 8, L = 100.0)
     grid = bslLD.Grid([0.0, 0.0, -1.0], [N1 * L / (N1 - 1), 100.0, 1.0], [N1, Ny, 2], 2, 1.0, 3)
@@ -75,6 +75,20 @@ end
         @test norm(md.dist.data .- f0) / norm(f0) > 1e-3
         @test maximum(abs, ef[N+1:end, :, :] .- ef[N-1:-1:2, :, :]) / maximum(abs, ef) < 1e-13
         @test abs(mass(md.dist.data) - m0) / m0 < 1e-13
+    end
+
+    @testset "Anderson acceleration of a slow linear fixed-point map" begin
+        # G(x) = Bx + c with three slow modes (0.95, 0.9, −0.9) over fast ones (|λ| ≤ 0.1), as the wall modes of the
+        # corrections: plain iteration stalls at the slow modes, Anderson(3) removes them.
+        n = 40
+        Q = Matrix(qr([sin(1.3i + 0.7j^1.5) for i in 1:n, j in 1:n]).Q)
+        Bm = Q * Diagonal(vcat([0.95, 0.9, -0.9], range(-0.1, 0.1, length = n - 3))) * Q'
+        c = cos.(0.37 .* (1:n))
+        xs = (Diagonal(ones(n)) - Bm) \ c
+        err(m) = (acc = bslLD._Anderson(m, zeros(n)); x = zeros(n);
+                  for _ in 1:25; x = bslLD._anderson!(acc, x, Bm * x .+ c); end; norm(x .- xs) / norm(xs))
+        @test err(0) > 1e-2              # 0.11
+        @test err(3) < 1e-6              # 8.5e-9
     end
 
     @testset "stage equation exact with walls (variable coefficients, Euler E×B)" begin

@@ -41,7 +41,7 @@
 
 """
     ESChargeForm(; w = 1, implicit_drift = true, background = nothing, variable_coefficients = false,
-                 krylov = true, rtol = 1e-10, parallel_streaming = true, x_boundary = :periodic)
+                 krylov = true, rtol = 1e-10, parallel_streaming = true, x_boundary = :periodic, anderson = 0)
 
 Electrostatic quasineutral charge-form solve with the polarisation density (weight `w`) of the single
 drift species and an x1-dependent profile. `implicit_drift` puts the E×B response of the drift
@@ -52,7 +52,8 @@ added to the species charge, e.g. immobile ions with only a drift species in `sp
 correction with the averaged operator per correction instead); otherwise their average over the Fourier axes.
 `parallel_streaming`: the drift species' response in the stage operator includes its parallel streaming over
 the second half step (the factor G(k∥)). `x_boundary`: `:periodic`, or `:dirichlet` for walls on the first and last
-x1 node (the `Mirror()` grid, Δx = L/(N−1)) with φ = 0 there. See [`step_es_charge_form!`](@ref).
+x1 node (the `Mirror()` grid, Δx = L/(N−1)) with φ = 0 there. `anderson`: depth m of the Anderson acceleration of the
+corrections (0: plain corrections). See [`step_es_charge_form!`](@ref).
 """
 Base.@kwdef struct ESChargeForm{BG}
     w::Float64 = 1.0
@@ -63,6 +64,7 @@ Base.@kwdef struct ESChargeForm{BG}
     rtol::Float64 = 1e-10
     parallel_streaming::Bool = true
     x_boundary::Symbol = :periodic
+    anderson::Int = 0
 end
 
 _to_host(a::Array) = a
@@ -574,13 +576,44 @@ function _es_trial_rho(species, saved, φ, E, grid, dt, phase)
     return ρ
 end
 
+# Anderson acceleration of the corrections φ ↦ G(φ) (one trial push and model solve each). With the residuals
+# r = G(φ) − φ of the last m + 1 corrections, the next iterate is G(φ_k) − Σ_j γ_j ΔG_j with γ minimising
+# ‖r_k − Σ_j γ_j ΔR_j‖ (ΔR, ΔG: differences of successive r and G). The vectors stay on the backend; the m × m normal
+# equations are solved on the host. m = 0 returns G(φ_k).
+struct _Anderson{V}
+    m::Int
+    G::Vector{V}
+    R::Vector{V}
+end
+_Anderson(m, like) = _Anderson(m, typeof(like)[], typeof(like)[])
+
+function _anderson!(acc::_Anderson, φ, Gφ)
+    acc.m == 0 && return Gφ
+    push!(acc.G, Gφ)
+    push!(acc.R, Gφ .- φ)
+    length(acc.G) > acc.m + 1 && (popfirst!(acc.G); popfirst!(acc.R))
+    k = length(acc.G)
+    k == 1 && return Gφ
+    dR = [acc.R[j+1] .- acc.R[j] for j in 1:k-1]
+    dG = [acc.G[j+1] .- acc.G[j] for j in 1:k-1]
+    H = [sum(dR[i] .* dR[j]) for i in 1:k-1, j in 1:k-1]
+    b = [sum(dR[i] .* acc.R[k]) for i in 1:k-1]
+    γ = (H + 1e-14 * maximum(abs, H) * _es_diag(ones(k - 1))) \ b
+    out = copy(Gφ)
+    for j in 1:k-1
+        out .-= γ[j] .* dG[j]
+    end
+    return out
+end
+
 """
     step_es_charge_form!(species, sol, grid, solver::ESChargeForm, dt; phase = 0, damping_rate = 0,
                          corrections = 2, iters = nothing)
 
 One electrostatic X–C–X step: X(dt/2); stage potential φ^m from quasineutrality at t^{n+1} with
 φ^m = θφ^{n+1} + (1 − θ)φ^n, θ = 1/2 + κ dt (`damping_rate` κ), from `corrections` trial pushes (the
-first at φ^p = φ^n) continued by the model operator; C (kick, E×B; for FullDK half kick, E×B, half kick) with
+first at φ^p = φ^n) continued by the model operator, optionally Anderson-accelerated (`solver.anderson`); C (kick,
+E×B; for FullDK half kick, E×B, half kick) with
 φ^m; X(dt/2); then φ^{n+1}
 from quasineutrality of the new state (`sol.phi`, `sol.E`). `sol.phi` must hold φ^n on entry
 ([`es_quasineutral_phi!`](@ref) before the first step). With `solver.variable_coefficients`, the GMRES
@@ -599,6 +632,7 @@ function step_es_charge_form!(species, sol::FieldSolution, grid::Grid, solver::E
     φn = copy(sol.phi.data)
     φm = copy(φn)
     ρfix = _fixed_charge(solver, g)
+    acc = _Anderson(solver.anderson, φm)
     if solver.variable_coefficients
         A, P = _es_full_operators(species, grid, solver, g, dt, phase)
         Pφn = P(φn)
@@ -607,11 +641,12 @@ function step_es_charge_form!(species, sol::FieldSolution, grid::Grid, solver::E
             M(φ) = A(φ) .+ P(φ) ./ θ
             rhs = -ρ .+ A(φm) .+ (1 - θ) / θ .* Pφn
             if solver.krylov
-                φm, it, _ = _es_krylov(M, rhs, W, g; solver.rtol)
+                Gφ, it, _ = _es_krylov(M, rhs, W, g; solver.rtol)
                 iters === nothing || push!(iters, it)
             else
-                φm = _es_project(φm, g) .+ _es_precondition(rhs .- M(φm), W, g)
+                Gφ = _es_project(φm, g) .+ _es_precondition(rhs .- M(φm), W, g)
             end
+            φm = _anderson!(acc, φm, Gφ)
         end
     else
         Ad, Pd = _on(g.Dd, ops.A), _on(g.Dd, ops.P)
@@ -619,7 +654,7 @@ function step_es_charge_form!(species, sol::FieldSolution, grid::Grid, solver::E
         for _ in 1:corrections
             ρ = _es_trial_rho(species, saved, φm, es_field(φm, grid, g), grid, dt, phase) .+ ρfix
             rhs = -_es_fft(ρ, g) .+ _es_batched_apply(Ad, _es_fft(φm, g)) .+ (1 - θ) / θ .* Pφn
-            φm = _es_ifft(_es_batched_apply(W, rhs), g)
+            φm = _anderson!(acc, φm, _es_ifft(_es_batched_apply(W, rhs), g))
         end
     end
     E = es_field(φm, grid, g)
