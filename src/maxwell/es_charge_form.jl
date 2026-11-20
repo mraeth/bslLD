@@ -25,7 +25,8 @@
 # one dense x1-operator per (k2, k3). After the step φ^{n+1} solves quasineutrality of the new state.
 # `background` is a fixed charge density added to Σ q n (immobile ions: no species, no response in A).
 # For a drift species with a 2/3-dealiased E×B push the E×B term of A is the linearisation of that push,
-# q dt P[(b̂×∇Pn̄)·∇Pφ]/b0.
+# q dt P[(b̂×∇Pn̄)·∇Pφ]/b0; with the 3/2-padded push the variable-coefficient E×B term is the padded product (the n̄
+# operators keep the collocation form).
 #
 # `variable_coefficients = true` (nonlinear runs) uses the predictor densities n(x1, x2, x3) instead of
 # n̄(x1) in A and P, with the full E×B term q dt (∂1n ∂2φ − ∂2n ∂1φ)/b0, and the full n_d in the
@@ -219,7 +220,7 @@ end
 
 # 2/3 mask along x1 as an N×N matrix (the x1 part of exb_dealias!).
 function _es_mask_x(N)
-    keep = abs.(fftfreq(N, N)) .<= N / 3
+    keep = abs.(fftfreq(N, N)) .< N / 3
     return real(ifft(keep .* fft(_es_diag(ones(N)), 1), 1))
 end
 
@@ -276,7 +277,7 @@ function _es_operators(species, grid, solver::ESChargeForm, g::_ESGeometry, dt, 
             if is_drift(p.sp)
                 G = _streaming_factor(p.sp, k3, dt, solver)
                 Am .+= G .* ((p.c * -k3^2) .* p.N)                         # G scales the rows (x1)
-                p.ex === nothing || (p.dealiased && abs(k2) * L2 / 2π > N2 / 3 + 1e-9) ||
+                p.ex === nothing || (p.dealiased && abs(k2) * L2 / 2π > N2 / 3 - 1e-9) ||
                     (Am .+= G .* ((p.sp.q * dt / grid.b0 * im * k2) .* p.ex))
             else
                 Am .+= p.c .* (p.DnD .- (k2^2 + k3^2) .* p.N)
@@ -462,6 +463,21 @@ _es_par(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s); ∂(
 _es_exb(n, φ, g::_ESGeometry) = (∂ = (a, d, s) -> _es_deriv(a, g, d, s);
     ∂(n, 1, 1) .* ∂(φ, 2, -1) .- ∂(n, 2, 1) .* ∂(φ, 1, -1))
 
+# The E×B product {n, φ} of the 3/2-padded push (exb_bracket_padded!) on spatial arrays, with walls on the even (n) and
+# odd (φ) extension. `k`: the wavenumbers (Nyquist zero) of x1 (extended with walls) and x2 on the backend.
+function _es_exb_pad(n, φ, g::_ESGeometry, k)
+    g.wall || return exb_bracket_padded!(similar(n), n, φ, k...)
+    ñ, φ̃ = _x1_extend(n, 1), _x1_extend(φ, -1)
+    return _x1_restrict(exb_bracket_padded!(similar(ñ), ñ, φ̃, k...), size(n, 1))
+end
+
+function _es_pad_k(g::_ESGeometry, grid::Grid)
+    N1, h = length(grid.xaxes[1]), grid.delta[1]
+    M, L = g.wall ? (2N1 - 2, (2N1 - 2) * h) : (N1, N1 * h)
+    kn(N, L) = (k = collect(2π .* fftfreq(N, N / L)); iseven(N) && (k[N÷2+1] = 0); k)
+    return (_on(g.Dd, kn(M, L)), _on(g.Dd, kn(length(grid.xaxes[2]), grid.max[2] - grid.min[2])))
+end
+
 # 2/3 truncation (exb_dealias!) of a copy of a spatial array of x1-parity s; with walls on its extension (1).
 _es_dealias(a, g::_ESGeometry, s) =
     g.wall ? _x1_restrict(exb_dealias!(_x1_extend(a, s)), size(a, 1)) : exb_dealias!(copy(a))
@@ -478,6 +494,7 @@ function _es_full_operators(species, grid, solver::ESChargeForm, g::_ESGeometry,
                   G -> reshape(G, size(G, 1), 1, :))                       # (x1, 1, k3)
     end
     stream(y, Gs) = Gs === nothing ? y : _es_ifft(Gs .* _es_fft(y, g), g)
+    kpad = any(_exb_padded, species) ? _es_pad_k(g, grid) : nothing
     function A(φ)
         y = zero(φ)
         for (sp, n, Gs) in zip(species, ns, G)
@@ -485,7 +502,8 @@ function _es_full_operators(species, grid, solver::ESChargeForm, g::_ESGeometry,
             if is_drift(sp)
                 yd = c .* _es_par(n, φ, g)
                 solver.implicit_drift && (yd .+= sp.q * dt / grid.b0 .* (_exb_dealiased(sp) ?
-                    _es_dealias(_es_exb(_es_dealias(n, g, 1), _es_dealias(φ, g, -1), g), g, 1) : _es_exb(n, φ, g)))
+                    _es_dealias(_es_exb(_es_dealias(n, g, 1), _es_dealias(φ, g, -1), g), g, 1) :
+                    _exb_padded(sp) ? _es_exb_pad(n, φ, g, kpad) : _es_exb(n, φ, g)))
                 y .+= stream(yd, Gs)
             else
                 y .+= c .* (_es_par(n, φ, g) .+ _es_perp(n, φ, g, -1))

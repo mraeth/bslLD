@@ -10,8 +10,9 @@
 # the parallel kick (`push_field!`, `advectV!`) and the E×B advection (`push_drift!`) of the spectral
 # bracket with φ frozen over the step: one Euler step (`exb = :euler`, `exb_euler!`), exact at linear
 # order about an x-dependent F but first order in the E×B nonlinearity, or classical RK4
-# (`exb = :rk4`, `exb_rk4!`; stable for k_max|u_E|Δt ≤ 2.8), optionally dealiased by the 2/3 Galerkin
-# truncation that keeps the bracket skew-symmetric (`dealias = true`, RK4 only). In the charge-form step the
+# (`exb = :rk4`, `exb_rk4!`; stable for k_max|u_E|Δt ≤ 2.8), optionally dealiased (RK4 only): by the 2/3 Galerkin
+# truncation that keeps the bracket skew-symmetric (`dealias = :truncate` or `true`), or by 3/2 padding, which keeps all
+# modes (`dealias = :pad`). In the charge-form step the
 # kick is applied in halves around the E×B push (`_push_stage!`), second order in their commutator.
 # A drift species: E×B density response and polarisation density in the field solve.
 # Walls along x1 (`x_boundary = :mirror`, the `Mirror()` grid with walls on the first and last node): the E×B push
@@ -25,7 +26,7 @@ struct FullDK{DG<:DistributionGrid,G<:Grid,MT,EX} <: DistributionModel
     T_e::Vector{Float64}  # electron temperature along x1 (the Maxwellian of the initial state and of G(k∥))
     method::MT    # Fourier() or Lagrange(order) for the parallel streaming
     exb::Symbol   # :euler or :rk4 E×B push
-    dealias::Bool # 2/3 truncation of the :rk4 bracket
+    dealias::Symbol # :none, :truncate (2/3) or :pad (3/2 padding) of the :rk4 bracket
     ext::EX       # nothing (periodic x1), or (grid, F buffer) of the extended x1 grid with walls
 end
 
@@ -37,14 +38,17 @@ Full-f drift-kinetic model on the x axes of `field_grid` with a v∥ axis of `Nv
 nodes) on ±`vmax` √max T_e, initialised as n(x) F_M(v∥; T_e(x1)) with the density `n` (an array of the spatial
 shape) and a Maxwellian normalised on the grid at every x1. `T_e`: a number, a vector along x1, or a function of x1. Species: `Species(FullDK(grid, n; T_e); q = -1, m = μ)`.
 The E×B advection needs b̂ = x̂3 (`field_grid.Bdir == 3`); `exb` is its time integrator over the
-step, `:euler` (one stage) or `:rk4`; `dealias` applies the 2/3 Galerkin truncation to the `:rk4` bracket.
+step, `:euler` (one stage) or `:rk4`; `dealias` (`:rk4` only): `:truncate` (or `true`) the 2/3 Galerkin truncation,
+`:pad` the 3/2-padded bracket, `:none` (or `false`).
 `x_boundary = :mirror`: walls on the first and last x1 node (pair with `ESChargeForm(x_boundary = :dirichlet)`).
 """
 function FullDK(field_grid::CartGrid, n::AbstractArray; T_e, Nv::Int = 64, vmax::Real = 6,
-                method = Fourier(), exb::Symbol = :euler, dealias::Bool = false, x_boundary::Symbol = :periodic)
+                method = Fourier(), exb::Symbol = :euler, dealias::Union{Bool,Symbol} = false,
+                x_boundary::Symbol = :periodic)
     exb in (:euler, :rk4) || throw(ArgumentError("exb must be :euler or :rk4, got :$exb"))
     x_boundary in (:periodic, :mirror) || throw(ArgumentError("x_boundary must be :periodic or :mirror"))
-    dealias && exb !== :rk4 && throw(ArgumentError("dealias needs exb = :rk4"))
+    dmode = _exb_mode(dealias)
+    dmode !== :none && exb !== :rk4 && throw(ArgumentError("dealias needs exb = :rk4"))
     x1 = collect(field_grid.xaxes[1])
     Te = T_e isa Real ? fill(Float64(T_e), length(x1)) : T_e isa AbstractVector ? Vector{Float64}(T_e) :
          Float64.(T_e.(x1))
@@ -73,7 +77,7 @@ function FullDK(field_grid::CartGrid, n::AbstractArray; T_e, Nv::Int = 64, vmax:
         esf = ScalarField(similar(sf.data, Float64, (2N1 - 2, size(sf.data)[2:end]...)))
         ext = (egrid, DistributionGridImpl{nx,1,Cart,typeof(esf)}(esf))
     end
-    return FullDK(dist, grid, Te, method, exb, dealias, ext)
+    return FullDK(dist, grid, Te, method, exb, dmode, ext)
 end
 
 const FullDKSpecies = Species{<:AbstractFloat,<:FullDK}
@@ -134,6 +138,8 @@ _end_phase(::FullDKSpecies, grid, dt, phase) = phase
 
 response_class(::FullDK) = Drift()
 
-# Whether the E×B push of a drift species is 2/3-dealiased (the stage operator then matches it).
+# Whether the E×B push of a drift species is 2/3-dealiased or 3/2-padded (the stage operator then matches it).
 _exb_dealiased(sp) = false
-_exb_dealiased(sp::FullDKSpecies) = getfield(sp, :model).dealias
+_exb_dealiased(sp::FullDKSpecies) = getfield(sp, :model).dealias === :truncate
+_exb_padded(sp) = false
+_exb_padded(sp::FullDKSpecies) = getfield(sp, :model).dealias === :pad

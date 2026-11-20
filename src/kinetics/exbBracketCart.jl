@@ -198,35 +198,104 @@ end
 
 _x1_restrict(e::AbstractArray, N::Int) = copy(selectdim(e, 1, 1:N))
 
-# 2/3-rule Galerkin truncation over x1, x2 in place: keeps the modes |k_d| ≤ N_d/3. The mask is
-# built on the host and copied to the array's backend.
+# 2/3-rule Galerkin truncation over x1, x2 in place: keeps the modes |k_d| < N_d/3 (strictly: with N_d divisible by 3,
+# |k_d| = N_d/3 would receive the alias of 2N_d/3). The mask is built on the host and copied to the array's backend.
 function exb_dealias!(a::AbstractArray{Float64})
     N1, N2 = size(a, 1), size(a, 2)
-    keep(N) = abs.(fftfreq(N, N)) .<= N / 3
+    keep(N) = abs.(fftfreq(N, N)) .< N / 3
     mask = copyto!(similar(a, N1, N2), Float64.(keep(N1) .* keep(N2)'))
     a .= real(ifft(fft(a, 1:2) .* reshape(mask, N1, N2, ntuple(_ -> 1, ndims(a) - 2)...), 1:2))
     return a
 end
 
-# Classical RK4 over dt for ∂f/∂t = {f, φ/B_0} with φ frozen; overwrites f. `dealias`: each stage is
-# P{Pf, Pφ} with P the 2/3 truncation (exb_dealias!), skew-symmetric to round-off (Σ f P{Pf, Pφ} = 0);
-# the modes of f above 2/3 are left unchanged.
+# --- 3/2-padded bracket ----------------------------------------------------------------------------------
+# {f, g} with all retained modes of f and g and no aliasing: the spectral derivatives (Nyquist wavenumber zero) are
+# zero-padded to M_d = ⌈3N_d/2⌉ along x1, x2, the products formed there, and the result truncated back to the modes
+# |k_d| < N_d/2 (Nyquist of the result zero). Exact for band-limited f, g (the product of two N-mode fields has at most
+# 2N − 1 modes, which M_d = 3N_d/2 holds without folding back onto the kept ones).
+
+# Index blocks of the kept modes along an axis of N points (k = 0 … p−1 and −q … −1, Nyquist left out) and their
+# places on an axis of M ≥ N points.
+function _pad_blocks(N, M)
+    p = isodd(N) ? (N + 1) ÷ 2 : N ÷ 2
+    q = isodd(N) ? (N - 1) ÷ 2 : N ÷ 2 - 1
+    return ((1:p, 1:p), (N-q+1:N, M-q+1:M))
+end
+
+function _pad12(â, M1, M2)
+    N1, N2 = size(â, 1), size(â, 2)
+    rest = ntuple(_ -> Colon(), ndims(â) - 2)
+    Z = fill!(similar(â, (M1, M2, size(â)[3:end]...)), 0)
+    for (s1, d1) in _pad_blocks(N1, M1), (s2, d2) in _pad_blocks(N2, M2)
+        (isempty(s1) || isempty(s2)) && continue
+        @views Z[d1, d2, rest...] .= â[s1, s2, rest...]
+    end
+    return Z
+end
+
+function _trunc12(Ẑ, N1, N2)
+    M1, M2 = size(Ẑ, 1), size(Ẑ, 2)
+    rest = ntuple(_ -> Colon(), ndims(Ẑ) - 2)
+    a = fill!(similar(Ẑ, (N1, N2, size(Ẑ)[3:end]...)), 0)
+    for (s1, d1) in _pad_blocks(N1, M1), (s2, d2) in _pad_blocks(N2, M2)
+        (isempty(s1) || isempty(s2)) && continue
+        @views a[s1, s2, rest...] .= Ẑ[d1, d2, rest...]
+    end
+    return a
+end
+
+"""
+    exb_bracket_padded!(df, f, g, k1, k2)
+
+df = {f, g} = ∂1f ∂2g − ∂1g ∂2f on the arrays `f` (x1, x2 leading) and `g` (x-shaped, broadcast against f), with the
+wavenumbers `k1`, `k2` (Nyquist zero) of the first two axes, evaluated with 3/2 padding (no aliasing, all modes kept).
+"""
+function exb_bracket_padded!(df::AbstractArray, f::AbstractArray, g::AbstractArray, k1, k2)
+    N1, N2 = size(f, 1), size(f, 2)
+    M1, M2 = cld(3N1, 2), cld(3N2, 2)
+    sc = (M1 * M2) / (N1 * N2)
+    K1, K2 = reshape(k1, :, 1), reshape(k2, 1, :)
+    fh, gh = fft(complex(f), 1:2), fft(complex(g), 1:2)
+    up(â) = real(ifft(_pad12(â, M1, M2), 1:2)) .* sc
+    h = up(im .* K1 .* fh) .* up(im .* K2 .* gh)
+    h .-= up(im .* K1 .* gh) .* up(im .* K2 .* fh)
+    df .= real(ifft(_trunc12(fft(complex(h), 1:2), N1, N2) ./ sc, 1:2))
+    return df
+end
+
+_exb_mode(d::Bool) = d ? :truncate : :none
+_exb_mode(d::Symbol) = (d in (:none, :truncate, :pad) || throw(ArgumentError("dealias must be :none, :truncate or :pad, got :$d")); d)
+
+# Classical RK4 over dt for ∂f/∂t = {f, φ/B_0} with φ frozen; overwrites f. `dealias`:
+#   :none (false)     the collocation bracket;
+#   :truncate (true)  each stage is P{Pf, Pφ} with P the 2/3 truncation (exb_dealias!), skew-symmetric to round-off
+#                     (Σ f P{Pf, Pφ} = 0); the modes of f above 2/3 are left unchanged;
+#   :pad              the 3/2-padded bracket (exb_bracket_padded!): no aliasing, all modes of f and φ kept.
 function exb_rk4!(
     f::DistributionGrid{Float64,NX,NV,NXNV,Cart},
     phi::ScalarField,
     grid::CartGrid,
     dt::Real;
-    dealias::Bool = false,
+    dealias::Union{Bool,Symbol} = false,
 ) where {NX,NV,NXNV}
-    plan = _get_exb_plan(f, grid)
+    mode = _exb_mode(dealias)
     f0 = copy(f.data)
     k = _similar_distribution(f)
-    if dealias
+    if mode === :pad
+        NX >= 2 || throw(ArgumentError("the ExB bracket requires at least two spatial dimensions, got $NX"))
+        grid.Bdir == 3 || throw(ArgumentError("the ExB bracket assumes B along x3, got grid.Bdir = $(grid.Bdir)"))
+        grid.b0 == 0.0 && error("ExB bracket requires nonzero b0")
+        g = phi.data ./ grid.b0
+        k1, k2 = spectral_wavenumbers(f.data, grid, 1), spectral_wavenumbers(f.data, grid, 2)
+        rhs! = (k, f) -> exb_bracket_padded!(k.data, f.data, g, k1, k2)
+    elseif mode === :truncate
+        plan = _get_exb_plan(f, grid)
         phi = ScalarField(exb_dealias!(copy(phi.data)))
         fP = _similar_distribution(f)
         rhs! = (k, f) -> (fP.data .= f.data; exb_dealias!(fP.data);
                           exb_bracket!(k, fP, phi, grid, plan); exb_dealias!(k.data))
     else
+        plan = _get_exb_plan(f, grid)
         rhs! = (k, f) -> exb_bracket!(k, f, phi, grid, plan)
     end
     rhs!(k, f)

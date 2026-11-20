@@ -63,7 +63,7 @@ function _backend_cases()
 
     # E×B RK4 push with and without 2/3 dealiasing; frozen φ.
     grid, φa, n0 = _backend_dk_setup()
-    for dealias in (false, true)
+    for dealias in (false, true, :pad)
         el = bslLD.Species(bslLD.FullDK(grid, n0; T_e = 1.0, Nv = 16, exb = :rk4, dealias); q = -1.0, m = μ)
         f0 = _host(F(el))
         bslLD.push_drift!(el, bslLD.ScalarField(φa), grid, 0.5)
@@ -104,7 +104,7 @@ function _backend_cases()
     xw, yw, zw = collect.(gw.xaxes)
     nw = [exp(0.1 * cos(π * xw[i] / 100)) * (1 + 0.1 * sin(2π * zw[l] / 100)) for i in 1:N1, j in 1:8, l in 1:4]
     nbw = nw .* [1 + 1e-4 * sin(2π * xw[i] / 100) * cos(2π * (yw[j] + zw[l]) / 100) for i in 1:N1, j in 1:8, l in 1:4]
-    el = bslLD.Species(bslLD.FullDK(gw, nw; T_e = 1.0, Nv = 16, exb = :rk4, dealias = true, x_boundary = :mirror);
+    el = bslLD.Species(bslLD.FullDK(gw, nw; T_e = 1.0, Nv = 16, exb = :rk4, dealias = :pad, x_boundary = :mirror);
                        q = -1.0, m = μ)
     zw3() = bslLD.VectorField([bslLD.ScalarField(zeros(size(nw))) for _ in 1:3])
     sol = bslLD.FieldSolution(zw3(), zw3())
